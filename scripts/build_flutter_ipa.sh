@@ -493,11 +493,22 @@ cd "$FLUTTER_PROJECT_DIR"
 SYMBOLS_DIR="$FLUTTER_PROJECT_DIR/build/symbols"
 mkdir -p "$SYMBOLS_DIR"
 
+# AB 包工厂 / 上架：B 面 String.fromEnvironment('ENVIRONMENT') 固定为 release（与 dq 等模板一致）
+# 可选：AB_BUILD_APP_CHANNEL 传入后同时设置 APP_CHANNEL（与 xxChannel 一致）
+EXTRA_DEFS=(--dart-define=ENVIRONMENT=release)
+if [[ -n "${AB_BUILD_APP_CHANNEL:-}" ]]; then
+  EXTRA_DEFS+=(--dart-define=APP_CHANNEL="${AB_BUILD_APP_CHANNEL}")
+  echo ">>> dart-define: ENVIRONMENT=release APP_CHANNEL=${AB_BUILD_APP_CHANNEL}"
+else
+  echo ">>> dart-define: ENVIRONMENT=release（未设置 AB_BUILD_APP_CHANNEL 则沿用源码 defaultValue）"
+fi
+
 fvm flutter build ipa \
   --$FLUTTER_BUILD_MODE \
   --obfuscate \
   --split-debug-info="$SYMBOLS_DIR" \
-  --export-options-plist="$EXPORT_PLIST"
+  --export-options-plist="$EXPORT_PLIST" \
+  "${EXTRA_DEFS[@]}"
 
 echo ">>> 调试符号已保存到: $SYMBOLS_DIR"
 

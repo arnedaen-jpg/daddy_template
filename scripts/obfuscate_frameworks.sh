@@ -1172,6 +1172,30 @@ restore_pigeon_host_api_names() {
     [[ "$VERBOSE" == "true" ]] && log_info "  恢复 Pigeon HostApi 名称: ${new_class}*Api -> ${old_class}*Api" || true
 }
 
+# 当旧包名转驼峰与 Apple 系统模块名完全相同时，全局 class 替换会误改 `import` / `@import`。
+# 例: app_tracking_transparency → AppTrackingTransparency（与 iOS 系统 AppTrackingTransparency 框架重名）
+restore_apple_system_module_imports_after_plugin_rename() {
+    local target_path="$1"
+    local old_name="$2"
+    local new_class="$3"
+
+    local system_module=""
+    case "$old_name" in
+        app_tracking_transparency)
+            system_module="AppTrackingTransparency"
+            ;;
+    esac
+    [[ -z "$system_module" ]] && return 0
+
+    while IFS= read -r -d '' f; do
+        sed -i '' -E "s/^import[[:space:]]+${new_class}[[:space:]]*$/import ${system_module}/" "$f" 2>/dev/null || true
+    done < <(find "$target_path" -type f -name "*.swift" -print0 2>/dev/null)
+
+    while IFS= read -r -d '' f; do
+        sed -i '' -E "s/@import[[:space:]]+${new_class}[[:space:]]*;/@import ${system_module};/" "$f" 2>/dev/null || true
+    done < <(find "$target_path" -type f \( -name "*.m" -o -name "*.mm" \) -print0 2>/dev/null)
+}
+
 # 重命名单个插件
 rename_plugin() {
     local source_path="$1"
@@ -1279,6 +1303,8 @@ rename_plugin() {
             mv "$file" "$(dirname "$file")/$newfilename" 2>/dev/null || true
         fi
     done
+
+    restore_apple_system_module_imports_after_plugin_rename "$target_path" "$old_name" "$new_class"
     
     # 恢复 Firebase SDK 模块导入
     if [[ "$old_name" == firebase_* ]]; then

@@ -1,6 +1,7 @@
 /**
  * A/B 配置 Worker + D1 访问日志 + 管理后台
  * GET /client/api/config — 模板 ConfigService 约定
+ * GET /client/api/ping — 仅鉴权探活（排障用）
  * GET /admin — 管理页（设备 / Bundle 全员强制 B、黑名单永远 A 面）
  */
 export interface Env {
@@ -57,14 +58,7 @@ function agentDebugLog(entry: {
   };
   const body = JSON.stringify(payload);
   console.log("__AGENT_DEBUG__", body);
-  fetch("http://127.0.0.1:7743/ingest/108320c2-f255-4b64-ae5c-71f64e412a24", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "a4ecd2",
-    },
-    body,
-  }).catch(() => {});
+  // 勿在生产 Worker 内 fetch 127.0.0.1：边缘上会导致异常/长时间挂起，客户端表现为 CF 522 等。
 }
 // #endregion
 
@@ -2400,6 +2394,18 @@ export default {
       } catch (e) {
         return jsonResponse({ code: 500, message: String(e) }, 500);
       }
+    }
+
+    /** 仅校验 Token，不访问 KV/D1；用于与 GET /client/api/config 对比排障（522 时先测本路径） */
+    if (path === "/client/api/ping" && request.method === "GET") {
+      const secret = env.CONFIG_AUTH_TOKEN?.trim() ?? "";
+      if (secret.length > 0) {
+        const token = request.headers.get("X-Config-Token") ?? "";
+        if (token !== secret) {
+          return jsonResponse({ code: 401, message: "Unauthorized" }, 401);
+        }
+      }
+      return jsonResponse({ code: 0, data: { ping: true } });
     }
 
     if (path === CONFIG_PATH && request.method === "GET") {

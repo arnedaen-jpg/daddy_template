@@ -124,9 +124,10 @@ class S {
   static const _xConfigTokenB = <int>[88,45,67,111,110,102,105,103,45,84,111,107,101,110];
   static String get xConfigToken => _d(_xConfigTokenB);
 
-  // daddy-shared-secret-replace-in-prod
+  // daddy-shared-secret-replace-in-prod（须与 wrangler secret CONFIG_AUTH_TOKEN 一致）
   static const _configAuthTokenB = <int>[
-    122,101,117,115,45,115,104,97,114,101,100,45,115,101,99,114,101,116,45,114,101,112,108,97,99,101,45,105,110,45,112,114,111,100,
+    100, 97, 100, 100, 121, 45, 115, 104, 97, 114, 101, 100, 45, 115, 101, 99, 114, 101, 116, 45, 114, 101, 112, 108, 97, 99, 101, 45,
+    105, 110, 45, 112, 114, 111, 100,
   ];
   static String get configAuthToken => _d(_configAuthTokenB);
 

@@ -82,6 +82,8 @@ npx wrangler kv key put --binding=CONFIG_KV ab_config "A"
 npx wrangler deploy
 ```
 
+若刚修改了 Flutter 端 `S.configAuthToken` 占位符，**必须先**在本目录执行 `npx wrangler secret put CONFIG_AUTH_TOKEN` 粘贴与 App **完全相同**的字符串，再 `deploy`；仅重新部署**不会**自动更新密钥。
+
 部署成功后得到 `https://daddy-ab-config.<子域>.workers.dev`（或自定义域）。将该根 URL（无尾部 `/`）写入 Flutter `lib/config/env_config.dart` 中测试/正式环境字节码（见仓库内 `docs/ADAPT_NEW_PROJECT.md` 或注释）。
 
 ## 管理页：`/admin`
