@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>打开 A/B 配置管理（备用）</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 0 1rem; }
+    p { color: #444; line-height: 1.5; }
+    button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+    .muted { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>A/B 配置管理（备用入口）</h1>
+  <p>
+    <strong>推荐</strong>：使用静态托管页，见仓库
+    <code>supabase/static-admin/README.md</code>（生成 <code>index.html</code> 后部署到 Pages / Storage 等）。
+  </p>
+  <p>
+    若尚未部署静态页，可临时用 <strong>POST</strong> 打开 Function 返回的 HTML（部分环境下
+    GET 会被当成纯文本）；把下面表单里的地址改成你的 Function 根路径 + <code>/admin</code>。
+  </p>
+  <p class="muted">
+    例：<code>https://&lt;ref&gt;.supabase.co/functions/v1/daddy-ab-config/admin</code>
+  </p>
+  <form method="post" action="https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config/admin" target="_self">
+    <button type="submit">POST 打开管理后台</button>
+  </form>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "export-static-admin": "deno run -A scripts/export-static-admin.ts"
+  }
+}

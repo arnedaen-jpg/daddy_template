@@ -1,0 +1,55 @@
+name: Deploy A/B static admin to GitHub Pages
+
+on:
+  push:
+    branches: [main, master, dev]
+    paths:
+      - "supabase/functions/daddy-ab-config/admin_html.ts"
+      - "supabase/functions/daddy-ab-config/compose_admin_html.ts"
+      - "scripts/export-static-admin.ts"
+      - "deno.json"
+      - ".github/workflows/deploy-static-admin-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Build supabase/static-admin/index.html
+        env:
+          SUPABASE_FUNCTION_BASE: ${{ vars.SUPABASE_FUNCTION_BASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_FUNCTION_BASE:-}" ]; then
+            echo "::error::缺少仓库变量 SUPABASE_FUNCTION_BASE。"
+            echo "在 GitHub：Settings → Secrets and variables → Actions → Variables → New repository variable"
+            echo "Name: SUPABASE_FUNCTION_BASE"
+            echo "Value 示例: https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config"
+            exit 1
+          fi
+          deno run -A scripts/export-static-admin.ts "$SUPABASE_FUNCTION_BASE"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: supabase/static-admin
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

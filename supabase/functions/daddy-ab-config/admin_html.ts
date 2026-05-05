@@ -1,0 +1,860 @@
+export const ADMIN_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script>window.__DADDY_AB_CONFIG_API_BASE__ = "__API_PUBLIC_BASE__";</script>
+  <title>A/B 配置管理</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 20px auto; padding: 0 14px; }
+    h1 { font-size: 1.2rem; }
+    h2 { font-size: 1rem; margin-top: 22px; }
+    label { font-weight: 600; }
+    input[type="password"] { width: 100%; max-width: 360px; padding: 6px 8px; }
+    button { padding: 6px 12px; margin: 2px; cursor: pointer; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; word-break: break-all; }
+    th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #eee; }
+    /* 请求记录表：IP 列收窄单行省略；Bundle 整行不换行 */
+    #tblReq { word-break: normal; }
+    #tblReq th:nth-child(3), #tblReq td:nth-child(3) {
+      max-width: 7.5rem;
+      width: 7.5rem;
+      font-size: 11px;
+    }
+    #tblReq td:nth-child(3) .req-cell-main {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #tblReq th:nth-child(5), #tblReq td:nth-child(5) { white-space: nowrap; }
+    #tblReq td:nth-child(5) .req-cell-main { white-space: nowrap; }
+    #tblReq th:nth-child(6), #tblReq td:nth-child(6) {
+      max-width: 10rem;
+      width: 10rem;
+      font-size: 11px;
+      vertical-align: top;
+    }
+    #tblReq td:nth-child(6) .req-device-stack {
+      flex: 1;
+      min-width: 0;
+    }
+    #tblReq td:nth-child(6) .req-cell-main {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #tblReq td:nth-child(6) .req-device-meta {
+      font-size: 10px;
+      color: #64748b;
+      line-height: 1.25;
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .req-cell-wrap {
+      display: flex;
+      align-items: flex-start;
+      gap: 3px;
+      min-width: 0;
+    }
+    .req-cell-main { flex: 1; min-width: 0; }
+    .btn-copy {
+      flex-shrink: 0;
+      padding: 0;
+      margin: 0;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: #444;
+      line-height: 1;
+      opacity: 0.55;
+      vertical-align: top;
+    }
+    .btn-copy:hover { opacity: 1; color: #111; }
+    .btn-copy svg { display: block; }
+    .ab-b { font-weight: 700; color: #6b21a8; }
+    .ab-a { color: #0369a1; }
+    .muted { color: #666; font-size: 12px; }
+    .err { color: #b91c1c; margin: 8px 0; }
+    .pager { margin-top: 10px; }
+    .tag { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #f3e8ff; color: #6b21a8; }
+    .tag-off { background: #e5e7eb; color: #444; }
+    .tag-a { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #fee2e2; color: #991b1b; font-weight: 600; }
+    code { font-size: 11px; }
+  </style>
+</head>
+<body data-admin-open="__ADMIN_OPEN_ATTR__">
+  <h1>A/B 配置管理</h1>
+  <p class="muted">配置接口：<code>GET /client/api/config</code>。判定顺序：<strong>苹果 ASN（当次 A）→ 苹果设备锁（曾命中 ASN 且上报过 UUID，永久 A）→ 黑名单 → 设备强 B（按<strong>本行 Bundle + 设备</strong>）→ Bundle 全员 B → KV</strong>。苹果 ASN 命中且带 <code>X-Device-Id</code> 时写入 <code>apple_asn_lock_a_*</code>（不按 IP 拉黑）。黑名单内 IP / 设备<strong>永远 A 面</strong>；苹果命中记备注「苹果ASN」。KV：<code>device_force_b_*</code> 键内绑定 Bundle 与 UUID（同一物理机在不同 Bundle 下可分别开关）；另有 <code>apple_asn_fetched_json</code>、<code>bundle_force_b_*</code>、<code>ab_blocklist_*</code>。</p>
+  __DEMO_MOCK_BANNER__
+  __ADMIN_TOKEN_UI__
+  <h2>零、苹果 ASN（在线同步）</h2>
+  <p class="muted">自 <a href="https://www.peeringdb.com" target="_blank" rel="noopener noreferrer">PeeringDB</a> 拉取 <code>org_id=8418</code>（Apple Inc.）下登记 ASN，写入 KV；与内置兜底集合<strong>并集</strong>后参与 <code>cf.asn</code> 判定；仍保留 <code>cf.asOrganization</code> 含 <code>apple</code> 的兜底。</p>
+  <p>
+    <button type="button" id="btnAppleAsnRefresh">更新苹果 ASN 列表</button>
+    <span id="appleAsnStatus" class="muted" style="margin-left:10px"></span>
+  </p>
+  <p id="err" class="err"></p>
+  <p id="warnDb" class="err" style="display:none"></p>
+  <p class="muted" style="font-size:11px">打开本页后会<strong>自动加载</strong>下方各表；若仍为空白，请查看上方红色提示（未开 <code>ADMIN_OPEN</code> 时需先填写 Token），填写后可点配置请求记录分页旁的「刷新」。</p>
+  <p id="hintReq" class="muted"></p>
+
+  <h2>一、配置请求记录（每页 20 条）</h2>
+  <p class="muted" style="font-size:11px">IP 归属来自请求当时 Cloudflare <code>cf</code>（国家/州省/城市、组织与 AS 号）。需经 Cloudflare 代理访问 Worker；部署后请<strong>重新拉一次配置</strong>再刷新本页。旧记录仍为当时入库内容。</p>
+  <p class="pager" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px">
+    <label for="filterBundleId" class="muted" style="white-space:nowrap">按 Bundle 模糊搜</label>
+    <input type="text" id="filterBundleId" placeholder="关键字即可，如 animal / com.xxx" autocomplete="off" style="padding:6px 8px;max-width:22rem;min-width:12rem;flex:1;box-sizing:border-box" />
+    <button type="button" id="btnFilterApply">筛选</button>
+    <button type="button" id="btnFilterClear">清除</button>
+  </p>
+  <div class="pager">
+    <button type="button" id="btnPrev">上一页</button>
+    <span id="pageInfo"></span>
+    <button type="button" id="btnNext">下一页</button>
+    <button type="button" id="btnRefresh">刷新</button>
+  </div>
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%">
+  <table id="tblReq">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>时间</th>
+        <th>IP</th>
+        <th>IP归属</th>
+        <th>Bundle</th>
+        <th>AppName</th>
+        <th>设备 UUID</th>
+        <th>设备强B</th>
+        <th>黑名单</th>
+        <th>Bundle全员B</th>
+        <th>备注</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="tbodyReq"></tbody>
+  </table>
+  </div>
+
+  <h2>二、KV：Bundle 级 A/B</h2>
+  <table id="tblKv" style="display:none"><thead><tr><th>Bundle</th><th>A/B</th><th>KV 键</th></tr></thead><tbody id="tbodyKv"></tbody></table>
+  <p id="emptyKv" class="muted" style="display:none">（无）</p>
+
+  <h2>三、D1 中出现过的 Bundle（全员强 B）</h2>
+  <p class="muted">来自访问日志的去重 Bundle。可在此对该包<strong>全员强制 B / 取消全员 B</strong>（KV <code>bundle_force_b_*</code>，黑名单设备仍为 A）。未出现在表中的包需先产生访问记录，或通过 Dashboard 写 KV。</p>
+  <table id="tblSeen" style="display:none"><thead><tr><th>Bundle</th><th>生效 A/B</th><th>说明</th><th>全员强B</th><th>操作</th></tr></thead><tbody id="tbodySeen"></tbody></table>
+  <p id="emptySeen" class="muted" style="display:none">（D1 尚无带 bundle_id 的访问记录）</p>
+
+  <h2>四、黑名单（永远 A 面）</h2>
+  <p class="muted">列表中的设备 UUID 或 IP 恒返回 <code>A</code>，不受强 B 影响。IP 须与 Worker 所见的客户端 IP 一致（与日志表 IP 列相同）。</p>
+  <p>
+    <select id="blType" style="padding:6px 8px">
+      <option value="device">设备 UUID</option>
+      <option value="ip">IP</option>
+    </select>
+    <input type="text" id="blValue" placeholder="UUID 或 IP" style="max-width:20rem;width:100%;padding:6px 8px;box-sizing:border-box" />
+    <button type="button" id="btnBlAdd">加入黑名单</button>
+  </p>
+  <table id="tblBl" style="display:none"><thead><tr><th>类型</th><th>值</th><th>操作</th></tr></thead><tbody id="tbodyBl"></tbody></table>
+  <p id="emptyBl" class="muted">（暂无黑名单）</p>
+
+  <script>
+    const PAGE_SIZE = 20;
+    let page = 1;
+    let totalPages = 1;
+    let total = 0;
+
+    function isAdminOpen() {
+      return document.body.getAttribute("data-admin-open") === "true";
+    }
+    function tok() {
+      const el = document.getElementById("tok");
+      return el ? el.value.trim() : "";
+    }
+    function apiBase() {
+      var g = typeof window !== "undefined" && window.__DADDY_AB_CONFIG_API_BASE__;
+      if (g != null && String(g).trim() !== "") {
+        var b = String(g).trim();
+        return b.endsWith("/") ? b : (b + "/");
+      }
+      return new URL(".", location.href).href;
+    }
+    function apiUrl(path) {
+      var base = apiBase();
+      return new URL(String(path).replace(/^\//, ""), base).toString();
+    }
+    function bundleFilterQuery() {
+      var el = document.getElementById("filterBundleId");
+      var v = el ? el.value.trim() : "";
+      return v ? ("&bundleId=" + encodeURIComponent(v)) : "";
+    }
+
+    function formatApiError(status, j) {
+      var msg = (j && j.message) ? String(j.message) : "";
+      if (status === 401 || msg === "Unauthorized") {
+        return "未授权：请在页面顶部填写 CONFIG_AUTH_TOKEN（与 wrangler secret 一致）后点击「刷新」。若已关闭 Dashboard 中的 ADMIN_OPEN，必须通过 Token 才能加载数据。";
+      }
+      if (status === 503 && msg.indexOf("Admin") !== -1) {
+        return msg;
+      }
+      return msg || ("HTTP " + status);
+    }
+
+    async function api(path, opt) {
+      var opt0 = opt || {};
+      var headers = Object.assign(
+        { "Accept": "application/json", "X-Config-Token": tok() },
+        opt0.headers || {},
+      );
+      var r = await fetch(apiUrl(path), Object.assign({}, opt0, { headers: headers }));
+      const j = await r.json().catch(function () { return {}; });
+      if (!r.ok) throw new Error(formatApiError(r.status, j));
+      if (j.code !== undefined && j.code !== 0) {
+        throw new Error(j.message || ("API code " + j.code));
+      }
+      return j;
+    }
+
+    function tdText(val) {
+      var td = document.createElement("td");
+      td.textContent = val == null ? "" : String(val);
+      return td;
+    }
+    function tdCode(val) {
+      var td = document.createElement("td");
+      var c = document.createElement("code");
+      c.textContent = val == null || val === "" ? "-" : String(val);
+      td.appendChild(c);
+      return td;
+    }
+
+    var COPY_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+    var COPY_OK_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
+
+    function copyToClipboard(text, btn) {
+      if (text == null || text === "") return;
+      var t = String(text);
+      function doneOk() {
+        var old = btn.innerHTML;
+        btn.innerHTML = COPY_OK_SVG;
+        btn.title = "已复制";
+        setTimeout(function () {
+          btn.innerHTML = old;
+          btn.title = "复制全文";
+        }, 900);
+      }
+      function fail(msg) {
+        var el = document.getElementById("err");
+        if (el) el.textContent = msg || "复制失败";
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(doneOk).catch(function () {
+          fail("复制失败，请检查浏览器权限");
+        });
+      } else {
+        var ta = document.createElement("textarea");
+        ta.value = t;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          if (document.execCommand("copy")) doneOk();
+          else fail("复制失败");
+        } catch (e) {
+          fail("复制失败");
+        }
+        document.body.removeChild(ta);
+      }
+    }
+
+    function makeCopyBtn(copyText) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn-copy";
+      b.innerHTML = COPY_ICON_SVG;
+      b.title = "复制全文";
+      b.setAttribute("aria-label", "复制");
+      b.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        copyToClipboard(copyText, b);
+      });
+      return b;
+    }
+
+    async function loadRequests() {
+      document.getElementById("hintReq").textContent = "";
+      var warnDb = document.getElementById("warnDb");
+      warnDb.style.display = "none";
+      warnDb.textContent = "";
+      var j = await api("/admin/api/requests?page=" + page + "&pageSize=" + PAGE_SIZE + bundleFilterQuery());
+      var d = j.data;
+      if (!d) throw new Error("接口未返回 data");
+      if (d.d1Bound === false) {
+        warnDb.style.display = "block";
+        warnDb.textContent =
+          "当前 Worker 未绑定 D1（CONFIG_DB）。请到 Cloudflare → Workers → 本 Worker → 设置 → 变量 → D1 数据库，确认已绑定 daddy-ab-logs，并与 wrangler.toml 中 database_id 一致，然后重新 wrangler deploy。";
+      }
+      total = d.total || 0;
+      totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE) || 1);
+      var filt = (d.bundleIdFilter && String(d.bundleIdFilter).trim()) ? String(d.bundleIdFilter).trim() : "";
+      var pageInfoEl = document.getElementById("pageInfo");
+      while (pageInfoEl.firstChild) pageInfoEl.removeChild(pageInfoEl.firstChild);
+      pageInfoEl.appendChild(document.createTextNode("第 " + page + " / " + totalPages + " 页，共 " + total + " 条"));
+      if (filt) {
+        pageInfoEl.appendChild(document.createTextNode(" · 模糊匹配 "));
+        var codeF = document.createElement("code");
+        codeF.textContent = filt;
+        pageInfoEl.appendChild(codeF);
+      }
+      if (d.d1Bound !== false && total === 0) {
+        document.getElementById("hintReq").textContent = filt
+          ? "当前条件下无记录：可换关键字或点击「清除」查看全部（模糊匹配、不区分大小写）。"
+          : "暂无记录：若 App 已成功拉过配置，请在本机执行 npx wrangler d1 migrations apply daddy-ab-logs --remote（确保表含 device_id、app_name），并打开 Workers → 日志 搜索 access_logs 查看 D1 插入是否报错。";
+      }
+      var tb = document.getElementById("tbodyReq");
+      while (tb.firstChild) tb.removeChild(tb.firstChild);
+      var rows = d.rows || [];
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var tr = document.createElement("tr");
+        var did = row.device_id || "";
+        var bidRow =
+          row.bundle_id == null || row.bundle_id === ""
+            ? ""
+            : String(row.bundle_id);
+        tr.appendChild(tdText(row.id));
+        tr.appendChild(tdText(row.created_at));
+        var tdIp = document.createElement("td");
+        var ipStr = row.ip == null ? "" : String(row.ip);
+        var wrapIp = document.createElement("div");
+        wrapIp.className = "req-cell-wrap";
+        var mainIp = document.createElement("span");
+        mainIp.className = "req-cell-main";
+        mainIp.textContent = ipStr;
+        if (ipStr) mainIp.title = ipStr;
+        wrapIp.appendChild(mainIp);
+        if (ipStr) wrapIp.appendChild(makeCopyBtn(ipStr));
+        tdIp.appendChild(wrapIp);
+        tr.appendChild(tdIp);
+        var tdGeo = document.createElement("td");
+        tdGeo.className = "muted";
+        var geoStr =
+          row.ip_attribution != null && row.ip_attribution !== ""
+            ? String(row.ip_attribution)
+            : "—";
+        var wrapGeo = document.createElement("div");
+        wrapGeo.className = "req-cell-wrap";
+        var mainGeo = document.createElement("span");
+        mainGeo.className = "req-cell-main";
+        mainGeo.textContent = geoStr;
+        if (geoStr && geoStr !== "—") {
+          mainGeo.title = geoStr;
+          wrapGeo.appendChild(mainGeo);
+          wrapGeo.appendChild(makeCopyBtn(geoStr));
+        } else {
+          wrapGeo.appendChild(mainGeo);
+        }
+        tdGeo.appendChild(wrapGeo);
+        tr.appendChild(tdGeo);
+        var tdB = document.createElement("td");
+        var wrapB = document.createElement("div");
+        wrapB.className = "req-cell-wrap";
+        var stackB = document.createElement("div");
+        stackB.className = "req-device-stack";
+        var cB = document.createElement("code");
+        cB.className = "req-cell-main";
+        var bid =
+          row.bundle_id == null || row.bundle_id === ""
+            ? ""
+            : String(row.bundle_id);
+        cB.textContent = bid || "-";
+        stackB.appendChild(cB);
+        var bsub =
+          row.bundle_subtitle != null && String(row.bundle_subtitle).trim() !== ""
+            ? String(row.bundle_subtitle).trim()
+            : "";
+        if (bsub) {
+          var metaB = document.createElement("div");
+          metaB.className = "req-device-meta";
+          metaB.textContent = bsub;
+          metaB.title = bsub;
+          stackB.appendChild(metaB);
+        }
+        wrapB.appendChild(stackB);
+        var copyBundle = "";
+        if (bid && bsub) copyBundle = bid + "\\n" + bsub;
+        else if (bid) copyBundle = bid;
+        else if (bsub) copyBundle = bsub;
+        if (bid) cB.title = bid;
+        if (copyBundle) wrapB.appendChild(makeCopyBtn(copyBundle));
+        tdB.appendChild(wrapB);
+        tr.appendChild(tdB);
+        var tdApp = document.createElement("td");
+        var wrapApp = document.createElement("div");
+        wrapApp.className = "req-cell-wrap";
+        var appName =
+          row.app_name == null || row.app_name === ""
+            ? ""
+            : String(row.app_name);
+        var appMain = document.createElement("span");
+        appMain.className = "req-cell-main";
+        appMain.textContent = appName || "-";
+        if (appName) appMain.title = appName;
+        wrapApp.appendChild(appMain);
+        if (appName) wrapApp.appendChild(makeCopyBtn(appName));
+        tdApp.appendChild(wrapApp);
+        tr.appendChild(tdApp);
+        var tdDid = document.createElement("td");
+        var wrapDid = document.createElement("div");
+        wrapDid.className = "req-cell-wrap";
+        var stackDid = document.createElement("div");
+        stackDid.className = "req-device-stack";
+        var cDid = document.createElement("code");
+        cDid.className = "req-cell-main";
+        var didDisp = did ? String(did) : "-";
+        cDid.textContent = didDisp;
+        stackDid.appendChild(cDid);
+        var sub =
+          row.device_subtitle != null && String(row.device_subtitle).trim() !== ""
+            ? String(row.device_subtitle).trim()
+            : "";
+        if (sub) {
+          var meta = document.createElement("div");
+          meta.className = "req-device-meta";
+          meta.textContent = sub;
+          meta.title = sub;
+          stackDid.appendChild(meta);
+        }
+        if (did) cDid.title = String(did);
+        wrapDid.appendChild(stackDid);
+        var copyDevice = "";
+        if (did && sub) copyDevice = String(did) + "\\n" + sub;
+        else if (did) copyDevice = String(did);
+        else if (sub) copyDevice = sub;
+        if (copyDevice) wrapDid.appendChild(makeCopyBtn(copyDevice));
+        tdDid.appendChild(wrapDid);
+        tr.appendChild(tdDid);
+        var tdF = document.createElement("td");
+        var sp = document.createElement("span");
+        sp.className = row.device_forced_b ? "tag" : "tag-off";
+        sp.textContent = row.device_forced_b ? "是" : "否";
+        tdF.appendChild(sp);
+        tr.appendChild(tdF);
+        var tdBl = document.createElement("td");
+        var spBl = document.createElement("span");
+        if (row.blocklisted) {
+          spBl.className = "tag-a";
+          spBl.textContent = "锁A";
+          spBl.title = "永远 A 面（手动黑名单、苹果 ASN 设备锁、或历史备注「苹果ASN」）";
+        } else {
+          spBl.className = "tag-off";
+          spBl.textContent = "否";
+        }
+        tdBl.appendChild(spBl);
+        tr.appendChild(tdBl);
+        var tdBbundle = document.createElement("td");
+        var spBb = document.createElement("span");
+        spBb.className = row.bundle_forced_b ? "tag" : "tag-off";
+        spBb.textContent = row.bundle_forced_b ? "是" : "否";
+        tdBbundle.appendChild(spBb);
+        tr.appendChild(tdBbundle);
+        var tdRm = document.createElement("td");
+        tdRm.className = "muted";
+        tdRm.textContent = row.remark ? String(row.remark) : "";
+        tr.appendChild(tdRm);
+        var tdAct = document.createElement("td");
+        if (did) {
+          var b1 = document.createElement("button");
+          b1.type = "button";
+          b1.className = "bf";
+          b1.setAttribute("data-did", did);
+          b1.setAttribute("data-bid", bidRow);
+          b1.textContent = "强制B";
+          if (row.device_force_b_disabled) {
+            b1.disabled = true;
+            b1.title =
+              "本条命中苹果 ASN 或该设备已苹果锁 A，配置恒为 A，不可强制 B";
+            b1.style.opacity = "0.45";
+            b1.style.cursor = "not-allowed";
+          }
+          tdAct.appendChild(b1);
+        } else {
+          var nx = document.createElement("span");
+          nx.className = "muted";
+          nx.textContent = "无 UUID";
+          tdAct.appendChild(nx);
+        }
+        tr.appendChild(tdAct);
+        tb.appendChild(tr);
+      }
+    }
+
+    async function loadBundles() {
+      var j = await api("/admin/api/bundles");
+      var kv = j.data.kvRows || [];
+      var seen = j.data.seenOnly || [];
+      var tbk = document.getElementById("tbodyKv");
+      var tbs = document.getElementById("tbodySeen");
+      while (tbk.firstChild) tbk.removeChild(tbk.firstChild);
+      while (tbs.firstChild) tbs.removeChild(tbs.firstChild);
+      for (var i = 0; i < kv.length; i++) {
+        var row = kv[i];
+        var tr = document.createElement("tr");
+        var td0 = document.createElement("td");
+        if (row.bundleId === null) {
+          var em = document.createElement("em");
+          em.textContent = "全局";
+          td0.appendChild(em);
+        } else {
+          td0.textContent = row.bundleId;
+        }
+        var td1 = document.createElement("td");
+        td1.className = row.ab === "B" ? "ab-b" : "ab-a";
+        td1.textContent = row.ab;
+        var td2 = document.createElement("td");
+        var code = document.createElement("code");
+        code.textContent = row.kvKey;
+        td2.appendChild(code);
+        tr.appendChild(td0);
+        tr.appendChild(td1);
+        tr.appendChild(td2);
+        tbk.appendChild(tr);
+      }
+      document.getElementById("tblKv").style.display = kv.length ? "table" : "none";
+      document.getElementById("emptyKv").style.display = kv.length ? "none" : "block";
+      for (var si = 0; si < seen.length; si++) {
+        var srow = seen[si];
+        var str = document.createElement("tr");
+        var s0 = document.createElement("td");
+        var sc = document.createElement("code");
+        sc.textContent = srow.bundleId;
+        s0.appendChild(sc);
+        var s1 = document.createElement("td");
+        s1.className = srow.effectiveAb === "B" ? "ab-b" : "ab-a";
+        s1.textContent = srow.effectiveAb;
+        var s2 = document.createElement("td");
+        s2.textContent = srow.note;
+        var s3 = document.createElement("td");
+        var spB = document.createElement("span");
+        spB.className = srow.bundleForcedB ? "tag" : "tag-off";
+        spB.textContent = srow.bundleForcedB ? "是" : "否";
+        s3.appendChild(spB);
+        var s4 = document.createElement("td");
+        var sb1 = document.createElement("button");
+        sb1.type = "button";
+        sb1.className = "bbf";
+        sb1.setAttribute("data-bid", srow.bundleId);
+        sb1.textContent = "全员强制 B";
+        var sb2 = document.createElement("button");
+        sb2.type = "button";
+        sb2.className = "bbu";
+        sb2.setAttribute("data-bid", srow.bundleId);
+        sb2.textContent = "取消全员 B";
+        s4.appendChild(sb1);
+        s4.appendChild(document.createTextNode(" "));
+        s4.appendChild(sb2);
+        str.appendChild(s0);
+        str.appendChild(s1);
+        str.appendChild(s2);
+        str.appendChild(s3);
+        str.appendChild(s4);
+        tbs.appendChild(str);
+      }
+      document.getElementById("tblSeen").style.display = seen.length ? "table" : "none";
+      document.getElementById("emptySeen").style.display = seen.length ? "none" : "block";
+    }
+
+    async function loadBlocklist() {
+      var j = await api("/admin/api/blocklist");
+      var dev = j.data.devices || [];
+      var ips = j.data.ips || [];
+      var tb = document.getElementById("tbodyBl");
+      var tbl = document.getElementById("tblBl");
+      var emp = document.getElementById("emptyBl");
+      while (tb.firstChild) tb.removeChild(tb.firstChild);
+      var n = 0;
+      for (var di = 0; di < dev.length; di++) {
+        n++;
+        var tr = document.createElement("tr");
+        var t0 = document.createElement("td");
+        t0.textContent = "设备";
+        var t1 = document.createElement("td");
+        var c1 = document.createElement("code");
+        c1.textContent = dev[di];
+        t1.appendChild(c1);
+        var t2 = document.createElement("td");
+        var rb = document.createElement("button");
+        rb.type = "button";
+        rb.className = "bl-del";
+        rb.setAttribute("data-type", "device");
+        rb.setAttribute("data-val", dev[di]);
+        rb.textContent = "移除";
+        t2.appendChild(rb);
+        tr.appendChild(t0);
+        tr.appendChild(t1);
+        tr.appendChild(t2);
+        tb.appendChild(tr);
+      }
+      for (var pi = 0; pi < ips.length; pi++) {
+        n++;
+        var tr2 = document.createElement("tr");
+        var u0 = document.createElement("td");
+        u0.textContent = "IP";
+        var u1 = document.createElement("td");
+        var c2 = document.createElement("code");
+        c2.textContent = ips[pi];
+        u1.appendChild(c2);
+        var u2 = document.createElement("td");
+        var rb2 = document.createElement("button");
+        rb2.type = "button";
+        rb2.className = "bl-del";
+        rb2.setAttribute("data-type", "ip");
+        rb2.setAttribute("data-val", ips[pi]);
+        rb2.textContent = "移除";
+        u2.appendChild(rb2);
+        tr2.appendChild(u0);
+        tr2.appendChild(u1);
+        tr2.appendChild(u2);
+        tb.appendChild(tr2);
+      }
+      tbl.style.display = n ? "table" : "none";
+      emp.style.display = n ? "none" : "block";
+    }
+
+    document.getElementById("tbodyBl").addEventListener("click", async function (ev) {
+      var t = ev.target;
+      if (!t.classList || !t.classList.contains("bl-del")) return;
+      if (!isAdminOpen() && !tok()) {
+        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        return;
+      }
+      var ty = t.getAttribute("data-type");
+      var val = t.getAttribute("data-val");
+      if (!ty || val == null) return;
+      try {
+        await api("/admin/api/blocklist-remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: ty, value: val }),
+        });
+        document.getElementById("err").textContent = "";
+        await loadBlocklist();
+        await loadRequests();
+      } catch (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      }
+    });
+
+    document.getElementById("tbodyReq").addEventListener("click", async function (ev) {
+      var t = ev.target;
+      if (!t.classList) return;
+      if (!t.classList.contains("bf")) return;
+      if (t.disabled) return;
+      var deviceId = t.getAttribute("data-did");
+      if (!deviceId) return;
+      var bundleId = t.getAttribute("data-bid");
+      if (bundleId == null) bundleId = "";
+      if (!isAdminOpen() && !tok()) {
+        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        return;
+      }
+      try {
+        await api("/admin/api/device-force-b", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceId: deviceId, bundleId: bundleId }),
+        });
+        await loadRequests();
+        await loadBundles();
+        await loadBlocklist();
+      } catch (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      }
+    });
+
+    document.getElementById("tbodySeen").addEventListener("click", async function (ev) {
+      var t = ev.target;
+      if (!t.classList) return;
+      if (!t.classList.contains("bbf") && !t.classList.contains("bbu")) return;
+      var bidB = t.getAttribute("data-bid");
+      if (!bidB) return;
+      if (!isAdminOpen() && !tok()) {
+        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        return;
+      }
+      try {
+        if (t.classList.contains("bbf")) {
+          await api("/admin/api/bundle-force-b", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bundleId: bidB }),
+          });
+        } else {
+          await api("/admin/api/bundle-unforce-b", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bundleId: bidB }),
+          });
+        }
+        document.getElementById("err").textContent = "";
+        await loadRequests();
+        await loadBundles();
+        await loadBlocklist();
+      } catch (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      }
+    });
+
+    async function loadAppleAsnStatus() {
+      var el = document.getElementById("appleAsnStatus");
+      if (!el) return;
+      if (!isAdminOpen() && !tok()) {
+        el.textContent = "";
+        return;
+      }
+      try {
+        var j = await api("/admin/api/apple-asn-status");
+        var d = j.data || {};
+        var meta = d.fetchedMeta;
+        var merged = d.merged || [];
+        var parts = [];
+        parts.push("当前合并 ASN（" + merged.length + " 个）: " + merged.join(", "));
+        if (meta) {
+          parts.push("上次同步: " + meta.updatedAt + " · " + meta.source);
+        } else {
+          parts.push("尚未点过同步，仅内置 + 组织名兜底");
+        }
+        el.textContent = parts.join(" · ");
+      } catch (e) {
+        el.textContent = "状态加载失败: " + (e.message || e);
+      }
+    }
+
+    async function loadAll() {
+      document.getElementById("err").textContent = "";
+      page = 1;
+      await loadAppleAsnStatus();
+      await loadRequests();
+      await loadBundles();
+      await loadBlocklist();
+    }
+
+    async function refreshData() {
+      document.getElementById("err").textContent = "";
+      await loadAppleAsnStatus();
+      await loadRequests();
+      await loadBundles();
+      await loadBlocklist();
+    }
+
+    document.getElementById("btnRefresh").onclick = function () {
+      refreshData().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("btnAppleAsnRefresh").onclick = function () {
+      if (!isAdminOpen() && !tok()) {
+        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        return;
+      }
+      document.getElementById("err").textContent = "";
+      var b = document.getElementById("btnAppleAsnRefresh");
+      b.disabled = true;
+      api("/admin/api/apple-asn-refresh", { method: "POST" })
+        .then(function (j) {
+          var d = j.data || {};
+          var m = d.merged || [];
+          document.getElementById("err").textContent =
+            "已从 PeeringDB 更新，合并后共 " + m.length + " 个 ASN";
+          return loadAppleAsnStatus();
+        })
+        .catch(function (e) {
+          document.getElementById("err").textContent = String(e.message || e);
+        })
+        .finally(function () {
+          b.disabled = false;
+        });
+    };
+    document.getElementById("btnBlAdd").onclick = function () {
+      var ty = document.getElementById("blType").value;
+      var v = document.getElementById("blValue").value.trim();
+      if (!v) {
+        document.getElementById("err").textContent = "请填写 UUID 或 IP";
+        return;
+      }
+      if (!isAdminOpen() && !tok()) {
+        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        return;
+      }
+      api("/admin/api/blocklist-add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: ty, value: v }),
+      })
+        .then(function () {
+          document.getElementById("err").textContent = "";
+          document.getElementById("blValue").value = "";
+          return loadBlocklist().then(function () {
+            return loadRequests();
+          });
+        })
+        .catch(function (e) {
+          document.getElementById("err").textContent = String(e.message || e);
+        });
+    };
+    document.getElementById("btnPrev").onclick = function () {
+      if (page <= 1) return;
+      page--;
+      loadRequests().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("btnNext").onclick = function () {
+      if (page >= totalPages) return;
+      page++;
+      loadRequests().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("btnFilterApply").onclick = function () {
+      page = 1;
+      loadRequests().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("btnFilterClear").onclick = function () {
+      var fb = document.getElementById("filterBundleId");
+      if (fb) fb.value = "";
+      page = 1;
+      loadRequests().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("filterBundleId").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        page = 1;
+        loadRequests().catch(function (e) {
+          document.getElementById("err").textContent = String(e.message || e);
+        });
+      }
+    });
+
+    function bootAdmin() {
+      loadAll().catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", bootAdmin);
+    } else {
+      bootAdmin();
+    }
+  </script>
+</body>
+</html>`;
