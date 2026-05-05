@@ -11,6 +11,9 @@ if (!baseArg.startsWith("http://") && !baseArg.startsWith("https://")) {
       "示例: deno run -A scripts/export-static-admin.ts \\",
       "  https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config",
       "",
+      "需设置环境变量 SUPABASE_ANON_KEY（Dashboard → API → anon public），否则从 GitHub Pages 等跨域调用会被网关拦截。",
+      "示例: export SUPABASE_ANON_KEY='eyJ...'; deno run -A scripts/export-static-admin.ts \"https://...\" --admin-open",
+      "",
       "API根URL 不要尾斜杠；须与客户端拉配置的 Function 根路径一致。",
     ].join("\n"),
   );
@@ -19,7 +22,14 @@ if (!baseArg.startsWith("http://") && !baseArg.startsWith("https://")) {
 
 const open = flags.has("--admin-open");
 const demo = flags.has("--demo-mock-apple");
-const html = composeAdminHtml(baseArg.replace(/\/$/, ""), open, demo);
+const anonKey = (Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim();
+
+const html = composeAdminHtml(
+  baseArg.replace(/\/$/, ""),
+  open,
+  demo,
+  anonKey,
+);
 
 const repoRoot = new URL("../", import.meta.url);
 const out = new URL("supabase/static-admin/index.html", repoRoot);

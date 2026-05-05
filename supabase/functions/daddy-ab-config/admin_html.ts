@@ -4,6 +4,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script>window.__DADDY_AB_CONFIG_API_BASE__ = "__API_PUBLIC_BASE__";</script>
+  <script>window.__SUPABASE_ANON_KEY__=__SUPABASE_ANON_JSON__;</script>
   <title>A/B 配置管理</title>
   <style>
     :root { font-family: system-ui, sans-serif; }
@@ -174,6 +175,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       const el = document.getElementById("tok");
       return el ? el.value.trim() : "";
     }
+    function supabaseGatewayHeaders() {
+      var k = typeof window !== "undefined" && window.__SUPABASE_ANON_KEY__;
+      if (k == null || String(k).trim() === "") return {};
+      var key = String(k).trim();
+      return { apikey: key, Authorization: "Bearer " + key };
+    }
     function apiBase() {
       var g = typeof window !== "undefined" && window.__DADDY_AB_CONFIG_API_BASE__;
       if (g != null && String(g).trim() !== "") {
@@ -207,6 +214,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       var opt0 = opt || {};
       var headers = Object.assign(
         { "Accept": "application/json", "X-Config-Token": tok() },
+        supabaseGatewayHeaders(),
         opt0.headers || {},
       );
       var r = await fetch(apiUrl(path), Object.assign({}, opt0, { headers: headers }));

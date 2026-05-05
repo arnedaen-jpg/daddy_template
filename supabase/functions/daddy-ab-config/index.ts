@@ -27,5 +27,7 @@ Deno.serve(async (request: Request) => {
       undefined,
   };
   const url = new URL(request.url);
-  return await routeRequest(request, env, url, composeAdminHtml);
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+  return await routeRequest(request, env, url, (pb, o, d) =>
+    composeAdminHtml(pb, o, d, anonKey));
 });

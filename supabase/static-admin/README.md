@@ -6,27 +6,16 @@
 
 在仓库根目录 `daddy_template/` 执行（先安装 [Deno](https://deno.land/)）。
 
-**必须写上脚本路径**（单独执行 `deno run` 会报错）：
+**从静态站（如 github.io）在浏览器里调 Supabase Function 时**，网关要求请求带 **`apikey` + `Authorization: Bearer <anon>`**。生成页面前需设置 **anon public key**（与 Dashboard → Project Settings → API 里一致；可进 HTML，勿用 `service_role`）：
 
 ```bash
-deno run -A scripts/export-static-admin.ts \
-  https://<project-ref>.supabase.co/functions/v1/daddy-ab-config
-```
-
-或用任务（根目录已有 `deno.json`）：
-
-```bash
-deno task export-static-admin -- \
-  https://<project-ref>.supabase.co/functions/v1/daddy-ab-config
-```
-
-可选：与线上 Secrets 一致时再打开演示开关（会写进 HTML，一般仅本地调试用）：
-
-```bash
+export SUPABASE_ANON_KEY='<anon public JWT>'
 deno run -A scripts/export-static-admin.ts \
   https://<project-ref>.supabase.co/functions/v1/daddy-ab-config \
-  --admin-open --demo-mock-apple
+  --admin-open
 ```
+
+不带 `SUPABASE_ANON_KEY` 时，页面仍可打开，但 **「更新苹果 ASN」等 fetch 会在网关层失败**（表现为无数据或按钮无有效响应）。
 
 生成结果：**本目录下的 `index.html`**。
 
@@ -35,9 +24,9 @@ deno run -A scripts/export-static-admin.ts \
 1. 把 **`daddy_template`** 当作仓库根目录推到 GitHub（或保证 `.github/workflows/`、`scripts/`、`supabase/` 相对根目录的路径与本仓库一致）。
 2. 仓库 **Settings → Pages**：**Build and deployment → Source** 选 **GitHub Actions**。
 3. **Settings → Secrets and variables → Actions → Variables**：**New repository variable**
-   - **Name**：`SUPABASE_FUNCTION_BASE`
-   - **Value**：Function 根 URL，**不要尾斜杠**，例如  
+   - **`SUPABASE_FUNCTION_BASE`**：Function 根 URL，**不要尾斜杠**，例如  
      `https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config`
+   - **`SUPABASE_ANON_KEY`**：与 Supabase **Project Settings → API** 里的 **anon / public** 一致（不要用 `service_role`；会写进静态 HTML，仅用于通过 API 网关）。
 4. 把默认分支（`main` 或 `master`）推上去，或打开 **Actions** 手动运行 **Deploy A/B static admin to GitHub Pages**。
 5. 发布产物里 **`index.html` 在站点根**，一般访问 **`https://<用户名>.github.io/<仓库名>/`**。把该地址（通常带尾斜杠即可）填入 Edge Secret **`ADMIN_STATIC_REDIRECT_URL`**。
 

@@ -31,6 +31,7 @@ jobs:
       - name: Build supabase/static-admin/index.html
         env:
           SUPABASE_FUNCTION_BASE: ${{ vars.SUPABASE_FUNCTION_BASE }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SUPABASE_FUNCTION_BASE:-}" ]; then
@@ -38,6 +39,11 @@ jobs:
             echo "在 GitHub：Settings → Secrets and variables → Actions → Variables → New repository variable"
             echo "Name: SUPABASE_FUNCTION_BASE"
             echo "Value 示例: https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config"
+            exit 1
+          fi
+          if [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::缺少仓库变量 SUPABASE_ANON_KEY（Supabase Dashboard → Project Settings → API → anon public）。"
+            echo "静态页从浏览器调 Edge Function 时网关要求带 apikey / Authorization。"
             exit 1
           fi
           deno run -A scripts/export-static-admin.ts "$SUPABASE_FUNCTION_BASE" --admin-open

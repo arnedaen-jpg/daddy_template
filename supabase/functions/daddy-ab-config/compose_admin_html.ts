@@ -1,10 +1,11 @@
 import { ADMIN_HTML } from "./admin_html.ts";
 
-/** publicBase：API 根 URL，无尾斜杠，如 https://ref.supabase.co/functions/v1/daddy-ab-config；同域托管可传空串。 */
+/** publicBase：API 根 URL，无尾斜杠；supabaseAnonKey：浏览器调 functions 网关所需（Dashboard → API → anon public），可空仅同域时。 */
 export function composeAdminHtml(
   publicBase: string,
   open: boolean,
   demo: boolean,
+  supabaseAnonKey = "",
 ): string {
   const tokenUi = open
     ? '<p class="muted">已开启 <code>ADMIN_OPEN</code>：无需 Token 即可加载管理数据。生产环境请删除该变量并仅用 Token 访问。</p><input type="hidden" id="tok" value="" />'
@@ -16,6 +17,7 @@ export function composeAdminHtml(
     : "";
   const base = publicBase.replace(/\/$/, "");
   return ADMIN_HTML.replace("__API_PUBLIC_BASE__", base)
+    .replace("__SUPABASE_ANON_JSON__", JSON.stringify(supabaseAnonKey))
     .replace("__DEMO_MOCK_BANNER__", demoBanner)
     .replace("__ADMIN_TOKEN_UI__", tokenUi)
     .replace("__ADMIN_OPEN_ATTR__", open ? "true" : "false");
