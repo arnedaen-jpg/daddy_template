@@ -40,7 +40,7 @@ jobs:
             echo "Value 示例: https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config"
             exit 1
           fi
-          deno run -A scripts/export-static-admin.ts "$SUPABASE_FUNCTION_BASE"
+          deno run -A scripts/export-static-admin.ts "$SUPABASE_FUNCTION_BASE" --admin-open
 
       - uses: actions/upload-pages-artifact@v3
         with:
