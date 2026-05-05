@@ -25,7 +25,7 @@ class AppConfig {
   /// 使用自建 Cloudflare Worker 时建议为 `false`，避免仍向旧链路请求。
   static const bool useConfigDomainFallback = false;
 
-  /// 是否在 `GET /client/api/config` 请求中附带 `X-Config-Token`（须与 Worker 密钥 `CONFIG_AUTH_TOKEN` 一致）。
+  /// 是否在 `GET /client/api/config` 请求中附带 `X-Config-Token`（须与 `CONFIG_AUTH_TOKEN` / Supabase Secrets 一致）。
   static const bool useConfigApiAuth = true;
 
 }

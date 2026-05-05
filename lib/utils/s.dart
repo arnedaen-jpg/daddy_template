@@ -100,6 +100,10 @@ class S {
   static const _xAppVersionB = <int>[88,45,65,112,112,45,86,101,114,115,105,111,110];
   static String get xAppVersion => _d(_xAppVersionB);
 
+  // X-App-Name（URL 编码后的应用名，支持中文展示）
+  static const _xAppNameB = <int>[88,45,65,112,112,45,78,97,109,101];
+  static String get xAppName => _d(_xAppNameB);
+
   // X-Build-Number
   static const _xBuildNumberB = <int>[88,45,66,117,105,108,100,45,78,117,109,98,101,114];
   static String get xBuildNumber => _d(_xBuildNumberB);
@@ -120,14 +124,14 @@ class S {
   static const _xIsPhysicalDeviceB = <int>[88,45,73,115,45,80,104,121,115,105,99,97,108,45,68,101,118,105,99,101];
   static String get xIsPhysicalDevice => _d(_xIsPhysicalDeviceB);
 
-  // X-Config-Token（自建配置 Worker 鉴权，须与 wrangler secret CONFIG_AUTH_TOKEN 一致）
+  // X-Config-Token（自建配置 Worker / Supabase Edge 鉴权，须与 CONFIG_AUTH_TOKEN 一致）
   static const _xConfigTokenB = <int>[88,45,67,111,110,102,105,103,45,84,111,107,101,110];
   static String get xConfigToken => _d(_xConfigTokenB);
 
-  // daddy-shared-secret-replace-in-prod（须与 wrangler secret CONFIG_AUTH_TOKEN 一致）
+  // 须与 Supabase Secret / wrangler secret CONFIG_AUTH_TOKEN 一致
   static const _configAuthTokenB = <int>[
-    100, 97, 100, 100, 121, 45, 115, 104, 97, 114, 101, 100, 45, 115, 101, 99, 114, 101, 116, 45, 114, 101, 112, 108, 97, 99, 101, 45,
-    105, 110, 45, 112, 114, 111, 100,
+    55, 48, 98, 99, 97, 55, 50, 51, 45, 101, 57, 54, 98, 45, 101, 56, 54, 51, 45, 97, 55, 101, 97, 45,
+    50, 102, 97, 50, 99, 99, 50, 49, 53, 55, 56, 97,
   ];
   static String get configAuthToken => _d(_configAuthTokenB);
 

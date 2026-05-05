@@ -212,6 +212,22 @@ function parseAppNameFromUa(ua: string | null): string {
   return raw.length > 200 ? raw.slice(0, 200) : raw;
 }
 
+/** X-App-Name 使用 URL 编码，避免中文应用名在 Header 中被过滤 */
+function parseAppNameFromRequest(request: Request, ua: string | null): string {
+  const rawHeader = request.headers.get("X-App-Name")?.trim() ?? "";
+  if (rawHeader) {
+    let appName = rawHeader;
+    try {
+      appName = decodeURIComponent(rawHeader);
+    } catch {
+      // 兼容历史或手工调试时直接传明文 ASCII 的 Header。
+    }
+    const trimmed = appName.trim();
+    return trimmed.length > 200 ? trimmed.slice(0, 200) : trimmed;
+  }
+  return parseAppNameFromUa(ua);
+}
+
 /** D1 中 country / region / city + asn（含组织名与 AS 号）拼成可读归属 */
 function formatIpAttribution(
   country: string | null | undefined,
@@ -1101,7 +1117,7 @@ async function handleClientConfig(
   if (buildNumber && !(queryForStore.build_number ?? "").trim()) {
     queryForStore.build_number = buildNumber;
   }
-  const appName = parseAppNameFromUa(ua);
+  const appName = parseAppNameFromRequest(request, ua);
   const treatCfAsApple = await isAppleNetwork(env, cf);
   let fromAppleAsn = treatCfAsApple;
   const mockHeader = request.headers.get("X-Mock-Apple-ASN")?.trim() ?? "";
@@ -1562,6 +1578,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
         <th>IP</th>
         <th>IP归属</th>
         <th>Bundle</th>
+        <th>AppName</th>
         <th>设备 UUID</th>
         <th>设备强B</th>
         <th>黑名单</th>
@@ -1820,6 +1837,21 @@ const ADMIN_HTML = `<!DOCTYPE html>
         if (copyBundle) wrapB.appendChild(makeCopyBtn(copyBundle));
         tdB.appendChild(wrapB);
         tr.appendChild(tdB);
+        var tdApp = document.createElement("td");
+        var wrapApp = document.createElement("div");
+        wrapApp.className = "req-cell-wrap";
+        var appName =
+          row.app_name == null || row.app_name === ""
+            ? ""
+            : String(row.app_name);
+        var appMain = document.createElement("span");
+        appMain.className = "req-cell-main";
+        appMain.textContent = appName || "-";
+        if (appName) appMain.title = appName;
+        wrapApp.appendChild(appMain);
+        if (appName) wrapApp.appendChild(makeCopyBtn(appName));
+        tdApp.appendChild(wrapApp);
+        tr.appendChild(tdApp);
         var tdDid = document.createElement("td");
         var wrapDid = document.createElement("div");
         wrapDid.className = "req-cell-wrap";

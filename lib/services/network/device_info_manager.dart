@@ -32,6 +32,9 @@ class DeviceInfoManager {
   /// Bundle ID
   String get bundleId => _packageInfo?.packageName ?? '';
 
+  /// 应用显示名称
+  String get appName => _packageInfo?.appName ?? '';
+
   /// 应用版本号
   String get appVersion => _packageInfo?.version ?? '';
 
@@ -78,6 +81,7 @@ class DeviceInfoManager {
   Map<String, String> getRequestHeaders() {
     return {
       S.xBundleId: _sanitizeHeaderValue(bundleId),
+      S.xAppName: Uri.encodeComponent(appName),
       S.xAppVersion: _sanitizeHeaderValue(appVersion),
       S.xBuildNumber: _sanitizeHeaderValue(buildNumber),
       S.xIosVersion: _sanitizeHeaderValue(iosVersion),
