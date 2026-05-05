@@ -2,6 +2,18 @@
 
 页面里的脚本会把所有 `/admin/api/*` 请求发到 **Edge Function 根 URL**（页面内已写死为导出时的地址），因此可与 Supabase Function 跨域配合（接口已带 `Access-Control-Allow-Origin: *`）。
 
+### 先创建数据库表（必做）
+
+远程库需执行迁移（本地示例）：
+
+```bash
+supabase link --project-ref <ref>
+supabase db push
+```
+
+或在 Dashboard **SQL Editor** 执行 `supabase/migrations/20260504180000_daddy_ab_config.sql`。  
+若缺少 **`kv_store`**，点「更新苹果 ASN」会 **502**，管理页其它写 KV 的按钮也会失败。
+
 ## 生成 `index.html`
 
 在仓库根目录 `daddy_template/` 执行（先安装 [Deno](https://deno.land/)）。

@@ -142,12 +142,28 @@ function kvMeansB(raw: string | null | undefined): boolean {
   return v === "b" || v === "1" || v === "true" || v === "yes";
 }
 
+function dbErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    const parts = [o.message, o.details, o.hint, o.code].filter((x) =>
+      x != null && String(x) !== ""
+    );
+    if (parts.length) return parts.map(String).join(" | ");
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 async function kvGet(env: ServiceEnv, key: string): Promise<string | null> {
   const { data, error } = await env.sb.from("kv_store").select("value").eq(
     "key",
     key,
   ).maybeSingle();
-  if (error) throw error;
+  if (error) throw new Error(dbErrMsg(error));
   return data?.value ?? null;
 }
 
@@ -156,12 +172,12 @@ async function kvPut(env: ServiceEnv, key: string, value: string): Promise<void>
     { key, value, updated_at: new Date().toISOString() },
     { onConflict: "key" },
   );
-  if (error) throw error;
+  if (error) throw new Error(dbErrMsg(error));
 }
 
 async function kvDel(env: ServiceEnv, key: string): Promise<void> {
   const { error } = await env.sb.from("kv_store").delete().eq("key", key);
-  if (error) throw error;
+  if (error) throw new Error(dbErrMsg(error));
 }
 
 async function kvListPrefix(
@@ -172,7 +188,7 @@ async function kvListPrefix(
     "key",
     `${prefix}%`,
   );
-  if (error) throw error;
+  if (error) throw new Error(dbErrMsg(error));
   return (data ?? []) as { key: string; value: string }[];
 }
 
@@ -949,7 +965,7 @@ async function handleAppleAsnRefresh(
       },
     });
   } catch (e) {
-    return jsonResponse({ code: 502, message: String(e) }, 502);
+    return jsonResponse({ code: 502, message: dbErrMsg(e) }, 502);
   }
 }
 
