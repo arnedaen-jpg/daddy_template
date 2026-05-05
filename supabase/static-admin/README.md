@@ -43,6 +43,20 @@ deno run -A scripts/export-static-admin.ts \
 
 工作流文件：仓库根目录 `.github/workflows/deploy-static-admin-pages.yml`（会安装 Deno、执行 `scripts/export-static-admin.ts`、再上传 `supabase/static-admin`）。
 
+### 部署失败（红色 X）时常见原因
+
+1. **未设置变量 `SUPABASE_FUNCTION_BASE`**  
+   → [Actions → Variables](https://github.com/arnedaen-jpg/daddy_template/settings/variables/actions) 里新增（值无尾斜杠）。
+
+2. **`github-pages` 环境不允许当前分支**  
+   → [Environments → github-pages](https://github.com/arnedaen-jpg/daddy_template/settings/environments)  
+   → **Deployment branches**：改为 **All branches**，或至少勾选 **`dev`**（你在该分支上推过工作流）。
+
+3. **Pages 源不是 GitHub Actions**  
+   → [Settings → Pages](https://github.com/arnedaen-jpg/daddy_template/settings/pages) 里 **Source** 必须选 **GitHub Actions**。
+
+4. 到 [Actions](https://github.com/arnedaen-jpg/daddy_template/actions) 打开失败的那条 run，展开 **build** / **deploy** 日志查看具体报错。
+
 ### 不用 Actions、从分支发布时
 
 本地生成并 **提交** `supabase/static-admin/index.html` 后，在 Pages 里选 **Deploy from a branch**，根目录选 **`/supabase/static-admin`**（若你当前界面仍提供该选项）。新项目更推荐上面的 Actions。
