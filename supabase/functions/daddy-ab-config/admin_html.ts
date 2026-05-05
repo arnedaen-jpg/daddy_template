@@ -92,13 +92,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   <p class="muted">配置接口：<code>GET /client/api/config</code>。判定顺序：<strong>苹果 ASN（当次 A）→ 苹果设备锁（曾命中 ASN 且上报过 UUID，永久 A）→ 黑名单 → 设备强 B（按<strong>本行 Bundle + 设备</strong>）→ Bundle 全员 B → KV</strong>。苹果 ASN 命中且带 <code>X-Device-Id</code> 时写入 <code>apple_asn_lock_a_*</code>（不按 IP 拉黑）。黑名单内 IP / 设备<strong>永远 A 面</strong>；苹果命中记备注「苹果ASN」。KV：<code>device_force_b_*</code> 键内绑定 Bundle 与 UUID（同一物理机在不同 Bundle 下可分别开关）；另有 <code>apple_asn_fetched_json</code>、<code>bundle_force_b_*</code>、<code>ab_blocklist_*</code>。</p>
   __DEMO_MOCK_BANNER__
   __ADMIN_TOKEN_UI__
+  <p id="err" class="err"></p>
   <h2>零、苹果 ASN（在线同步）</h2>
   <p class="muted">自 <a href="https://www.peeringdb.com" target="_blank" rel="noopener noreferrer">PeeringDB</a> 拉取 <code>org_id=8418</code>（Apple Inc.）下登记 ASN，写入 KV；与内置兜底集合<strong>并集</strong>后参与 <code>cf.asn</code> 判定；仍保留 <code>cf.asOrganization</code> 含 <code>apple</code> 的兜底。</p>
   <p>
     <button type="button" id="btnAppleAsnRefresh">更新苹果 ASN 列表</button>
     <span id="appleAsnStatus" class="muted" style="margin-left:10px"></span>
   </p>
-  <p id="err" class="err"></p>
   <p id="warnDb" class="err" style="display:none"></p>
   <p class="muted" style="font-size:11px">打开本页后会<strong>自动加载</strong>下方各表；若仍为空白，请查看上方红色提示（未开 <code>ADMIN_OPEN</code> 时需先填写 Token），填写后可点配置请求记录分页旁的「刷新」。</p>
   <p id="hintReq" class="muted"></p>
@@ -758,23 +758,31 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       });
     };
     document.getElementById("btnAppleAsnRefresh").onclick = function () {
+      var errEl = document.getElementById("err");
+      var stEl = document.getElementById("appleAsnStatus");
       if (!isAdminOpen() && !tok()) {
-        document.getElementById("err").textContent = "请填写 CONFIG_AUTH_TOKEN";
+        var msg = "未开 ADMIN_OPEN 时，请先在上方填写 CONFIG_AUTH_TOKEN（与 Supabase Secrets 一致）";
+        errEl.textContent = msg;
+        if (stEl) stEl.textContent = msg;
         return;
       }
-      document.getElementById("err").textContent = "";
+      errEl.textContent = "";
+      if (stEl) stEl.textContent = "正在请求 PeeringDB…";
       var b = document.getElementById("btnAppleAsnRefresh");
       b.disabled = true;
       api("/admin/api/apple-asn-refresh", { method: "POST" })
         .then(function (j) {
           var d = j.data || {};
           var m = d.merged || [];
-          document.getElementById("err").textContent =
+          errEl.textContent =
             "已从 PeeringDB 更新，合并后共 " + m.length + " 个 ASN";
+          if (stEl) stEl.textContent = "";
           return loadAppleAsnStatus();
         })
         .catch(function (e) {
-          document.getElementById("err").textContent = String(e.message || e);
+          var t = String(e.message || e);
+          errEl.textContent = t;
+          if (stEl) stEl.textContent = "失败：" + t;
         })
         .finally(function () {
           b.disabled = false;
