@@ -24,8 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/configure-pages@v5
-
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
@@ -52,6 +50,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:

@@ -57,6 +57,12 @@ deno run -A scripts/export-static-admin.ts \
 
 4. 到 [Actions](https://github.com/arnedaen-jpg/daddy_template/actions) 打开失败的那条 run，展开 **build** / **deploy** 日志查看具体报错。
 
+5. **`Resource not accessible by integration`**（与 Pages REST API / `configure-pages` 相关）  
+   - 本仓库工作流已**不再使用** `configure-pages`（纯静态目录上传不需要读 Pages 站点 API）。若仍报错，打开  
+     [Settings → Actions → General](https://github.com/arnedaen-jpg/daddy_template/settings/actions)  
+     → **Workflow permissions**：选 **Read and write permissions**（勿选仅只读），保存后再重跑 workflow。  
+   - 组织仓库需管理员允许上述权限或 Pages 功能。
+
 ### 不用 Actions、从分支发布时
 
 本地生成并 **提交** `supabase/static-admin/index.html` 后，在 Pages 里选 **Deploy from a branch**，根目录选 **`/supabase/static-admin`**（若你当前界面仍提供该选项）。新项目更推荐上面的 Actions。
