@@ -191,7 +191,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     }
     function apiUrl(path) {
       var base = apiBase();
-      return new URL(String(path).replace(/^\//, ""), base).toString();
+      var p = String(path);
+      if (p.charAt(0) === "/") p = p.slice(1);
+      return new URL(p, base).toString();
     }
     function bundleFilterQuery() {
       var el = document.getElementById("filterBundleId");
