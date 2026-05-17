@@ -273,8 +273,27 @@ interface IpLookup {
   org: string;
 }
 
-async function lookupIp(ip: string): Promise<IpLookup> {
-  const empty: IpLookup = {
+function parseAsnFields(
+  org: string,
+  asnRaw: unknown,
+): { asnNum: number | null; asnDisplay: string } {
+  let asnNum: number | null = null;
+  if (asnRaw != null) {
+    const a = String(asnRaw);
+    const m = a.match(/AS?(\d+)/i);
+    if (m) asnNum = parseInt(m[1], 10);
+    else if (/^\d+$/.test(a)) asnNum = parseInt(a, 10);
+  }
+  const o = org.trim();
+  let asnDisplay = "";
+  if (o && asnNum != null) asnDisplay = `${o} (AS${asnNum})`;
+  else if (o) asnDisplay = o;
+  else if (asnNum != null) asnDisplay = `AS${asnNum}`;
+  return { asnNum, asnDisplay };
+}
+
+function emptyIpLookup(): IpLookup {
+  return {
     country: "",
     city: "",
     region: "",
@@ -282,41 +301,147 @@ async function lookupIp(ip: string): Promise<IpLookup> {
     asnNum: null,
     org: "",
   };
-  if (!ip) return empty;
+}
+
+function lookupHasGeo(l: IpLookup): boolean {
+  return Boolean(
+    l.country.trim() || l.city.trim() || l.region.trim() || l.asnDisplay.trim(),
+  );
+}
+
+async function fetchJsonWithTimeout(
+  url: string,
+  ms = 4500,
+): Promise<Record<string, unknown> | null> {
   try {
     const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 4000);
-    const r = await fetch(
-      `https://ipapi.co/${encodeURIComponent(ip)}/json/`,
-      { signal: ac.signal },
-    );
+    const t = setTimeout(() => ac.abort(), ms);
+    const r = await fetch(url, { signal: ac.signal });
     clearTimeout(t);
-    const j = await r.json() as Record<string, unknown>;
-    if (j.error) return empty;
-    const org = String(j.org ?? "");
-    let asnNum: number | null = null;
-    const asnRaw = j.asn;
-    if (asnRaw != null) {
-      const a = String(asnRaw);
-      const m = a.match(/AS?(\d+)/i);
-      if (m) asnNum = parseInt(m[1], 10);
-      else if (/^\d+$/.test(a)) asnNum = parseInt(a, 10);
-    }
-    let asnDisplay = "";
-    if (org && asnNum != null) asnDisplay = `${org} (AS${asnNum})`;
-    else if (org) asnDisplay = org;
-    else if (asnNum != null) asnDisplay = `AS${asnNum}`;
-    return {
-      country: String(j.country_name ?? j.country ?? ""),
-      city: String(j.city ?? ""),
-      region: String(j.region ?? j.region_code ?? ""),
-      asnDisplay,
-      asnNum,
-      org,
-    };
+    if (!r.ok) return null;
+    return await r.json() as Record<string, unknown>;
   } catch {
-    return empty;
+    return null;
   }
+}
+
+async function lookupIpFromIpApiCo(ip: string): Promise<IpLookup | null> {
+  const j = await fetchJsonWithTimeout(
+    `https://ipapi.co/${encodeURIComponent(ip)}/json/`,
+  );
+  if (!j || j.error) return null;
+  const org = String(j.org ?? "");
+  const { asnNum, asnDisplay } = parseAsnFields(org, j.asn);
+  const out: IpLookup = {
+    country: String(j.country_name ?? j.country ?? ""),
+    city: String(j.city ?? ""),
+    region: String(j.region ?? j.region_code ?? ""),
+    asnDisplay,
+    asnNum,
+    org,
+  };
+  return lookupHasGeo(out) ? out : null;
+}
+
+/** ip-api.com：Supabase Edge 上比 ipapi.co 更稳定（ipapi 易 429） */
+async function lookupIpFromIpApiCom(ip: string): Promise<IpLookup | null> {
+  const j = await fetchJsonWithTimeout(
+    `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,as,org`,
+  );
+  if (!j || j.status !== "success") return null;
+  const org = String(j.org ?? "");
+  const { asnNum, asnDisplay } = parseAsnFields(org, j.as);
+  const out: IpLookup = {
+    country: String(j.country ?? ""),
+    city: String(j.city ?? ""),
+    region: String(j.regionName ?? ""),
+    asnDisplay,
+    asnNum,
+    org,
+  };
+  return lookupHasGeo(out) ? out : null;
+}
+
+async function lookupIpFromIpWhoIs(ip: string): Promise<IpLookup | null> {
+  const j = await fetchJsonWithTimeout(
+    `https://ipwho.is/${encodeURIComponent(ip)}`,
+  );
+  if (!j || j.success !== true) return null;
+  const conn = j.connection as Record<string, unknown> | undefined;
+  const org = String(conn?.isp ?? j.org ?? "");
+  const asnRaw = conn?.asn ?? j.asn;
+  const { asnNum, asnDisplay } = parseAsnFields(org, asnRaw);
+  const out: IpLookup = {
+    country: String(j.country ?? ""),
+    city: String(j.city ?? ""),
+    region: String(j.region ?? ""),
+    asnDisplay,
+    asnNum,
+    org,
+  };
+  return lookupHasGeo(out) ? out : null;
+}
+
+/** 多源回退查询 IP 归属（写入 access_logs / 管理页补全） */
+async function lookupIp(ip: string): Promise<IpLookup> {
+  const empty = emptyIpLookup();
+  const x = ip.trim();
+  if (!x) return empty;
+  for (const fn of [
+    lookupIpFromIpApiCom,
+    lookupIpFromIpWhoIs,
+    lookupIpFromIpApiCo,
+  ]) {
+    const hit = await fn(x);
+    if (hit) return hit;
+  }
+  console.warn("[lookupIp] all providers failed for", x);
+  return empty;
+}
+
+function storedGeoEmpty(
+  country: string | null | undefined,
+  region: string | null | undefined,
+  city: string | null | undefined,
+  asn: string | null | undefined,
+): boolean {
+  return !String(country ?? "").trim() &&
+    !String(region ?? "").trim() &&
+    !String(city ?? "").trim() &&
+    !String(asn ?? "").trim();
+}
+
+async function backfillAccessLogGeoIfNeeded(
+  env: ServiceEnv,
+  id: number,
+  ip: string,
+  country: string | null | undefined,
+  region: string | null | undefined,
+  city: string | null | undefined,
+  asn: string | null | undefined,
+): Promise<{ country: string; region: string; city: string; asn: string }> {
+  const c0 = String(country ?? "");
+  const r0 = String(region ?? "");
+  const cy0 = String(city ?? "");
+  const a0 = String(asn ?? "");
+  if (!storedGeoEmpty(c0, r0, cy0, a0) || !ip.trim()) {
+    return { country: c0, region: r0, city: cy0, asn: a0 };
+  }
+  const lookup = await lookupIp(ip);
+  const geo = buildAccessLogGeoRow(lookup, false, false);
+  if (storedGeoEmpty(geo.country, geo.region, geo.city, geo.asn)) {
+    return { country: c0, region: r0, city: cy0, asn: a0 };
+  }
+  bg((async () => {
+    const { error } = await env.sb.from("access_logs").update({
+      country: geo.country || null,
+      city: geo.city || null,
+      region: geo.region || null,
+      asn: geo.asn || null,
+    }).eq("id", id);
+    if (error) console.error("[access_logs geo backfill]", error);
+  })());
+  return geo;
 }
 
 async function isAppleNetwork(env: ServiceEnv, lookup: IpLookup): Promise<boolean> {
@@ -644,11 +769,20 @@ async function fetchAccessLogPage(
     const modelEff = String(R.device_model ?? "").trim() || qMeta.model;
     const deviceSubtitle = formatDeviceSubtitle(iosEff, modelEff);
     const bundleSubtitle = formatBundleSubtitle(qMeta.app_version, qMeta.build_number);
+    const geoFilled = await backfillAccessLogGeoIfNeeded(
+      env,
+      Number(R.id),
+      ip,
+      R.country as string | null,
+      R.region as string | null,
+      R.city as string | null,
+      R.asn as string | null,
+    );
     const ipAttribution = formatIpAttribution(
-      R.country as string,
-      R.region as string,
-      R.city as string,
-      R.asn as string,
+      geoFilled.country,
+      geoFilled.region,
+      geoFilled.city,
+      geoFilled.asn,
     );
     return {
       id: Number(R.id),

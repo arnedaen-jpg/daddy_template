@@ -8,7 +8,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   <title>A/B 配置管理</title>
   <style>
     :root { font-family: system-ui, sans-serif; }
-    body { max-width: 1100px; margin: 20px auto; padding: 0 14px; }
+    body { max-width: 1280px; margin: 20px auto; padding: 0 14px; }
     h1 { font-size: 1.2rem; }
     h2 { font-size: 1rem; margin-top: 22px; }
     label { font-weight: 600; }
@@ -17,52 +17,45 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; word-break: break-all; }
     th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
     th { background: #eee; }
-    /* 请求记录表：IP 列收窄单行省略；Bundle 整行不换行 */
-    #tblReq { word-break: normal; }
-    #tblReq th:nth-child(3), #tblReq td:nth-child(3) {
-      max-width: 7.5rem;
-      width: 7.5rem;
-      font-size: 11px;
-    }
-    #tblReq td:nth-child(3) .req-cell-main {
+    /* 请求记录：每条一行；单元格内垂直「标题 → 内容」可多组 */
+    #tblReq { word-break: break-word; table-layout: auto; }
+    #tblReq th, #tblReq td { line-height: 1.35; vertical-align: top; }
+    #tblReq th:nth-child(1), #tblReq td.req-id-cell {
+      width: 2.5rem;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      text-align: center;
+      vertical-align: middle;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 6px 8px;
     }
-    #tblReq th:nth-child(5), #tblReq td:nth-child(5) { white-space: nowrap; }
-    #tblReq td:nth-child(5) .req-cell-main { white-space: nowrap; }
-    #tblReq th:nth-child(6), #tblReq td:nth-child(6) {
-      max-width: 10rem;
-      width: 10rem;
-      font-size: 11px;
-      vertical-align: top;
-    }
-    #tblReq td:nth-child(6) .req-device-stack {
-      flex: 1;
-      min-width: 0;
-    }
-    #tblReq td:nth-child(6) .req-cell-main {
-      display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    #tblReq td:nth-child(6) .req-device-meta {
-      font-size: 10px;
-      color: #64748b;
-      line-height: 1.25;
-      margin-top: 3px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+    #tblReq tr.req-data-row td { padding: 8px 10px; border-bottom: 2px solid #e2e8f0; }
     .req-cell-wrap {
       display: flex;
       align-items: flex-start;
-      gap: 3px;
+      gap: 4px;
       min-width: 0;
     }
-    .req-cell-main { flex: 1; min-width: 0; }
+    .req-field { flex: 1; min-width: 0; }
+    .req-pair + .req-pair {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px dashed #e2e8f0;
+    }
+    .req-pair-k {
+      font-size: 10px;
+      color: #64748b;
+      font-weight: 600;
+      margin-bottom: 3px;
+      line-height: 1.2;
+    }
+    .req-pair-v {
+      font-size: 11px;
+      color: #0f172a;
+      word-break: break-all;
+      line-height: 1.35;
+    }
+    .req-pair-v code { font-size: 10px; }
     .btn-copy {
       flex-shrink: 0;
       padding: 0;
@@ -88,7 +81,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     code { font-size: 11px; }
   </style>
 </head>
-<body data-admin-open="__ADMIN_OPEN_ATTR__">
+<body data-admin-open="__ADMIN_OPEN_ATTR__" data-admin-layout="req-pairs-v2">
   <h1>A/B 配置管理</h1>
   <p class="muted">配置接口：<code>GET /client/api/config</code>。判定顺序：<strong>苹果 ASN（当次 A）→ 苹果设备锁（曾命中 ASN 且上报过 UUID，永久 A）→ 黑名单 → 设备强 B（按<strong>本行 Bundle + 设备</strong>）→ Bundle 全员 B → KV</strong>。苹果 ASN 命中且带 <code>X-Device-Id</code> 时写入 <code>apple_asn_lock_a_*</code>（不按 IP 拉黑）。黑名单内 IP / 设备<strong>永远 A 面</strong>；苹果命中记备注「苹果ASN」。KV：<code>device_force_b_*</code> 键内绑定 Bundle 与 UUID（同一物理机在不同 Bundle 下可分别开关）；另有 <code>apple_asn_fetched_json</code>、<code>bundle_force_b_*</code>、<code>ab_blocklist_*</code>。</p>
   __DEMO_MOCK_BANNER__
@@ -105,7 +98,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   <p id="hintReq" class="muted"></p>
 
   <h2>一、配置请求记录（每页 20 条）</h2>
-  <p class="muted" style="font-size:11px">IP 归属来自请求当时 Cloudflare <code>cf</code>（国家/州省/城市、组织与 AS 号）。需经 Cloudflare 代理访问 Worker；部署后请<strong>重新拉一次配置</strong>再刷新本页。旧记录仍为当时入库内容。</p>
+  <p class="muted" style="font-size:11px">IP 归属在写入时由 Edge Function 调用公网 GeoIP 接口解析（国家/州省/城市、运营商与 AS）。若显示 <code>—</code>，多为当时解析失败；<strong>刷新本页</strong>会尝试按 IP 补全并写回数据库。新请求在函数已部署最新版后应能直接显示。</p>
   <p class="pager" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px">
     <label for="filterBundleId" class="muted" style="white-space:nowrap">按 Bundle 模糊搜</label>
     <input type="text" id="filterBundleId" placeholder="关键字即可，如 animal / com.xxx" autocomplete="off" style="padding:6px 8px;max-width:22rem;min-width:12rem;flex:1;box-sizing:border-box" />
@@ -128,7 +121,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <th>IP归属</th>
         <th>Bundle</th>
         <th>AppName</th>
-        <th>设备 UUID</th>
+        <th>设备信息</th>
         <th>设备强B</th>
         <th>黑名单</th>
         <th>Bundle全员B</th>
@@ -296,6 +289,91 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       return b;
     }
 
+    function splitDateTime(s) {
+      var t = String(s == null ? "" : s).trim();
+      var i = t.indexOf(" ");
+      if (i > 0) return { line1: t.slice(0, i), line2: t.slice(i + 1) };
+      return { line1: t || "—", line2: "" };
+    }
+
+    function splitGeoAttribution(geoStr) {
+      var g = geoStr == null ? "" : String(geoStr).trim();
+      if (!g || g === "—") return { line1: "—", line2: "" };
+      var sep = g.indexOf(" · ");
+      if (sep >= 0) {
+        return { line1: g.slice(0, sep), line2: g.slice(sep + 3) };
+      }
+      return { line1: g, line2: "" };
+    }
+
+    function parseDeviceSubtitle(sub) {
+      var s = sub == null ? "" : String(sub).trim();
+      if (!s) return { ios: "", model: "" };
+      var parts = s.split(/\\s*·\\s*/);
+      for (var pi = 0; pi < parts.length; pi++) parts[pi] = parts[pi].trim();
+      if (parts.length >= 2 && /^iOS\\s/i.test(parts[0])) {
+        return { ios: parts[0], model: parts.slice(1).join(" · ") };
+      }
+      if (/^iOS\\s/i.test(s)) return { ios: s, model: "" };
+      return { ios: "", model: s };
+    }
+
+    function appendReqPair(field, label, value, useCode) {
+      var pair = document.createElement("div");
+      pair.className = "req-pair";
+      var k = document.createElement("div");
+      k.className = "req-pair-k";
+      k.textContent = label;
+      var v = document.createElement("div");
+      v.className = "req-pair-v";
+      var val = value == null || String(value).trim() === "" ? "—" : String(value).trim();
+      if (useCode) {
+        var c = document.createElement("code");
+        c.textContent = val;
+        c.title = val;
+        v.appendChild(c);
+      } else {
+        v.textContent = val;
+        v.title = val;
+      }
+      pair.appendChild(k);
+      pair.appendChild(v);
+      field.appendChild(pair);
+    }
+
+    function appendReqPairNode(field, label, node) {
+      var pair = document.createElement("div");
+      pair.className = "req-pair";
+      var k = document.createElement("div");
+      k.className = "req-pair-k";
+      k.textContent = label;
+      var v = document.createElement("div");
+      v.className = "req-pair-v";
+      v.appendChild(node);
+      pair.appendChild(k);
+      pair.appendChild(v);
+      field.appendChild(pair);
+    }
+
+    function makeReqPairsTd(pairs, copyText, extraClass) {
+      var td = document.createElement("td");
+      if (extraClass) td.className = extraClass;
+      var wrap = document.createElement("div");
+      wrap.className = "req-cell-wrap";
+      var field = document.createElement("div");
+      field.className = "req-field";
+      for (var pi = 0; pi < pairs.length; pi++) {
+        var p = pairs[pi];
+        if (!p) continue;
+        if (p.node) appendReqPairNode(field, p.label, p.node);
+        else appendReqPair(field, p.label, p.value, !!p.code);
+      }
+      wrap.appendChild(field);
+      if (copyText) wrap.appendChild(makeCopyBtn(copyText));
+      td.appendChild(wrap);
+      return td;
+    }
+
     async function loadRequests() {
       document.getElementById("hintReq").textContent = "";
       var warnDb = document.getElementById("warnDb");
@@ -331,131 +409,79 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       var rows = d.rows || [];
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
-        var tr = document.createElement("tr");
         var did = row.device_id || "";
         var bidRow =
           row.bundle_id == null || row.bundle_id === ""
             ? ""
             : String(row.bundle_id);
-        tr.appendChild(tdText(row.id));
-        tr.appendChild(tdText(row.created_at));
-        var tdIp = document.createElement("td");
+        var dt = splitDateTime(row.created_at);
         var ipStr = row.ip == null ? "" : String(row.ip);
-        var wrapIp = document.createElement("div");
-        wrapIp.className = "req-cell-wrap";
-        var mainIp = document.createElement("span");
-        mainIp.className = "req-cell-main";
-        mainIp.textContent = ipStr;
-        if (ipStr) mainIp.title = ipStr;
-        wrapIp.appendChild(mainIp);
-        if (ipStr) wrapIp.appendChild(makeCopyBtn(ipStr));
-        tdIp.appendChild(wrapIp);
-        tr.appendChild(tdIp);
-        var tdGeo = document.createElement("td");
-        tdGeo.className = "muted";
         var geoStr =
           row.ip_attribution != null && row.ip_attribution !== ""
             ? String(row.ip_attribution)
             : "—";
-        var wrapGeo = document.createElement("div");
-        wrapGeo.className = "req-cell-wrap";
-        var mainGeo = document.createElement("span");
-        mainGeo.className = "req-cell-main";
-        mainGeo.textContent = geoStr;
-        if (geoStr && geoStr !== "—") {
-          mainGeo.title = geoStr;
-          wrapGeo.appendChild(mainGeo);
-          wrapGeo.appendChild(makeCopyBtn(geoStr));
-        } else {
-          wrapGeo.appendChild(mainGeo);
-        }
-        tdGeo.appendChild(wrapGeo);
-        tr.appendChild(tdGeo);
-        var tdB = document.createElement("td");
-        var wrapB = document.createElement("div");
-        wrapB.className = "req-cell-wrap";
-        var stackB = document.createElement("div");
-        stackB.className = "req-device-stack";
-        var cB = document.createElement("code");
-        cB.className = "req-cell-main";
+        var geoParts = splitGeoAttribution(geoStr);
         var bid =
           row.bundle_id == null || row.bundle_id === ""
             ? ""
             : String(row.bundle_id);
-        cB.textContent = bid || "-";
-        stackB.appendChild(cB);
         var bsub =
           row.bundle_subtitle != null && String(row.bundle_subtitle).trim() !== ""
             ? String(row.bundle_subtitle).trim()
             : "";
-        if (bsub) {
-          var metaB = document.createElement("div");
-          metaB.className = "req-device-meta";
-          metaB.textContent = bsub;
-          metaB.title = bsub;
-          stackB.appendChild(metaB);
-        }
-        wrapB.appendChild(stackB);
         var copyBundle = "";
         if (bid && bsub) copyBundle = bid + "\\n" + bsub;
         else if (bid) copyBundle = bid;
         else if (bsub) copyBundle = bsub;
-        if (bid) cB.title = bid;
-        if (copyBundle) wrapB.appendChild(makeCopyBtn(copyBundle));
-        tdB.appendChild(wrapB);
-        tr.appendChild(tdB);
-        var tdApp = document.createElement("td");
-        var wrapApp = document.createElement("div");
-        wrapApp.className = "req-cell-wrap";
         var appName =
           row.app_name == null || row.app_name === ""
             ? ""
             : String(row.app_name);
-        var appMain = document.createElement("span");
-        appMain.className = "req-cell-main";
-        appMain.textContent = appName || "-";
-        if (appName) appMain.title = appName;
-        wrapApp.appendChild(appMain);
-        if (appName) wrapApp.appendChild(makeCopyBtn(appName));
-        tdApp.appendChild(wrapApp);
-        tr.appendChild(tdApp);
-        var tdDid = document.createElement("td");
-        var wrapDid = document.createElement("div");
-        wrapDid.className = "req-cell-wrap";
-        var stackDid = document.createElement("div");
-        stackDid.className = "req-device-stack";
-        var cDid = document.createElement("code");
-        cDid.className = "req-cell-main";
-        var didDisp = did ? String(did) : "-";
-        cDid.textContent = didDisp;
-        stackDid.appendChild(cDid);
         var sub =
           row.device_subtitle != null && String(row.device_subtitle).trim() !== ""
             ? String(row.device_subtitle).trim()
             : "";
-        if (sub) {
-          var meta = document.createElement("div");
-          meta.className = "req-device-meta";
-          meta.textContent = sub;
-          meta.title = sub;
-          stackDid.appendChild(meta);
-        }
-        if (did) cDid.title = String(did);
-        wrapDid.appendChild(stackDid);
-        var copyDevice = "";
-        if (did && sub) copyDevice = String(did) + "\\n" + sub;
-        else if (did) copyDevice = String(did);
-        else if (sub) copyDevice = sub;
-        if (copyDevice) wrapDid.appendChild(makeCopyBtn(copyDevice));
-        tdDid.appendChild(wrapDid);
-        tr.appendChild(tdDid);
-        var tdF = document.createElement("td");
-        var sp = document.createElement("span");
-        sp.className = row.device_forced_b ? "tag" : "tag-off";
-        sp.textContent = row.device_forced_b ? "是" : "否";
-        tdF.appendChild(sp);
-        tr.appendChild(tdF);
-        var tdBl = document.createElement("td");
+        var devMeta = parseDeviceSubtitle(sub);
+        var copyDeviceParts = [];
+        if (did) copyDeviceParts.push(String(did));
+        if (devMeta.ios) copyDeviceParts.push(devMeta.ios);
+        if (devMeta.model) copyDeviceParts.push(devMeta.model);
+
+        var tr = document.createElement("tr");
+        tr.className = "req-data-row";
+        var idTd = document.createElement("td");
+        idTd.className = "req-id-cell";
+        idTd.textContent = row.id == null ? "" : String(row.id);
+        tr.appendChild(idTd);
+        var timePairs = [{ label: "日期", value: dt.line1 }];
+        if (dt.line2) timePairs.push({ label: "时刻", value: dt.line2 });
+        tr.appendChild(makeReqPairsTd(
+          timePairs,
+          row.created_at ? String(row.created_at) : "",
+        ));
+        tr.appendChild(makeReqPairsTd([{ label: "IP", value: ipStr }], ipStr));
+        var geoPairs = [{ label: "地区", value: geoParts.line1 }];
+        if (geoParts.line2) geoPairs.push({ label: "运营商", value: geoParts.line2 });
+        tr.appendChild(makeReqPairsTd(
+          geoPairs,
+          geoStr !== "—" ? geoStr : "",
+          "muted",
+        ));
+        var bundlePairs = [{ label: "Bundle ID", value: bid, code: true }];
+        if (bsub) bundlePairs.push({ label: "版本", value: bsub });
+        tr.appendChild(makeReqPairsTd(bundlePairs, copyBundle));
+        tr.appendChild(makeReqPairsTd([{ label: "App 名称", value: appName }], appName));
+        var devPairs = [{ label: "UUID", value: did, code: true }];
+        if (devMeta.ios) devPairs.push({ label: "系统", value: devMeta.ios });
+        if (devMeta.model) devPairs.push({ label: "机型", value: devMeta.model });
+        tr.appendChild(makeReqPairsTd(
+          devPairs,
+          copyDeviceParts.length ? copyDeviceParts.join("\\n") : "",
+        ));
+        var spF = document.createElement("span");
+        spF.className = row.device_forced_b ? "tag" : "tag-off";
+        spF.textContent = row.device_forced_b ? "是" : "否";
+        tr.appendChild(makeReqPairsTd([{ label: "设备强B", node: spF }]));
         var spBl = document.createElement("span");
         if (row.blocklisted) {
           spBl.className = "tag-a";
@@ -465,19 +491,17 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           spBl.className = "tag-off";
           spBl.textContent = "否";
         }
-        tdBl.appendChild(spBl);
-        tr.appendChild(tdBl);
-        var tdBbundle = document.createElement("td");
+        tr.appendChild(makeReqPairsTd([{ label: "黑名单", node: spBl }]));
         var spBb = document.createElement("span");
         spBb.className = row.bundle_forced_b ? "tag" : "tag-off";
         spBb.textContent = row.bundle_forced_b ? "是" : "否";
-        tdBbundle.appendChild(spBb);
-        tr.appendChild(tdBbundle);
-        var tdRm = document.createElement("td");
-        tdRm.className = "muted";
-        tdRm.textContent = row.remark ? String(row.remark) : "";
-        tr.appendChild(tdRm);
-        var tdAct = document.createElement("td");
+        tr.appendChild(makeReqPairsTd([{ label: "Bundle全员B", node: spBb }]));
+        tr.appendChild(makeReqPairsTd(
+          [{ label: "备注", value: row.remark ? String(row.remark) : "" }],
+          "",
+          "muted",
+        ));
+        var actNode;
         if (did) {
           var b1 = document.createElement("button");
           b1.type = "button";
@@ -492,14 +516,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             b1.style.opacity = "0.45";
             b1.style.cursor = "not-allowed";
           }
-          tdAct.appendChild(b1);
+          actNode = b1;
         } else {
-          var nx = document.createElement("span");
-          nx.className = "muted";
-          nx.textContent = "无 UUID";
-          tdAct.appendChild(nx);
+          actNode = document.createElement("span");
+          actNode.className = "muted";
+          actNode.textContent = "无 UUID";
         }
-        tr.appendChild(tdAct);
+        tr.appendChild(makeReqPairsTd([{ label: "操作", node: actNode }]));
         tb.appendChild(tr);
       }
     }
