@@ -81,7 +81,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     code { font-size: 11px; }
   </style>
 </head>
-<body data-admin-open="__ADMIN_OPEN_ATTR__" data-admin-layout="req-pairs-v2">
+<body data-admin-open="__ADMIN_OPEN_ATTR__" data-admin-layout="req-pairs-v3">
   <h1>A/B 配置管理</h1>
   <p class="muted">配置接口：<code>GET /client/api/config</code>。判定顺序：<strong>苹果 ASN（当次 A）→ 苹果设备锁（曾命中 ASN 且上报过 UUID，永久 A）→ 黑名单 → 设备强 B（按<strong>本行 Bundle + 设备</strong>）→ Bundle 全员 B → KV</strong>。苹果 ASN 命中且带 <code>X-Device-Id</code> 时写入 <code>apple_asn_lock_a_*</code>（不按 IP 拉黑）。黑名单内 IP / 设备<strong>永远 A 面</strong>；苹果命中记备注「苹果ASN」。KV：<code>device_force_b_*</code> 键内绑定 Bundle 与 UUID（同一物理机在不同 Bundle 下可分别开关）；另有 <code>apple_asn_fetched_json</code>、<code>bundle_force_b_*</code>、<code>ab_blocklist_*</code>。</p>
   __DEMO_MOCK_BANNER__
@@ -122,10 +122,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <th>Bundle</th>
         <th>AppName</th>
         <th>设备信息</th>
-        <th>设备强B</th>
-        <th>黑名单</th>
-        <th>Bundle全员B</th>
-        <th>备注</th>
+        <th>状态与备注</th>
         <th>操作</th>
       </tr>
     </thead>
@@ -481,7 +478,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         var spF = document.createElement("span");
         spF.className = row.device_forced_b ? "tag" : "tag-off";
         spF.textContent = row.device_forced_b ? "是" : "否";
-        tr.appendChild(makeReqPairsTd([{ label: "设备强B", node: spF }]));
         var spBl = document.createElement("span");
         if (row.blocklisted) {
           spBl.className = "tag-a";
@@ -491,16 +487,15 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           spBl.className = "tag-off";
           spBl.textContent = "否";
         }
-        tr.appendChild(makeReqPairsTd([{ label: "黑名单", node: spBl }]));
         var spBb = document.createElement("span");
         spBb.className = row.bundle_forced_b ? "tag" : "tag-off";
         spBb.textContent = row.bundle_forced_b ? "是" : "否";
-        tr.appendChild(makeReqPairsTd([{ label: "Bundle全员B", node: spBb }]));
-        tr.appendChild(makeReqPairsTd(
-          [{ label: "备注", value: row.remark ? String(row.remark) : "" }],
-          "",
-          "muted",
-        ));
+        tr.appendChild(makeReqPairsTd([
+          { label: "设备强B", node: spF },
+          { label: "黑名单", node: spBl },
+          { label: "Bundle全员B", node: spBb },
+          { label: "备注", value: row.remark ? String(row.remark) : "" },
+        ]));
         var actNode;
         if (did) {
           var b1 = document.createElement("button");
