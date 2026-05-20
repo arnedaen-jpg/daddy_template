@@ -169,11 +169,26 @@ main() {
     echo ""
 
     # 步骤 1: 复制模板
-    log_info "[1/7] 复制模板项目..."
+    log_info "[1/8] 复制模板项目..."
     cp -R "$TEMPLATE_DIR" "$new_project_path"
 
-    # 步骤 2: 清理不需要的文件
-    log_info "[2/7] 清理缓存和临时文件..."
+    # 步骤 2: 还原壳工程 B 面为模板初始状态（避免模板内残留 sync 产物导致新建工程 pub get 失败）
+    log_info "[2/8] 还原壳工程 B 面占位与最小 pubspec..."
+    rm -rf "$new_project_path/assets/secondary"
+    rm -rf "$new_project_path/plugins"
+    rm -f "$new_project_path/pubspec.yaml.bak"
+    if [[ -f "$TEMPLATE_DIR/pubspec.yaml.template" ]]; then
+        cp "$TEMPLATE_DIR/pubspec.yaml.template" "$new_project_path/pubspec.yaml"
+    fi
+    if [[ -f "$TEMPLATE_DIR/lib/modules/secondary/module_entry.dart" ]]; then
+        mkdir -p "$new_project_path/lib/modules/secondary"
+        cp "$TEMPLATE_DIR/lib/modules/secondary/module_entry.dart" \
+            "$new_project_path/lib/modules/secondary/module_entry.dart"
+    fi
+    find "$new_project_path/lib/modules/secondary" -name '*.dart' ! -name 'module_entry.dart' -delete 2>/dev/null || true
+
+    # 步骤 3: 清理不需要的文件
+    log_info "[3/8] 清理缓存和临时文件..."
     rm -rf "$new_project_path/.git"
     rm -rf "$new_project_path/.dart_tool"
     rm -rf "$new_project_path/.idea"
@@ -194,8 +209,8 @@ main() {
         sed -i '' 's|^plugins/$|# plugins/|' "$new_project_path/.gitignore"
     fi
 
-    # 步骤 3: 更新 pubspec.yaml / pubspec.yaml.template
-    log_info "[3/7] 更新 pubspec 配置..."
+    # 步骤 4: 更新 pubspec.yaml / pubspec.yaml.template
+    log_info "[4/8] 更新 pubspec 配置..."
     sed -i '' "s/^name: .*/name: $project_name/" "$new_project_path/pubspec.yaml"
     sed -i '' "s/^description: .*/description: A new Flutter project/" "$new_project_path/pubspec.yaml"
     sed -i '' "s/daddy_template/$project_name/g" "$new_project_path/pubspec.yaml"
@@ -212,8 +227,8 @@ main() {
         fi
     done
 
-    # 步骤 4: 更新 iOS Bundle Identifier
-    log_info "[4/7] 更新 iOS Bundle Identifier..."
+    # 步骤 5: 更新 iOS Bundle Identifier
+    log_info "[5/8] 更新 iOS Bundle Identifier..."
 
     # 更新 project.pbxproj 中的主应用 Bundle ID
     sed -i '' "s/com.daddy.template/$bundle_id/g" "$new_project_path/ios/Runner.xcodeproj/project.pbxproj"
@@ -221,8 +236,8 @@ main() {
     # 更新测试目标的 Bundle ID
     sed -i '' "s/com.example.daddyTemplate.RunnerTests/${bundle_id}.RunnerTests/g" "$new_project_path/ios/Runner.xcodeproj/project.pbxproj"
 
-    # 步骤 5: 更新 iOS Info.plist
-    log_info "[5/7] 更新 iOS 配置 (显示名称、URL Scheme)..."
+    # 步骤 6: 更新 iOS Info.plist
+    log_info "[6/8] 更新 iOS 配置 (显示名称、URL Scheme)..."
     # 更新 CFBundleDisplayName
     sed -i '' "s/<string>Daddy Template<\/string>/<string>$display_name<\/string>/" "$new_project_path/ios/Runner/Info.plist"
     # 更新 CFBundleName
@@ -230,8 +245,8 @@ main() {
     # 更新 URL Scheme 为 bundle ID
     sed -i '' "s/<string>com.daddy.template<\/string>/<string>$bundle_id<\/string>/" "$new_project_path/ios/Runner/Info.plist"
 
-    # 步骤 6: 更新应用配置
-    log_info "[6/7] 更新应用配置..."
+    # 步骤 7: 更新应用配置
+    log_info "[7/8] 更新应用配置..."
     sed -i '' "s/static const String appName = .*/static const String appName = '$display_name';/" \
         "$new_project_path/lib/config/app_config.dart"
 
@@ -240,8 +255,8 @@ main() {
         mv "$new_project_path/daddy_template.iml" "$new_project_path/${project_name}.iml"
     fi
 
-    # 步骤 7: 初始化新的 git 仓库
-    log_info "[7/7] 初始化 Git 仓库..."
+    # 步骤 8: 初始化新的 git 仓库
+    log_info "[8/8] 初始化 Git 仓库..."
     cd "$new_project_path"
     git init -q
     git add .

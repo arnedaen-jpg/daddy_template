@@ -2099,60 +2099,94 @@ obfuscate_asset_filenames() {
     fi
 }
 
-# 同步 plugins（源项目含 plugins/ 目录时自动同步: hjsq, 51pc, hlw, tiktok 等）
+# 同步 plugins/ 与 plugin/（dq/xty：path 依赖放在 B 面根目录 plugin/ 单数；旧项目可能用 plugins/）
 sync_plugins() {
-    if [[ ! -d "$SOURCE_PATH/plugins" ]]; then
-        return
-    fi
-
-    log_step "同步 plugins..."
-
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] 将同步 plugins 目录"
+        if [[ -d "$SOURCE_PATH/plugins" ]] || [[ -d "$SOURCE_PATH/plugin" ]]; then
+            log_info "[DRY-RUN] 将同步 plugins/ 或 plugin/"
+        fi
         return
     fi
 
-    # 清空并创建目标 plugins 目录
-    if [[ -d "$TARGET_PLUGINS_DIR" ]]; then
-        rm -rf "$TARGET_PLUGINS_DIR"
+    local did_any=false
+
+    if [[ -d "$SOURCE_PATH/plugins" ]]; then
+        did_any=true
+        log_step "同步 plugins..."
+        # 清空并创建目标 plugins 目录
+        if [[ -d "$TARGET_PLUGINS_DIR" ]]; then
+            rm -rf "$TARGET_PLUGINS_DIR"
+        fi
+        mkdir -p "$TARGET_PLUGINS_DIR"
+
+        # 使用 rsync 复制，排除 Flutter 构建临时文件和无效符号链接
+        # --exclude 排除 ephemeral 目录、.plugin_symlinks、build 目录、测试目录等
+        if command -v rsync &> /dev/null; then
+            rsync -a --copy-links \
+                --exclude='ephemeral/' \
+                --exclude='.plugin_symlinks/' \
+                --exclude='build/' \
+                --exclude='.dart_tool/' \
+                --exclude='*.iml' \
+                --exclude='dev_packages/' \
+                --exclude='example/' \
+                --exclude='test/' \
+                --exclude='integration_test/' \
+                --exclude='pigeons/' \
+                "$SOURCE_PATH/plugins/" "$TARGET_PLUGINS_DIR/"
+            log_info "使用 rsync 同步 plugins（已排除临时文件、测试目录和代码生成源）"
+        else
+            # 回退到 cp，但跳过有问题的目录
+            for plugin_dir in "$SOURCE_PATH/plugins"/*; do
+                if [[ -d "$plugin_dir" ]]; then
+                    local plugin_name
+                    plugin_name=$(basename "$plugin_dir")
+                    # 使用 cp 但忽略错误
+                    cp -r "$plugin_dir" "$TARGET_PLUGINS_DIR/$plugin_name" 2>/dev/null || {
+                        log_warning "复制 plugin $plugin_name 时有部分文件跳过"
+                    }
+                    log_info "已复制: plugin: $plugin_name"
+                fi
+            done
+        fi
+
+        # 清理可能复制过来的无效符号链接
+        find "$TARGET_PLUGINS_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+
+        log_success "plugins 同步完成"
     fi
-    mkdir -p "$TARGET_PLUGINS_DIR"
 
-    # 使用 rsync 复制，排除 Flutter 构建临时文件和无效符号链接
-    # --exclude 排除 ephemeral 目录、.plugin_symlinks、build 目录、测试目录等
-    if command -v rsync &> /dev/null; then
-        rsync -a --copy-links \
-            --exclude='ephemeral/' \
-            --exclude='.plugin_symlinks/' \
-            --exclude='build/' \
-            --exclude='.dart_tool/' \
-            --exclude='*.iml' \
-            --exclude='dev_packages/' \
-            --exclude='example/' \
-            --exclude='test/' \
-            --exclude='integration_test/' \
-            --exclude='pigeons/' \
-            "$SOURCE_PATH/plugins/" "$TARGET_PLUGINS_DIR/"
-        log_info "使用 rsync 同步 plugins（已排除临时文件、测试目录和代码生成源）"
-    else
-        # 回退到 cp，但跳过有问题的目录
-        for plugin_dir in "$SOURCE_PATH/plugins"/*; do
-            if [[ -d "$plugin_dir" ]]; then
-                local plugin_name
-                plugin_name=$(basename "$plugin_dir")
-                # 使用 cp 但忽略错误
-                cp -r "$plugin_dir" "$TARGET_PLUGINS_DIR/$plugin_name" 2>/dev/null || {
-                    log_warning "复制 plugin $plugin_name 时有部分文件跳过"
-                }
-                log_info "已复制: plugin: $plugin_name"
-            fi
-        done
+    if [[ -d "$SOURCE_PATH/plugin" ]]; then
+        did_any=true
+        log_step "同步 B 面 plugin/（oaid、geetest、fijkplayer 等 path 依赖）..."
+        mkdir -p "$PROJECT_ROOT/plugin"
+        if command -v rsync &> /dev/null; then
+            rsync -a --copy-links \
+                --exclude='ephemeral/' \
+                --exclude='.plugin_symlinks/' \
+                --exclude='build/' \
+                --exclude='.dart_tool/' \
+                --exclude='*.iml' \
+                --exclude='dev_packages/' \
+                --exclude='example/' \
+                --exclude='test/' \
+                --exclude='integration_test/' \
+                --exclude='pigeons/' \
+                "$SOURCE_PATH/plugin/" "$PROJECT_ROOT/plugin/"
+            log_info "已 rsync: $SOURCE_PATH/plugin/ → $PROJECT_ROOT/plugin/"
+        else
+            log_warning "rsync 不可用，使用 cp -R 复制 plugin/"
+            rm -rf "${PROJECT_ROOT:?}/plugin"
+            mkdir -p "$PROJECT_ROOT/plugin"
+            cp -R "$SOURCE_PATH/plugin/." "$PROJECT_ROOT/plugin/" 2>/dev/null || true
+        fi
+        find "$PROJECT_ROOT/plugin" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+        log_success "plugin/ 同步完成"
     fi
 
-    # 清理可能复制过来的无效符号链接
-    find "$TARGET_PLUGINS_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-
-    log_success "plugins 同步完成"
+    if [[ "$did_any" != "true" ]]; then
+        return
+    fi
 }
 
 # 同步 flutter_base（md 项目特有）
@@ -2975,6 +3009,58 @@ merge_pubspec() {
     merge_pubspec_impl
 }
 
+# 从 B 面 pubspec 的 dependency_overrides 段拆成条目块（须保留 path:/git: 等多行子项；
+# 若只合并 «包名:» 单行，pub 会当成从 pub.dev 拉 any，导致 oaid_info_plugin 等本地包解析失败）
+_collect_override_blocks_from_pubspec() {
+    local source_pubspec="$1"
+    local out_blocks="$2"
+    : > "$out_blocks"
+    local temp_body="/tmp/secondary_override_body_$$.yaml"
+    awk '
+        /^dependency_overrides:/ { grab=1; next }
+        grab && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { exit }
+        grab { print }
+    ' "$source_pubspec" > "$temp_body" 2>/dev/null || true
+    [[ ! -s "$temp_body" ]] && { rm -f "$temp_body"; return 0; }
+
+    local block=""
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+        if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_-][a-zA-Z0-9_-]*: ]]; then
+            if [[ -n "$block" ]]; then
+                printf '%s\n\n' "$block" >> "$out_blocks"
+            fi
+            block="$line"
+        else
+            block+=$'\n'"$line"
+        fi
+    done < "$temp_body"
+    if [[ -n "$block" ]]; then
+        printf '%s\n\n' "$block" >> "$out_blocks"
+    fi
+    rm -f "$temp_body"
+}
+
+# 仅当 override 含 path/git 或 plugins/ 下已有对应包时，才写入壳工程 pubspec（避免 pub.dev 拉取 oaid_info_plugin 等本地包失败）
+_prepare_override_block_for_shell() {
+    local block="$1"
+    local dep_name
+    dep_name=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+    if [[ -z "$dep_name" ]]; then
+        return 1
+    fi
+    if echo "$block" | grep -qE '^[[:space:]]{4,}(path|git):'; then
+        echo "$block"
+        return 0
+    fi
+    if [[ -d "$TARGET_PLUGINS_DIR/$dep_name" && -f "$TARGET_PLUGINS_DIR/$dep_name/pubspec.yaml" ]]; then
+        echo "  ${dep_name}:"
+        echo "    path: plugins/${dep_name}"
+        return 0
+    fi
+    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/${dep_name} 不存在）"
+    return 1
+}
+
 # pubspec 合并实现（使用 sed/grep）
 merge_pubspec_impl() {
     local target_pubspec="$PROJECT_ROOT/pubspec.yaml"
@@ -3166,34 +3252,58 @@ merge_pubspec_impl() {
     fi
 
     # --- 合并 dependency_overrides ---
-    # 某些 B 面项目在 dependency_overrides 中放置了实际使用的依赖（如 hlw 的 qr_flutter），
-    # 这些 override 如果不带过来，同步后会缺失导致编译报错。
-    local temp_overrides="/tmp/secondary_overrides_$$.yaml"
-    > "$temp_overrides"
+    # 某些 B 面在 dependency_overrides 里含 path/git 多行条目，必须整块合并；
+    # 旧逻辑只取 «  xx: » 单行会生成「空约束」，pub 会去 pub.dev 拉 any（如 oaid_info_plugin）并解析失败。
+    local temp_overrides_blocks="/tmp/secondary_overrides_blocks_$$.yaml"
+    local temp_overrides_filtered="/tmp/secondary_overrides_filtered_$$.yaml"
+    > "$temp_overrides_filtered"
 
     if grep -q "^dependency_overrides:" "$source_pubspec" 2>/dev/null; then
-        # 提取 override 条目（仅普通 key: value 格式，跳过 flutter 相关）
-        sed -n '/^dependency_overrides:/,/^[a-z_-]*:/p' "$source_pubspec" | \
-            grep -v "^dependency_overrides:" | \
-            grep -v "^[a-z_-]*:" | \
-            grep -v "^$" | \
-            grep "^  [a-z]" > "$temp_overrides" || true
+        _collect_override_blocks_from_pubspec "$source_pubspec" "$temp_overrides_blocks"
 
         local override_count=0
-        if [[ -s "$temp_overrides" ]]; then
-            local temp_overrides_filtered="/tmp/secondary_overrides_filtered_$$.yaml"
-            > "$temp_overrides_filtered"
-            while IFS= read -r line; do
-                local dep_name
-                dep_name=$(echo "$line" | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
-                [[ "$dep_name" == "flutter" || "$dep_name" == "flutter_localizations" ]] && continue
-                # 只合并目标 dependencies 中尚未出现的
-                if ! grep -q "^  ${dep_name}:" "$target_pubspec"; then
-                    echo "$line" >> "$temp_overrides_filtered"
+        if [[ -s "$temp_overrides_blocks" ]]; then
+            local block=""
+            while IFS= read -r line || [[ -n "${line:-}" ]]; do
+                if [[ -z "$line" ]]; then
+                    if [[ -n "$block" ]]; then
+                        local dep_name
+                        dep_name=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+                        if [[ "$dep_name" != "flutter" && "$dep_name" != "flutter_localizations" ]] \
+                            && ! grep -q "^  ${dep_name}:" "$target_pubspec"; then
+                            local prepared_block=""
+                            prepared_block=$(_prepare_override_block_for_shell "$block") || true
+                            if [[ -n "$prepared_block" ]]; then
+                                printf '%s\n' "$prepared_block" >> "$temp_overrides_filtered"
+                                echo "" >> "$temp_overrides_filtered"
+                                override_count=$((override_count + 1))
+                            fi
+                        fi
+                        block=""
+                    fi
+                    continue
                 fi
-            done < "$temp_overrides"
+                if [[ -n "$block" ]]; then
+                    block+=$'\n'"$line"
+                else
+                    block="$line"
+                fi
+            done < "$temp_overrides_blocks"
+            if [[ -n "$block" ]]; then
+                local dep_name_flush
+                dep_name_flush=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+                if [[ "$dep_name_flush" != "flutter" && "$dep_name_flush" != "flutter_localizations" ]] \
+                    && ! grep -q "^  ${dep_name_flush}:" "$target_pubspec"; then
+                    local prepared_flush=""
+                    prepared_flush=$(_prepare_override_block_for_shell "$block") || true
+                    if [[ -n "$prepared_flush" ]]; then
+                        printf '%s\n' "$prepared_flush" >> "$temp_overrides_filtered"
+                        echo "" >> "$temp_overrides_filtered"
+                        override_count=$((override_count + 1))
+                    fi
+                fi
+            fi
 
-            override_count=$(wc -l < "$temp_overrides_filtered" | tr -d ' ')
             if [[ "$override_count" -gt 0 ]]; then
                 # 写入 dependency_overrides 段到目标 pubspec
                 if grep -q "^dependency_overrides:" "$target_pubspec"; then
@@ -3231,12 +3341,12 @@ merge_pubspec_impl() {
                     } > "${target_pubspec}.tmp"
                     mv "${target_pubspec}.tmp" "$target_pubspec"
                 fi
-                log_info "已合并 $override_count 个 dependency_overrides"
+                log_info "已合并 $override_count 条 dependency_overrides（含 path/git 多行）"
             fi
             rm -f "$temp_overrides_filtered"
         fi
     fi
-    rm -f "$temp_overrides"
+    rm -f "$temp_overrides_blocks"
 
     # 清理临时文件
     rm -f "$temp_deps" "$temp_deps_filtered" "$temp_git_deps" "$temp_assets"
@@ -3567,7 +3677,7 @@ sync_flutter_base
     replace_image_asset_entries   # 批量替换图片入口组件（可选）
     replace_asset_image_providers # 批量替换 AssetImage/ExactAssetImage（Base64 下的 DecorationImage 等场景）
     type -t create_md_assets_symlinks &>/dev/null && create_md_assets_symlinks
-    sync_plugins
+    sync_plugins                  # 须在 merge_pubspec 前完成，供 path override 解析 plugins/
     sync_ios_permissions          # 同步 iOS 权限配置
     sync_ios_podfile              # 同步 iOS Podfile 配置（解决 iOS 18.5 libswiftWebKit 问题）
     type -t sync_md_ios_native_files &>/dev/null && sync_md_ios_native_files
