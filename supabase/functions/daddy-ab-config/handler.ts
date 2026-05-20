@@ -681,12 +681,15 @@ async function buildSeenBundleRows(
       getEffectiveConfigAb(env, bid),
       isBundleForcedB(env, bid),
     ]);
-    const note = hasOwn
+    const clientAb = bundleForcedB ? "B" : effectiveAb;
+    const note = bundleForcedB
+      ? "已开全员强 B：客户端拉配置将得到 B（黑名单/苹果锁除外）"
+      : hasOwn
       ? "KV 已有独立键 ab_config_*"
       : "KV 无独立键，当前与全局 ab_config 兜底一致";
     return {
       bundleId: bid,
-      effectiveAb,
+      effectiveAb: clientAb,
       hasOwnKvKey: hasOwn,
       note,
       bundleForcedB,
