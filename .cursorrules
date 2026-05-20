@@ -1,0 +1,127 @@
+# Daddy Template - Flutter AB Package Template
+
+## Project Overview
+
+This is a Flutter iOS template for App Store submission that displays different UIs (primary vs secondary mode) based on remote configuration. The primary mode is shown during App Store review; the secondary mode is activated via remote config after approval.
+
+## Tech Stack
+
+- **Framework**: Flutter 3.3.4+
+- **Language**: Dart
+- **Platform**: iOS only
+- **Version Manager**: FVM (Flutter Version Manager)
+- **State Management**: ChangeNotifier + Singleton pattern
+- **HTTP Client**: Dio
+- **Local Storage**: SharedPreferences
+
+## Architecture
+
+### Core Flow
+1. `SplashPage` initializes services (EnvConfig → HttpClient → ConfigService)
+2. `ConfigService` fetches remote config from `/client/api/config`
+3. `AppRouter.generateRoute()` checks `ConfigService.isSecondaryMode` to route to appropriate UI
+4. Config is refreshed on app startup, network authorization, and foreground resume
+
+### Key Services
+- **ConfigService**: Singleton that manages primary/secondary mode switching with memory mode and silent period
+- **HttpClient**: Dio-based HTTP client with retry logic
+- **EnvConfig**: Environment-specific API URLs (dev/staging/prod)
+
+### Module Separation (Critical)
+```
+lib/modules/
+├── primary/     # Review-facing UI - develop freely for App Store approval
+└── secondary/   # Business UI - synced from external repo, DO NOT modify directly
+```
+
+## Code Conventions
+
+### Dart Style
+- Use `const` constructors where possible
+- Prefer `final` for immutable variables
+- Use trailing commas for better formatting
+- Follow `flutter_lints` rules
+- Chinese comments are acceptable (bilingual codebase)
+
+### File Organization
+```dart
+// Import order:
+import 'dart:async';                    // 1. Dart SDK
+import 'package:flutter/material.dart'; // 2. Flutter packages
+import 'package:dio/dio.dart';          // 3. Third-party packages
+import '../config/app_config.dart';     // 4. Relative imports
+```
+
+### Widget Pattern
+```dart
+class MyWidget extends StatefulWidget {
+  const MyWidget({super.key});  // Use super.key
+
+  @override
+  State<MyWidget> createState() => _MyWidgetState();
+}
+```
+
+### Service Pattern (Singleton)
+```dart
+class MyService {
+  static final MyService _instance = MyService._internal();
+  factory MyService() => _instance;
+  MyService._internal();
+}
+```
+
+## Commands
+
+Always use FVM for Flutter commands:
+```bash
+fvm flutter pub get      # Install dependencies
+fvm flutter run          # Run app
+fvm flutter build ios    # Build iOS
+fvm flutter analyze      # Static analysis
+```
+
+## Important Files
+
+| File | Purpose |
+|------|---------|
+| `lib/services/config_service.dart` | Mode switching logic with memory mode |
+| `lib/router/app_router.dart` | Dynamic routing based on config |
+| `lib/modules/secondary/module_entry.dart` | Secondary module entry point (auto-generated) |
+| `lib/config/app_config.dart` | App-wide configuration constants |
+| `lib/config/env_config.dart` | Environment-specific settings |
+
+## Development Guidelines
+
+### DO
+- Develop primary module freely (`lib/modules/primary/`)
+- Use `AppConfig.debugMode` guards for debug-only features
+- Follow existing patterns for services and widgets
+- Use relative imports within the lib folder
+- Test mode switching via the env switcher overlay
+
+### DON'T
+- Modify `lib/modules/secondary/` directly (synced from external repo)
+- Hardcode API URLs (use `EnvConfig`)
+- Remove the `ModuleEntry` interface (required for secondary module integration)
+- Commit `pubspec.yaml` or `pubspec.lock` (generated files)
+
+### Security Considerations
+- API paths are stored as byte arrays to avoid App Store static analysis detection
+- Remote config endpoint should have proper authentication
+- Default to primary mode on network failure
+
+## Scripts
+
+```bash
+./scripts/sync_secondary.sh -p <project>  # Sync secondary module code
+./scripts/init_pubspec.sh                 # Reset pubspec.yaml to template
+./scripts/create_ab_project.sh            # Initialize new project
+```
+
+## Git Ignored (Do Not Commit)
+- `pubspec.yaml`, `pubspec.lock`
+- `lib/modules/secondary/` (except `module_entry.dart` template)
+- `scripts/sync_secondary.conf`
+- `assets/side_b/`
+- `backups/`

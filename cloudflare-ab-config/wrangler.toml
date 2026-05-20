@@ -1,0 +1,26 @@
+# Cloudflare Worker：自建 /client/api/config + KV(A/B) + D1(访问日志)
+# 1. 创建 KV：wrangler kv:namespace create CONFIG_KV
+# 2. 创建 D1：wrangler d1 create daddy-ab-logs && wrangler d1 migrations apply daddy-ab-logs --local  # 本地
+#    生产：wrangler d1 migrations apply daddy-ab-logs --remote
+# 3. 将下方 kv_namespaces.id / d1_databases.database_id 替换为控制台输出值
+# 4. 设置密钥：wrangler secret put CONFIG_AUTH_TOKEN（与 Flutter lib/utils/s.dart 中 token 一致）
+# 5. 写入默认 A/B：wrangler kv key put --binding=CONFIG_KV ab_config "A"
+
+name = "daddy-ab-config"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# 为 true 时管理页 /admin 与 /admin/api/* 不校验 Token（任何人可看日志、可强制 B）。生产请改为 false 或删除本段。
+[vars]
+ADMIN_OPEN = "true"
+# 为 true 时可用请求头 X-Mock-Apple-ASN: 1 模拟苹果出口（演示用，上线请改为 false 或删除）
+DEMO_MOCK_APPLE = "true"
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "13c3272b90514f83bfca54a6e30fcb60"
+
+[[d1_databases]]
+binding = "CONFIG_DB"
+database_name = "daddy-ab-logs"
+database_id = "3b81fa1d-6725-41b1-bf67-b6d41f1e9dc5"

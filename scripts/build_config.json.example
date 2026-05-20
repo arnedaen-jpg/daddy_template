@@ -1,0 +1,20 @@
+{
+  "bundle_id": "com.yourapp.bundleid",
+  "team_id": "YOUR_TEAM_ID",
+  "profile": "appstore.mobileprovision",
+  "certificate": "ios_distribution.cer",
+  "private_key": "mykey.key",
+  "export_dir": "ipa",
+  "export_method": "app-store",
+  "code_sign_identity": "Apple Distribution",
+  "signing_style": "manual",
+  "flutter_build_mode": "release",
+  "apple_api_key": {
+    "key_id": "YOUR_KEY_ID",
+    "issuer_id": "YOUR_ISSUER_ID",
+    "p8_file": "private_keys/AuthKey_YOUR_KEY_ID.p8"
+  },
+  "proxy": {
+    "socks5": "socks5://host:port:username:password"
+  }
+}

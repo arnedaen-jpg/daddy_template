@@ -1,0 +1,130 @@
+name: daddy_template
+description: "Flutter AB 包模板工程 - 用于生成可上架 iOS 的 AB 包应用"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 网络请求
+  dio: ^5.4.0
+
+  # 本地存储
+  shared_preferences: ^2.2.2
+
+  # 设备信息
+  device_info_plus: ^10.1.0
+  package_info_plus: ^8.0.0
+
+
+  # === 次要模块依赖 (自动添加 from dq) ===
+  quiver: ^3.2.2
+  intl: ^0.20.2
+  vibration: ^2.1.0
+  isolate_manager: ^6.1.1
+  get: 4.7.2
+  event_bus: ^2.0.0
+  logger: ^2.2.0
+  flutter_svg: 2.0.5
+  svgaplayer_flutter: ^2.2.0
+  photo_view: ^0.15.0
+  flutter_easyloading: ^3.0.5
+  syncfusion_flutter_datagrid: ^20.3.61
+  easy_refresh: 3.4.0
+  flutter_screenutil: 5.9.3
+  extended_nested_scroll_view: 6.2.1
+  flutter_widget_from_html: ^0.16.1
+  crypto: 3.0.7
+  encrypt: 5.0.3
+  card_swiper: ^3.0.1
+  table_calendar: ^3.2.0
+  flutter_barrage: ^0.5.5
+  video_thumbnail: ^0.5.6
+  umeng_common_sdk: ^1.2.8
+  umeng_common_sdk_ohos: 1.2.9
+  app_tracking_transparency: ^2.0.4
+  permission_handler_ohos: ^0.0.6
+  permission_handler: ^10.4.5
+  marquee: ^2.2.3
+  grouped_list: ^6.0.0
+  azlistview: ^2.0.0
+  lottie: ^2.3.2
+  sticky_and_expandable_list: ^1.1.3
+  flutter_draggable_gridview: ^0.0.8
+  flutter_picker: ^2.1.0
+  scrollable_positioned_list: ^0.2.3
+  visibility_detector: ^0.4.0+2
+  path: ^1.8.0
+  flutter_staggered_grid_view: ^0.7.0
+  table_sticky_headers: ^2.0.5
+  archive: ^3.6.1
+  nine_grid_view: ^2.0.0
+  html: ^0.15.4
+
+
+dependency_overrides:
+  geetest_sdk:
+  http: ^1.2.2
+  rxdart: ^0.28.0
+  flutter_spinkit:
+  rongcloud_im_wrapper_plugin: ^5.32.4
+  fijkplayer:
+  chewie:
+  video_player:
+  webview_flutter:
+  webview_flutter_wkwebview:
+  webview_flutter_web:
+  webview_flutter_android:
+  webview_flutter_platform_interface:
+  webview_flutter_ohos:
+  flutter_datetime_picker:
+  image_picker: ^1.2.1
+  cached_network_image:
+  flutter_cache_manager:
+  sqflite:
+  connectivity_plus:
+  fading_edge_scrollview: 4.1.1
+  path_provider:
+  oaid_info_plugin:
+  url_launcher: ^6.3.2
+  audioplayers:
+  uuid: 4.5.2
+  get_storage:
+  qrcode_flutter:
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: 2.0.3
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    # === 次要模块 assets (自动添加) ===
+    - assets/secondary/images/
+    - assets/secondary/images/cfgimgs/
+    - assets/secondary/images/match/
+    - assets/secondary/images/mine/
+    - assets/secondary/images/esport/
+    - assets/secondary/images/player/
+    - assets/secondary/svgs/
+    - assets/secondary/svgs/anchor/
+    - assets/secondary/json/
+    - assets/secondary/gif/
+    - assets/secondary/audio/
+    - assets/secondary/other/
+
+  # assets:
+  #   - assets/images/
+  #   - assets/icons/

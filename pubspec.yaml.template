@@ -1,0 +1,37 @@
+name: daddy_template
+description: "Flutter AB 包模板工程 - 用于生成可上架 iOS 的 AB 包应用"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.4 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 网络请求
+  dio: ^5.4.0
+
+  # 本地存储
+  shared_preferences: ^2.2.2
+
+  # 设备信息
+  device_info_plus: ^10.1.0
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+
+  # assets:
+  #   - assets/images/
+  #   - assets/icons/
