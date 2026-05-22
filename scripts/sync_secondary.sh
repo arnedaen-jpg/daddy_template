@@ -3025,16 +3025,21 @@ _collect_override_blocks_from_pubspec() {
 
     local block=""
     while IFS= read -r line || [[ -n "${line:-}" ]]; do
-        if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_-][a-zA-Z0-9_-]*: ]]; then
+        # 仅识别真实包名行（须以字母开头）；纯注释行勿单独成块，避免 tr -d 空格后误入 pubspec
+        if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*: ]]; then
             if [[ -n "$block" ]]; then
-                printf '%s\n\n' "$block" >> "$out_blocks"
+                if echo "$block" | grep -qE '^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:'; then
+                    printf '%s\n\n' "$block" >> "$out_blocks"
+                fi
             fi
             block="$line"
         else
-            block+=$'\n'"$line"
+            if [[ -n "$block" ]]; then
+                block+=$'\n'"$line"
+            fi
         fi
     done < "$temp_body"
-    if [[ -n "$block" ]]; then
+    if [[ -n "$block" ]] && echo "$block" | grep -qE '^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:'; then
         printf '%s\n\n' "$block" >> "$out_blocks"
     fi
     rm -f "$temp_body"
@@ -3057,7 +3062,12 @@ _prepare_override_block_for_shell() {
         echo "    path: plugins/${dep_name}"
         return 0
     fi
-    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/${dep_name} 不存在）"
+    if [[ -d "$PROJECT_ROOT/plugin/$dep_name" && -f "$PROJECT_ROOT/plugin/$dep_name/pubspec.yaml" ]]; then
+        echo "  ${dep_name}:"
+        echo "    path: plugin/${dep_name}"
+        return 0
+    fi
+    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/、plugin/ 均无该包）" >&2
     return 1
 }
 
