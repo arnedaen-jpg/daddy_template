@@ -179,11 +179,23 @@ PY
 # ------------------------------------------------------------
 # pub get 之后的兼容修复（双管齐下：Runner xcconfig + Pods Podfile）
 #
-# 目标：让 Apple Silicon Mac 上跑 iOS 模拟器时排除 arm64-simulator，
-# 走 x86_64 + Rosetta，绕开 BIJKPlayer 老 fat framework 没有 arm64-simulator slice
-# 引发的链接错误：
-#   "Building for iOS-simulator, but linking in object file …
-#    /IJKMediaPlayer[arm64](ijksdl_log.o) built for iOS"
+# 目标：让 Apple Silicon Mac 上的 iOS 模拟器构建走 x86_64 (Rosetta)，
+# 与 dqiu 独立工程行为完全对齐（dqiu Runner.app 实测也是 x86_64-only）。
+# 绕开两个相关问题：
+#   A) BIJKPlayer 老 fat framework 没有 arm64-simulator slice：
+#        "Building for iOS-simulator, but linking in object file …
+#         /IJKMediaPlayer[arm64](ijksdl_log.o) built for iOS"
+#   B) flutter run -d <arm64-sim UDID> + ONLY_ACTIVE_ARCH=YES 时，
+#      destination 的 native arch (arm64) 被 EXCLUDED_ARCHS 排除 →
+#      app_tracking_transparency 等 swift module 编不出任何架构 →
+#      "Module 'app_tracking_transparency' not found"
+#
+# 修复策略（三件套）：
+#   1. EXCLUDED_ARCHS[sdk=iphonesimulator*] 含 arm64  （排除 arm64-sim）
+#   2. ARCHS[sdk=iphonesimulator*] = x86_64           （强制只编 x86_64）
+#   3. ONLY_ACTIVE_ARCH = NO                          （不锁 destination active arch）
+# 三者缺一不可：(B) 问题在 flutter run -d <UDID> 才暴露，
+# 单独跑 flutter build ios --simulator (generic) 不会触发，所以容易漏。
 #
 # 为什么需要两处注入：
 #   (1) Runner 主工程 → ios/Flutter/Generated.xcconfig
@@ -193,30 +205,28 @@ PY
 #       Pods 是独立 xcodeproj，不读 Runner 的 xcconfig。Flutter SDK 的
 #       flutter_additional_ios_build_settings 在 Podfile.post_install 会硬覆盖
 #       每个 Pods target 的 EXCLUDED_ARCHS[sdk=iphonesimulator*]= "$(inherited) i386"
-#       (podhelper.rb:114)。所以必须在它之后再追加 arm64。podspec 的
-#       pod_target_xcconfig / user_target_xcconfig 既不会冒泡到 Runner，
-#       又会被 Flutter 覆盖，无效。
+#       (podhelper.rb:114)。所以必须在它之后再追加 arm64 / ARCHS / ONLY_ACTIVE_ARCH。
+#       podspec 的 pod_target_xcconfig 既不会冒泡到 Runner，又会被 Flutter 覆盖，无效。
 #
-# 单独改 Generated.xcconfig 不够（之前一直失败的原因）：Pods target 走 Pods 自己
-# 的 EXCLUDED_ARCHS，仍只排除 i386，链接 BIJKPlayer arm64 切片仍会爆。
 # Podfile patch 用 sentinel 包裹保证幂等，sync_secondary.sh 后续重跑都不会重复注入。
-# dqiu 独立工程的 Generated.xcconfig 历史上也是 "i386 arm64"，这里让壳工程对齐。
+# dqiu 独立工程的 Generated.xcconfig 也是 "i386 arm64"，最终 Runner.app 为 x86_64，
+# 这里只是让壳工程跟 dqiu 独立运行行为对齐。
 # ------------------------------------------------------------
 post_pub_get_dq_compatibility() {
   local cfg="$PROJECT_ROOT/ios/Flutter/Generated.xcconfig"
   local podfile="$PROJECT_ROOT/ios/Podfile"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] dq 将追加 arm64 到 ios/Flutter/Generated.xcconfig 的 EXCLUDED_ARCHS[sdk=iphonesimulator*]"
-    log_info "[DRY-RUN] dq 将 patch ios/Podfile post_install，给 Pods 各 target 追加 arm64 simulator 排除"
+    log_info "[DRY-RUN] dq 将强制 ios/Flutter/Generated.xcconfig simulator 走 x86_64 (Rosetta)"
+    log_info "[DRY-RUN] dq 将 patch ios/Podfile post_install，给 Pods 各 target 同步强制 x86_64"
     return 0
   fi
 
   # === (1) Runner 主工程：Generated.xcconfig ===
-  # Runner 读 Generated.xcconfig + Pods-Runner.<config>.xcconfig 决定自身架构。
-  # flutter pub get 保留已有 EXCLUDED_ARCHS 行（实测），所以一次注入持久。
+  # 写入三件套：EXCLUDED_ARCHS 含 arm64 / ARCHS=x86_64 / ONLY_ACTIVE_ARCH=NO。
+  # flutter pub get 保留已有这些行（实测），所以一次注入持久。
   if [[ ! -f "$cfg" ]]; then
-    log_warning "未找到 ios/Flutter/Generated.xcconfig，跳过 Runner 架构排除"
+    log_warning "未找到 ios/Flutter/Generated.xcconfig，跳过 Runner 架构对齐"
   else
     python3 - "$cfg" <<'PY'
 import sys
@@ -224,30 +234,48 @@ from pathlib import Path
 
 cfg = Path(sys.argv[1])
 lines = cfg.read_text(encoding="utf-8").splitlines()
-key = "EXCLUDED_ARCHS[sdk=iphonesimulator*]"
-prefix = key + "="
 
-found = False
+# 需要 upsert 的设置（key 必须按 prefix 长度切，不能用 split('=',1)，因为 key 本身含 '='）。
+desired = [
+    # (key, default_value, merge_tokens)
+    ("EXCLUDED_ARCHS[sdk=iphonesimulator*]", "i386 arm64", {"arm64"}),
+    ("ARCHS[sdk=iphonesimulator*]", "x86_64", None),
+    ("ONLY_ACTIVE_ARCH", "NO", None),
+]
+
 changed = False
-out = []
-for ln in lines:
-    if ln.startswith(prefix):
-        # 注意：key 本身含 '='，不能用 ln.split('=', 1)，必须按 prefix 长度切。
-        # 旧版用 split('=', 1) 会把 'EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386'
-        # 错切成 ['EXCLUDED_ARCHS[sdk', 'iphonesimulator*]=i386']，最终写出
-        # 畸形行 '...=iphonesimulator*]=i386 arm64'，被 Xcode 解析为无效设置。
-        found = True
-        cur = ln[len(prefix):].strip()
-        toks = cur.split()
-        if "arm64" not in toks:
-            toks.append("arm64")
-            ln = f"{prefix}{' '.join(toks)}"
-            changed = True
-    out.append(ln)
+out = list(lines)
 
-if not found:
-    out.append(f"{prefix}i386 arm64")
-    changed = True
+for key, default, merge_tokens in desired:
+    prefix = key + "="
+    found_idx = -1
+    for i, ln in enumerate(out):
+        if ln.startswith(prefix):
+            found_idx = i
+            break
+
+    if found_idx == -1:
+        out.append(f"{prefix}{default}")
+        changed = True
+        continue
+
+    cur = out[found_idx][len(prefix):].strip()
+    if merge_tokens is None:
+        # 简单 upsert：值不等就覆盖
+        if cur != default:
+            out[found_idx] = f"{prefix}{default}"
+            changed = True
+    else:
+        # 集合合并（用于 EXCLUDED_ARCHS）
+        toks = cur.split()
+        added = False
+        for tok in merge_tokens:
+            if tok not in toks:
+                toks.append(tok)
+                added = True
+        if added:
+            out[found_idx] = f"{prefix}{' '.join(toks)}"
+            changed = True
 
 if changed:
     cfg.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -255,20 +283,15 @@ if changed:
 else:
     print("unchanged")
 PY
-    log_success "dq Runner 架构排除已对齐: Generated.xcconfig EXCLUDED_ARCHS[sdk=iphonesimulator*] 含 arm64"
+    log_success "dq Runner 架构已对齐: Generated.xcconfig simulator 走 x86_64 (Rosetta)"
   fi
 
   # === (2) Pods 各 target：Podfile post_install ===
-  # Pods 是独立 xcodeproj，不读 Runner 的 xcconfig。Flutter SDK 的
-  # flutter_additional_ios_build_settings 在 Podfile.post_install 会硬覆盖
-  # 每个 Pods target 的 EXCLUDED_ARCHS[sdk=iphonesimulator*]= "$(inherited) i386"
-  # (podhelper.rb:114)。所以必须在它之后再追加 arm64，否则 BIJKPlayer (老 fat
-  # framework, 无 arm64-simulator slice) 在 Apple Silicon 模拟器上会链接失败：
-  #   "Building for iOS-simulator, but linking in object file …
-  #    /IJKMediaPlayer[arm64](ijksdl_log.o) built for iOS"
-  # 用 sentinel 包裹保证幂等，不会重复注入或破坏其他 post_install 自定义。
+  # 在 flutter_additional_ios_build_settings(target) 之后追加，覆盖 podhelper.rb
+  # 写入的 "$(inherited) i386"。三件套：EXCLUDED arm64 / ARCHS x86_64 / ONLY_ACTIVE NO。
+  # sentinel 包裹保证幂等，不会破坏其他 post_install 自定义。
   if [[ ! -f "$podfile" ]]; then
-    log_warning "未找到 ios/Podfile，跳过 Pods 架构排除注入"
+    log_warning "未找到 ios/Podfile，跳过 Pods 架构对齐注入"
     return 0
   fi
 
@@ -280,8 +303,18 @@ from pathlib import Path
 podfile = Path(sys.argv[1])
 text = podfile.read_text(encoding="utf-8")
 
-SENTINEL_OPEN = "# === dq-compat: BIJKPlayer arm64-simulator 排除（由 compat_dq.sh 注入，勿删） ==="
+SENTINEL_OPEN = "# === dq-compat: simulator 强制 x86_64/Rosetta（由 compat_dq.sh 注入，勿删） ==="
 SENTINEL_CLOSE = "# === /dq-compat ==="
+
+# 兼容历史版本：旧 sentinel 替换为新 sentinel（同一职责扩容）。
+LEGACY_SENTINEL = "# === dq-compat: BIJKPlayer arm64-simulator 排除（由 compat_dq.sh 注入，勿删） ==="
+if LEGACY_SENTINEL in text and SENTINEL_OPEN not in text:
+    # 删除旧块，让新块重写
+    pattern_legacy = re.compile(
+        re.escape("    " + LEGACY_SENTINEL) + r".*?" + re.escape("    " + SENTINEL_CLOSE) + r"\n",
+        re.DOTALL,
+    )
+    text = pattern_legacy.sub("", text)
 
 if SENTINEL_OPEN in text:
     print("podfile_already_patched")
@@ -294,12 +327,13 @@ block = (
     "      unless excluded.split.include?('arm64')\n"
     "        config.build_settings['EXCLUDED_ARCHS[sdk=iphonesimulator*]'] = \"#{excluded} arm64\".strip\n"
     "      end\n"
+    "      config.build_settings['ARCHS[sdk=iphonesimulator*]'] = 'x86_64'\n"
+    "      config.build_settings['ONLY_ACTIVE_ARCH'] = 'NO'\n"
     "    end\n"
     "    " + SENTINEL_CLOSE + "\n"
 )
 
 # 注入位置：post_install 块里 flutter_additional_ios_build_settings(target) 之后。
-# 必须在它之后才能覆盖 podhelper.rb 写入的 "$(inherited) i386"。
 pattern = re.compile(
     r"(^[ \t]*flutter_additional_ios_build_settings\(target\)[ \t]*\n)",
     re.MULTILINE,
@@ -307,7 +341,7 @@ pattern = re.compile(
 new_text, n = pattern.subn(lambda m: m.group(1) + block, text, count=1)
 
 if n == 0:
-    # 兜底：Podfile 没有标准 post_install/flutter_additional_ios_build_settings 时,
+    # 兜底：Podfile 没有标准 post_install/flutter_additional_ios_build_settings 时，
     # 直接在文件末尾追加一个 post_install。Flutter 标准模板都不会走到这里。
     fallback = (
         "\n"
@@ -325,7 +359,7 @@ else:
 podfile.write_text(new_text, encoding="utf-8")
 PY
 
-  log_success "dq Pods 架构排除已注入: ios/Podfile post_install 含 BIJKPlayer arm64-simulator 排除块（sentinel 幂等）"
+  log_success "dq Pods 架构已注入: ios/Podfile post_install 强制 simulator 走 x86_64 (sentinel 幂等)"
 }
 
 # ------------------------------------------------------------
