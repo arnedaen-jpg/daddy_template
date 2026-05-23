@@ -218,23 +218,28 @@ from pathlib import Path
 cfg = Path(sys.argv[1])
 lines = cfg.read_text(encoding="utf-8").splitlines()
 key = "EXCLUDED_ARCHS[sdk=iphonesimulator*]"
+prefix = key + "="
 
 found = False
 changed = False
 out = []
 for ln in lines:
-    if ln.startswith(key + "="):
+    if ln.startswith(prefix):
+        # 注意：key 本身含 '='，不能用 ln.split('=', 1)，必须按 prefix 长度切。
+        # 旧版用 split('=', 1) 会把 'EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386'
+        # 错切成 ['EXCLUDED_ARCHS[sdk', 'iphonesimulator*]=i386']，最终写出
+        # 畸形行 '...=iphonesimulator*]=i386 arm64'，被 Xcode 解析为无效设置。
         found = True
-        cur = ln.split("=", 1)[1].strip()
+        cur = ln[len(prefix):].strip()
         toks = cur.split()
         if "arm64" not in toks:
             toks.append("arm64")
-            ln = f"{key}={' '.join(toks)}"
+            ln = f"{prefix}{' '.join(toks)}"
             changed = True
     out.append(ln)
 
 if not found:
-    out.append(f"{key}=i386 arm64")
+    out.append(f"{prefix}i386 arm64")
     changed = True
 
 if changed:
