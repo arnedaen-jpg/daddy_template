@@ -44,12 +44,27 @@ class DeviceInfoManager {
   /// iOS 系统版本
   String get iosVersion => _iosDeviceInfo?.systemVersion ?? '';
 
-  /// 展示用机型：优先 commercial 名称，其次 UIDevice.model，再次 utsname.machine（避免泛化 "iPhone" 或空串）
+  /// 展示用机型：优先 commercial 名称（device_info_plus 12.x+ 新增的 `modelName`，
+  /// 给出像 "iPhone 15 Pro" 这种真型号），其次 UIDevice.model（泛化的 "iPhone"），
+  /// 再次 utsname.machine（裸 identifier 如 "iPhone16,1"）。
+  ///
+  /// 用 dynamic 反射拿 modelName 是为了兼容仍走 path 依赖的老版本（11.x 没这个 getter，
+  /// 直接 `info.modelName` 在编译期就会报 `The getter 'modelName' isn't defined`）。
+  /// 老版自动降级到 model + utsname.machine，不再阻塞编译。
   String get deviceModel {
     final info = _iosDeviceInfo;
     if (info == null) return '';
+    final String modelNameOrEmpty = (() {
+      try {
+        final dynamic d = info;
+        final v = d.modelName;
+        return v is String ? v : '';
+      } catch (_) {
+        return '';
+      }
+    })();
     for (final s in <String>[
-      info.modelName.trim(),
+      modelNameOrEmpty.trim(),
       info.model.trim(),
       info.utsname.machine.trim(),
     ]) {
