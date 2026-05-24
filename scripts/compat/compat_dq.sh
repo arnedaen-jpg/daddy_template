@@ -426,6 +426,40 @@ print("ext_patched")
 PY
 
   log_success "dq Base64 lookup 已注入: secondary_image_base64_ext.dart 加 byPath 反向索引 (sentinel 幂等)"
+
+  # === (4) lib/modules/secondary/**/*.dart：把 'assets/svgs/' 改为 'assets/secondary/svgs/' ===
+  # sync_secondary.sh 的 update_assets_path 入口判断用 `'assets/[^s]` 把所有 's' 开头的子目录
+  # 全部过滤掉了，再加上 asset_dirs 白名单（images/icons/fonts/lottie/json/svga/…）压根没有 svgs，
+  # 结果 SvgPicture.asset('assets/svgs/icon_match_sort_2.svg') 这类调用同步过来后字符串没被改写。
+  # flutter_svg 内部走的是 PlatformAssetBundle.load(key)，绕过 secondaryAssetProvider 拦截，
+  # 实际文件被搬到 assets/secondary/svgs/，但代码还在加载 assets/svgs/，直接抛
+  # 'Unable to load asset: "assets/svgs/xxx.svg". The asset does not exist or has empty data.'
+  #
+  # 这里在 sync 跑完后给壳工程的 secondary 子树补一次重写，限定在 lib/modules/secondary/ 内，
+  # 避免误改壳工程本地（非 secondary）的代码。覆盖 .svg / .svga 及任何 'assets/svgs/' 前缀。
+  local secondary_dart_root="$PROJECT_ROOT/lib/modules/secondary"
+  if [[ -d "$secondary_dart_root" ]]; then
+    local svg_path_count=0
+    local is_darwin=0
+    if [[ "$(uname)" == "Darwin" ]]; then
+      is_darwin=1
+    fi
+    while IFS= read -r -d '' f; do
+      if grep -q "['\"]assets/svgs/" "$f" 2>/dev/null; then
+        if [[ $is_darwin -eq 1 ]]; then
+          sed -i '' "s|'assets/svgs/|'assets/secondary/svgs/|g" "$f"
+          sed -i '' 's|"assets/svgs/|"assets/secondary/svgs/|g' "$f"
+        else
+          sed -i "s|'assets/svgs/|'assets/secondary/svgs/|g" "$f"
+          sed -i 's|"assets/svgs/|"assets/secondary/svgs/|g' "$f"
+        fi
+        svg_path_count=$((svg_path_count + 1))
+      fi
+    done < <(find "$secondary_dart_root" -name '*.dart' -print0)
+    log_success "dq svgs 路径已改写: 共更新 ${svg_path_count} 个 dart 文件 (assets/svgs/ -> assets/secondary/svgs/)"
+  else
+    log_warning "未找到 lib/modules/secondary 目录，跳过 svgs 路径重写"
+  fi
 }
 
 # ------------------------------------------------------------
