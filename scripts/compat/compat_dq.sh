@@ -340,6 +340,92 @@ podfile.write_text(new_text, encoding="utf-8")
 PY
 
   log_success "dq Pods 架构已注入: ios/Podfile post_install 强制 simulator 走 x86_64 (sentinel 幂等)"
+
+  # === (3) lib/utils/secondary_image_base64_ext.dart：补 byPath 反向索引 ===
+  # write_base64_support_darts.sh 用 HEREDOC 写死了一份 lookup 链：
+  #     getByPath(newPath) ?? getByName(newPath) ?? getByName(name)
+  # 但 byPath 表 key 是绝对路径 /Users/.../assets/...，调用方传相对路径 assets/...
+  # 永远命不中 byPath，全部退到 byName。而 byName 用 basename 作 key，多分辨率
+  # 同名 PNG 会互相覆盖，最终 secondaryAssetProvider 拿到的可能是 2x/3x 图，
+  # 但 scale=1.0、centerSlice 仍按 1x 坐标写死，paintImage 算出 outputSize-sliceBorder
+  # 为负，DecorationImage 直接抛
+  # 'centerSlice was used with a BoxFit that does not guarantee that the image is fully visible.'
+  # video_item_widget.dart 这类 9-patch 直接画不出来。
+  #
+  # 这里给 ext.dart 注入一个「byPath -> 相对路径」反向索引（且只保留 1x，
+  # 排除 /2.0x/ /3.0x/ 等高 DPR 子目录），在 byName 之前先精确命中 1x 那份。
+  # 写在 compat_dq.sh 而非 write_base64_support_darts.sh，是为了把改动限制在 dq 项目，
+  # 不影响其他用同一套 sync 流程的项目。
+  local ext_file="$PROJECT_ROOT/lib/utils/secondary_image_base64_ext.dart"
+  if [[ ! -f "$ext_file" ]]; then
+    log_warning "未找到 lib/utils/secondary_image_base64_ext.dart，跳过 byPath 反向索引补丁"
+    return 0
+  fi
+
+  python3 - "$ext_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+ext = Path(sys.argv[1])
+text = ext.read_text(encoding="utf-8")
+
+SENTINEL = "// === dq-compat: byPath 反向索引（仅 1x），由 compat_dq.sh 注入 ==="
+
+if SENTINEL in text:
+    print("ext_already_patched")
+    raise SystemExit(0)
+
+# (1) 在 `_secondaryImageBytesCache` 定义之后插入索引代码块
+index_block = """
+""" + SENTINEL + """
+/// `byPath` 表里 key 是项目绝对路径，调用方传相对路径，直接 `getByPath` 永远 miss，
+/// 全部退到 `byName`。但同名多分辨率 PNG 会撞 key 互相覆盖，最终 9-patch (centerSlice)
+/// 场景会拿到 2x/3x 图但 scale=1.0，DecorationImage 直接 assert 崩溃。
+/// 这里建立「相对路径 -> base64」的反向索引，且只保留 1x（不在 `*x/` 子目录里）。
+final RegExp _dprFolderPattern = RegExp(r'/\\d+(\\.\\d+)?x/');
+final Map<String, String> _byPathRelativeIndex = (() {
+  final result = <String, String>{};
+  for (final entry in SecondaryImageBase64Map.byPath.entries) {
+    final fullKey = entry.key;
+    final assetsIdx = fullKey.indexOf('assets/');
+    if (assetsIdx < 0) continue;
+    final relPath = fullKey.substring(assetsIdx);
+    if (_dprFolderPattern.hasMatch('/' + relPath)) continue;
+    result[relPath] = entry.value;
+  }
+  return result;
+})();
+// === /dq-compat ===
+"""
+
+# 用 lambda 形式拼接 repl，避免 re 把 index_block 里的 `\d` / `\.` 当反向引用解释。
+new_text, n1 = re.subn(
+    r"(final Map<String, Uint8List> _secondaryImageBytesCache = <String, Uint8List>\{\};\n)",
+    lambda m: m.group(0) + index_block,
+    text,
+    count=1,
+)
+if n1 == 0:
+    print("ext_patch_failed: cannot locate _secondaryImageBytesCache declaration", file=sys.stderr)
+    raise SystemExit(1)
+
+# (2) 把 lookup 链中插入 _byPathRelativeIndex[newPath]
+new_text, n2 = re.subn(
+    r"(return SecondaryImageBase64Map\.getByPath\(newPath\) \?\?\n)(\s+)(SecondaryImageBase64Map\.getByName\(newPath\))",
+    lambda m: m.group(1) + m.group(2) + "_byPathRelativeIndex[newPath] ??\n" + m.group(2) + m.group(3),
+    new_text,
+    count=1,
+)
+if n2 == 0:
+    print("ext_patch_failed: cannot locate lookup chain", file=sys.stderr)
+    raise SystemExit(1)
+
+ext.write_text(new_text, encoding="utf-8")
+print("ext_patched")
+PY
+
+  log_success "dq Base64 lookup 已注入: secondary_image_base64_ext.dart 加 byPath 反向索引 (sentinel 幂等)"
 }
 
 # ------------------------------------------------------------
