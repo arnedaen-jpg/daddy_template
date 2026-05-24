@@ -177,7 +177,7 @@ PY
 }
 
 # ------------------------------------------------------------
-# pub get 之后的兼容修复（双管齐下：Runner xcconfig + Pods Podfile）
+# pub get 之后的兼容修复（双管齐下：Debug/Release.xcconfig + Pods Podfile）
 #
 # 目标：让 Apple Silicon Mac 上的 iOS 模拟器构建走 x86_64 (Rosetta)，
 # 与 dqiu 独立工程行为完全对齐（dqiu Runner.app 实测也是 x86_64-only）。
@@ -194,97 +194,70 @@ PY
 #   1. EXCLUDED_ARCHS[sdk=iphonesimulator*] 含 arm64  （排除 arm64-sim）
 #   2. ARCHS[sdk=iphonesimulator*] = x86_64           （强制只编 x86_64）
 #   3. ONLY_ACTIVE_ARCH = NO                          （不锁 destination active arch）
-# 三者缺一不可：(B) 问题在 flutter run -d <UDID> 才暴露，
-# 单独跑 flutter build ios --simulator (generic) 不会触发，所以容易漏。
+# 三者缺一不可：(B) 在 flutter run -d <UDID> 才暴露，flutter build ios --simulator
+# (generic destination) 走 x86_64 不触发，所以容易漏。
 #
-# 为什么需要两处注入：
-#   (1) Runner 主工程 → ios/Flutter/Generated.xcconfig
-#       Runner 读 Generated.xcconfig + Pods-Runner.<config>.xcconfig 决定自身架构。
-#       flutter pub get 保留已有 EXCLUDED_ARCHS 行（实测），所以一次注入持久。
-#   (2) Pods 各 target（链接 BIJKPlayer / IJKMediaPlayer.framework 的 target）
-#       Pods 是独立 xcodeproj，不读 Runner 的 xcconfig。Flutter SDK 的
-#       flutter_additional_ios_build_settings 在 Podfile.post_install 会硬覆盖
-#       每个 Pods target 的 EXCLUDED_ARCHS[sdk=iphonesimulator*]= "$(inherited) i386"
-#       (podhelper.rb:114)。所以必须在它之后再追加 arm64 / ARCHS / ONLY_ACTIVE_ARCH。
-#       podspec 的 pod_target_xcconfig 既不会冒泡到 Runner，又会被 Flutter 覆盖，无效。
+# ------------------------------------------------------------
+# 为什么不写 Generated.xcconfig：
+#   Flutter SDK 在每次 flutter run/build 时都会调 _updateGeneratedXcodePropertiesFile
+#   完整覆盖 ios/Flutter/Generated.xcconfig (xcode_build_settings.dart:64-92)。
+#   往里写 ARCHS / ONLY_ACTIVE_ARCH 一次性就被抹了。
+#   而 EXCLUDED_ARCHS 是否含 arm64 取决于 SDK 的 pluginsSupportArmSimulator()
+#   对 Pods.xcodeproj 的探测，在首次 flutter run（Podfile patch 还没经 pod install
+#   生效）时 SDK 会写出 i386 而不是 i386 arm64，于是修复链断掉。
 #
-# Podfile patch 用 sentinel 包裹保证幂等，sync_secondary.sh 后续重跑都不会重复注入。
+# 改写到 ios/Flutter/{Debug,Release}.xcconfig：
+#   这两个文件是壳工程的 xcconfig，SDK 不动；它们用 #include "Generated.xcconfig"
+#   引入 SDK 写入的内容。xcconfig 「后定义覆盖前定义」，所以我们把三件套追加在
+#   #include 之后，永久压过 SDK / Pods-Runner 的写法。Runner.xcodeproj 的 Debug
+#   target 通过 baseConfigurationReference 引用 Flutter/Debug.xcconfig，配置自动生效。
+#
+# Pods 各 target 仍需 Podfile post_install patch：
+#   Pods 是独立 xcodeproj，不读 Runner 的 xcconfig。Flutter SDK 的
+#   flutter_additional_ios_build_settings 在 Podfile.post_install 会硬覆盖每个
+#   Pods target 的 EXCLUDED_ARCHS[sdk=iphonesimulator*]= "$(inherited) i386"
+#   (podhelper.rb:114)。所以必须在它之后再追加三件套。podspec 的
+#   pod_target_xcconfig 既不会冒泡到 Runner，又会被 Flutter 覆盖，无效。
+#
+# Podfile patch 用 sentinel 包裹保证幂等，xcconfig 同样用 sentinel 块。
 # dqiu 独立工程的 Generated.xcconfig 也是 "i386 arm64"，最终 Runner.app 为 x86_64，
 # 这里只是让壳工程跟 dqiu 独立运行行为对齐。
 # ------------------------------------------------------------
 post_pub_get_dq_compatibility() {
-  local cfg="$PROJECT_ROOT/ios/Flutter/Generated.xcconfig"
   local podfile="$PROJECT_ROOT/ios/Podfile"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] dq 将强制 ios/Flutter/Generated.xcconfig simulator 走 x86_64 (Rosetta)"
+    log_info "[DRY-RUN] dq 将给 ios/Flutter/{Debug,Release}.xcconfig 追加 simulator x86_64/Rosetta 三件套"
     log_info "[DRY-RUN] dq 将 patch ios/Podfile post_install，给 Pods 各 target 同步强制 x86_64"
     return 0
   fi
 
-  # === (1) Runner 主工程：Generated.xcconfig ===
-  # 写入三件套：EXCLUDED_ARCHS 含 arm64 / ARCHS=x86_64 / ONLY_ACTIVE_ARCH=NO。
-  # flutter pub get 保留已有这些行（实测），所以一次注入持久。
-  if [[ ! -f "$cfg" ]]; then
-    log_warning "未找到 ios/Flutter/Generated.xcconfig，跳过 Runner 架构对齐"
-  else
-    python3 - "$cfg" <<'PY'
-import sys
-from pathlib import Path
+  # === (1) Runner 主工程：Debug.xcconfig / Release.xcconfig ===
+  # 写到这两个壳工程文件而非 Generated.xcconfig，因为 SDK 每次完整覆盖 Generated.xcconfig。
+  # xcconfig 后定义覆盖，所以追加到 #include "Generated.xcconfig" 之后即可永久生效。
+  local _xcconfig_sentinel_open="// === dq-compat: simulator 强制 x86_64/Rosetta（由 compat_dq.sh 注入，勿删） ==="
+  local _xcconfig_sentinel_close="// === /dq-compat ==="
+  local _xcconfig_block="
+${_xcconfig_sentinel_open}
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = \$(inherited) arm64
+ARCHS[sdk=iphonesimulator*] = x86_64
+ONLY_ACTIVE_ARCH[sdk=iphonesimulator*] = NO
+${_xcconfig_sentinel_close}
+"
 
-cfg = Path(sys.argv[1])
-lines = cfg.read_text(encoding="utf-8").splitlines()
-
-# 需要 upsert 的设置（key 必须按 prefix 长度切，不能用 split('=',1)，因为 key 本身含 '='）。
-desired = [
-    # (key, default_value, merge_tokens)
-    ("EXCLUDED_ARCHS[sdk=iphonesimulator*]", "i386 arm64", {"arm64"}),
-    ("ARCHS[sdk=iphonesimulator*]", "x86_64", None),
-    ("ONLY_ACTIVE_ARCH", "NO", None),
-]
-
-changed = False
-out = list(lines)
-
-for key, default, merge_tokens in desired:
-    prefix = key + "="
-    found_idx = -1
-    for i, ln in enumerate(out):
-        if ln.startswith(prefix):
-            found_idx = i
-            break
-
-    if found_idx == -1:
-        out.append(f"{prefix}{default}")
-        changed = True
-        continue
-
-    cur = out[found_idx][len(prefix):].strip()
-    if merge_tokens is None:
-        # 简单 upsert：值不等就覆盖
-        if cur != default:
-            out[found_idx] = f"{prefix}{default}"
-            changed = True
-    else:
-        # 集合合并（用于 EXCLUDED_ARCHS）
-        toks = cur.split()
-        added = False
-        for tok in merge_tokens:
-            if tok not in toks:
-                toks.append(tok)
-                added = True
-        if added:
-            out[found_idx] = f"{prefix}{' '.join(toks)}"
-            changed = True
-
-if changed:
-    cfg.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print("changed")
-else:
-    print("unchanged")
-PY
-    log_success "dq Runner 架构已对齐: Generated.xcconfig simulator 走 x86_64 (Rosetta)"
-  fi
+  local _xc
+  for _xc in "$PROJECT_ROOT/ios/Flutter/Debug.xcconfig" \
+             "$PROJECT_ROOT/ios/Flutter/Release.xcconfig" \
+             "$PROJECT_ROOT/ios/Flutter/Profile.xcconfig"; do
+    if [[ ! -f "$_xc" ]]; then
+      continue
+    fi
+    if grep -qF "$_xcconfig_sentinel_open" "$_xc"; then
+      continue
+    fi
+    printf '%s' "$_xcconfig_block" >> "$_xc"
+  done
+  log_success "dq Runner 架构已对齐: ios/Flutter/{Debug,Release}.xcconfig 追加 simulator x86_64 三件套"
 
   # === (2) Pods 各 target：Podfile post_install ===
   # 在 flutter_additional_ios_build_settings(target) 之后追加，覆盖 podhelper.rb
