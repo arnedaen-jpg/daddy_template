@@ -2161,92 +2161,58 @@ obfuscate_asset_filenames() {
 
 # 同步 plugins/ 与 plugin/（dq/xty：path 依赖放在 B 面根目录 plugin/ 单数；旧项目可能用 plugins/）
 sync_plugins() {
+    if [[ ! -d "$SOURCE_PATH/plugins" ]]; then
+        return
+    fi
+
+    log_step "同步 plugins..."
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        if [[ -d "$SOURCE_PATH/plugins" ]] || [[ -d "$SOURCE_PATH/plugin" ]]; then
-            log_info "[DRY-RUN] 将同步 plugins/ 或 plugin/"
-        fi
+        log_info "[DRY-RUN] 将同步 plugins 目录"
         return
     fi
 
-    local did_any=false
+    # 清空并创建目标 plugins 目录
+    if [[ -d "$TARGET_PLUGINS_DIR" ]]; then
+        rm -rf "$TARGET_PLUGINS_DIR"
+    fi
+    mkdir -p "$TARGET_PLUGINS_DIR"
 
-    if [[ -d "$SOURCE_PATH/plugins" ]]; then
-        did_any=true
-        log_step "同步 plugins..."
-        # 清空并创建目标 plugins 目录
-        if [[ -d "$TARGET_PLUGINS_DIR" ]]; then
-            rm -rf "$TARGET_PLUGINS_DIR"
-        fi
-        mkdir -p "$TARGET_PLUGINS_DIR"
-
-        # 使用 rsync 复制，排除 Flutter 构建临时文件和无效符号链接
-        # --exclude 排除 ephemeral 目录、.plugin_symlinks、build 目录、测试目录等
-        if command -v rsync &> /dev/null; then
-            rsync -a --copy-links \
-                --exclude='ephemeral/' \
-                --exclude='.plugin_symlinks/' \
-                --exclude='build/' \
-                --exclude='.dart_tool/' \
-                --exclude='*.iml' \
-                --exclude='dev_packages/' \
-                --exclude='example/' \
-                --exclude='test/' \
-                --exclude='integration_test/' \
-                --exclude='pigeons/' \
-                "$SOURCE_PATH/plugins/" "$TARGET_PLUGINS_DIR/"
-            log_info "使用 rsync 同步 plugins（已排除临时文件、测试目录和代码生成源）"
-        else
-            # 回退到 cp，但跳过有问题的目录
-            for plugin_dir in "$SOURCE_PATH/plugins"/*; do
-                if [[ -d "$plugin_dir" ]]; then
-                    local plugin_name
-                    plugin_name=$(basename "$plugin_dir")
-                    # 使用 cp 但忽略错误
-                    cp -r "$plugin_dir" "$TARGET_PLUGINS_DIR/$plugin_name" 2>/dev/null || {
-                        log_warning "复制 plugin $plugin_name 时有部分文件跳过"
-                    }
-                    log_info "已复制: plugin: $plugin_name"
-                fi
-            done
-        fi
-
-        # 清理可能复制过来的无效符号链接
-        find "$TARGET_PLUGINS_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-
-        log_success "plugins 同步完成"
+    # 使用 rsync 复制，排除 Flutter 构建临时文件和无效符号链接
+    # --exclude 排除 ephemeral 目录、.plugin_symlinks、build 目录、测试目录等
+    if command -v rsync &> /dev/null; then
+        rsync -a --copy-links \
+            --exclude='ephemeral/' \
+            --exclude='.plugin_symlinks/' \
+            --exclude='build/' \
+            --exclude='.dart_tool/' \
+            --exclude='*.iml' \
+            --exclude='dev_packages/' \
+            --exclude='example/' \
+            --exclude='test/' \
+            --exclude='integration_test/' \
+            --exclude='pigeons/' \
+            "$SOURCE_PATH/plugins/" "$TARGET_PLUGINS_DIR/"
+        log_info "使用 rsync 同步 plugins（已排除临时文件、测试目录和代码生成源）"
+    else
+        # 回退到 cp，但跳过有问题的目录
+        for plugin_dir in "$SOURCE_PATH/plugins"/*; do
+            if [[ -d "$plugin_dir" ]]; then
+                local plugin_name
+                plugin_name=$(basename "$plugin_dir")
+                # 使用 cp 但忽略错误
+                cp -r "$plugin_dir" "$TARGET_PLUGINS_DIR/$plugin_name" 2>/dev/null || {
+                    log_warning "复制 plugin $plugin_name 时有部分文件跳过"
+                }
+                log_info "已复制: plugin: $plugin_name"
+            fi
+        done
     fi
 
-    if [[ -d "$SOURCE_PATH/plugin" ]]; then
-        did_any=true
-        log_step "同步 B 面 plugin/（oaid、geetest、fijkplayer 等 path 依赖）..."
-        mkdir -p "$PROJECT_ROOT/plugin"
-        if command -v rsync &> /dev/null; then
-            rsync -a --copy-links \
-                --exclude='ephemeral/' \
-                --exclude='.plugin_symlinks/' \
-                --exclude='build/' \
-                --exclude='.dart_tool/' \
-                --exclude='*.iml' \
-                --exclude='dev_packages/' \
-                --exclude='example/' \
-                --exclude='test/' \
-                --exclude='integration_test/' \
-                --exclude='pigeons/' \
-                "$SOURCE_PATH/plugin/" "$PROJECT_ROOT/plugin/"
-            log_info "已 rsync: $SOURCE_PATH/plugin/ → $PROJECT_ROOT/plugin/"
-        else
-            log_warning "rsync 不可用，使用 cp -R 复制 plugin/"
-            rm -rf "${PROJECT_ROOT:?}/plugin"
-            mkdir -p "$PROJECT_ROOT/plugin"
-            cp -R "$SOURCE_PATH/plugin/." "$PROJECT_ROOT/plugin/" 2>/dev/null || true
-        fi
-        find "$PROJECT_ROOT/plugin" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-        log_success "plugin/ 同步完成"
-    fi
+    # 清理可能复制过来的无效符号链接
+    find "$TARGET_PLUGINS_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
 
-    if [[ "$did_any" != "true" ]]; then
-        return
-    fi
+    log_success "plugins 同步完成"
 }
 
 # 同步 flutter_base（md 项目特有）
@@ -3137,12 +3103,7 @@ _prepare_override_block_for_shell() {
         echo "    path: plugins/${dep_name}"
         return 0
     fi
-    if [[ -d "$PROJECT_ROOT/plugin/$dep_name" && -f "$PROJECT_ROOT/plugin/$dep_name/pubspec.yaml" ]]; then
-        echo "  ${dep_name}:"
-        echo "    path: plugin/${dep_name}"
-        return 0
-    fi
-    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/、plugin/ 均无该包）" >&2
+    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/ 中无该包）" >&2
     return 1
 }
 
