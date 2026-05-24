@@ -343,10 +343,10 @@ async function lookupIpFromIpApiCo(ip: string): Promise<IpLookup | null> {
   return lookupHasGeo(out) ? out : null;
 }
 
-/** ip-api.com：Supabase Edge 上比 ipapi.co 更稳定（ipapi 易 429） */
+/** ip-api.com：注意必须用 HTTPS，Supabase Edge / Deno 拒绝明文 HTTP 请求 */
 async function lookupIpFromIpApiCom(ip: string): Promise<IpLookup | null> {
   const j = await fetchJsonWithTimeout(
-    `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,as,org`,
+    `https://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,as,org`,
   );
   if (!j || j.status !== "success") return null;
   const org = String(j.org ?? "");
@@ -1415,6 +1415,23 @@ export async function routeRequest(
         status: j.status,
         headers: { ...Object.fromEntries(j.headers), ...cors },
       });
+    }
+  }
+
+  // GET /admin/api/ip-lookup?ip=1.2.3.4  — 直接测试 IP 归属查询链路
+  if (path === "/admin/api/ip-lookup" && request.method === "GET") {
+    const deny = assertAdmin(request, env);
+    if (deny) return new Response(deny.body, { status: deny.status, headers: { ...Object.fromEntries(deny.headers), ...cors } });
+    try {
+      const url2 = new URL(request.url);
+      const ip = url2.searchParams.get("ip")?.trim() || clientIp(request);
+      const lookup = await lookupIp(ip);
+      const isApple = await isAppleNetwork(env, lookup);
+      const j = jsonResponse({ code: 0, data: { ip, lookup, isApple } });
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    } catch (e) {
+      const j = jsonResponse({ code: 500, message: String(e) }, 500);
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
     }
   }
 
