@@ -1524,6 +1524,66 @@ print(
     f"[INFO] AssetImage -> secondaryAssetProvider 替换完成: 文件 {replaced_files} 个, "
     f"替换 {replaced_count} 处, 去除 const {relaxed_const_count} 处{_sap_extra}"
 )
+
+# --- Pass 2 (合并自 zeus 上游): rewrite AssetImage subclasses to delegate to secondaryAssetProvider ---
+# E.g. DecryptedAssetImageProvider extends AssetImage → becomes a function alias.
+# 修复 Base64 模式下自定义 AssetImage 子类编译失败问题。
+subclass_def_re = re.compile(
+    r"class\s+(\w+)\s+extends\s+(?:AssetImage|ExactAssetImage)\s*\{",
+)
+subclass_names: list[str] = []
+subclass_locations: dict[str, Path] = {}
+
+for file_path in root.rglob("*.dart"):
+    content = file_path.read_text(encoding="utf-8")
+    for m in subclass_def_re.finditer(content):
+        name = m.group(1)
+        subclass_names.append(name)
+        subclass_locations[name] = file_path
+
+if subclass_names:
+    for name, file_path in subclass_locations.items():
+        content = file_path.read_text(encoding="utf-8")
+        cls_re = re.compile(
+            rf"class\s+{re.escape(name)}\s+extends\s+\w+\s*\{{",
+        )
+        m = cls_re.search(content)
+        if not m:
+            continue
+        open_brace = m.end() - 1
+        depth = 0
+        i = open_brace
+        while i < len(content):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            continue
+        close_brace = i
+        replacement = (
+            f"ImageProvider<Object> {name}("
+            f"String assetName, {{AssetBundle? bundle, String? package}}) =>\n"
+            f"    secondaryAssetProvider(assetName, bundle: bundle, package: package);"
+        )
+        content = content[:m.start()] + replacement + content[close_brace + 1:]
+        file_path.write_text(content, encoding="utf-8")
+        ensure_helper_import(file_path)
+        print(f"[INFO] 子类 {name} -> secondaryAssetProvider 函数代理 ({file_path.name})")
+
+    for name in subclass_names:
+        const_sub_re = re.compile(rf"\bconst\s+{re.escape(name)}\(")
+        for file_path in root.rglob("*.dart"):
+            content = file_path.read_text(encoding="utf-8")
+            new_content, n = const_sub_re.subn(f"{name}(", content)
+            if n > 0:
+                file_path.write_text(new_content, encoding="utf-8")
+                print(f"[INFO] 去除 const {name} {n} 处 ({file_path.name})")
+
+    print(f"[INFO] AssetImage 子类处理完成: {', '.join(subclass_names)}")
 PY
 }
 
@@ -2816,7 +2876,7 @@ update_assets_paths() {
                 "images" "translations" "icons" "fonts" "player" "icon" "tabbar" 
                 "comics" "live" "mine" "search" "short" "community" "shi_pin" "ann" "novel"
                 "lottie" "json" "svga" "video" "audio" "animation" "file"
-                "tab" "app" "play" "reader" "mv" "girl"
+                "tab" "app" "play" "reader" "mv" "girl" "theme_images"
             )
             if [[ "$(uname)" == "Darwin" ]]; then
                 for dir in "${asset_dirs[@]}"; do
@@ -2908,6 +2968,21 @@ sync_sdk_version() {
             fi
             log_success "flutter_lints 版本已同步: $source_lints"
         fi
+    fi
+}
+
+# 合并自 zeus 上游：清理 pubspec.yaml 行尾空白（避免 yaml 解析/格式问题）
+trim_pubspec_trailing_whitespace() {
+    local pubspec="$1"
+
+    if [[ "$DRY_RUN" == true ]] || [[ ! -f "$pubspec" ]]; then
+        return 0
+    fi
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -E 's/[[:space:]]+$//' "$pubspec"
+    else
+        sed -i -E 's/[[:space:]]+$//' "$pubspec"
     fi
 }
 
@@ -3710,6 +3785,7 @@ sync_flutter_base
         log_step "写入项目专用 pubspec 覆盖..."
         "$compat_pubspec_func" "$PROJECT_ROOT/pubspec.yaml" || true
     fi
+    trim_pubspec_trailing_whitespace "$PROJECT_ROOT/pubspec.yaml"  # 合并自 zeus 上游：清理 pubspec 行尾空白
     show_summary
     write_current_project         # 记录当前项目名
     write_sync_log                # 写入同步日志

@@ -1842,10 +1842,12 @@ load_manifest() {
     fi
 
     if [[ -z "$MANIFEST_FILE" ]]; then
-        local project=""
-        local config_file="$PROJECT_ROOT/ab_config.yaml"
-        if [[ -f "$config_file" ]]; then
-            project=$(grep "^project:" "$config_file" | head -1 | sed 's/^project: *//' | tr -d '\r\n"')
+        local project="$CURRENT_PROJECT"
+        if [[ -z "$project" ]]; then
+            local config_file="$PROJECT_ROOT/ab_config.yaml"
+            if [[ -f "$config_file" ]]; then
+                project=$(grep "^project:" "$config_file" | head -1 | sed 's/^project: *//' | tr -d '\r\n"')
+            fi
         fi
         if [[ -n "$project" && -f "$MANIFESTS_DIR/${project}.conf" ]]; then
             MANIFEST_FILE="$MANIFESTS_DIR/${project}.conf"
