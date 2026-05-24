@@ -895,8 +895,13 @@ async function handleClientConfig(
       mockHeader.toLowerCase() === "yes");
   if (mockAppleRequest) fromAppleAsn = true;
 
+  // apple_asn_lock_a_<deviceId> 是关键安全 KV，必须同步写入。
+  // bg() 在 Supabase Edge 里 EdgeRuntime.waitUntil 不保证函数返回后执行，
+  // 会导致 lock 丢失，下次请求走不到锁保护逻辑。
   if (fromAppleAsn && deviceId.trim()) {
-    bg(kvPut(env, appleAsnDeviceLockKey(deviceId.trim()), "1"));
+    await kvPut(env, appleAsnDeviceLockKey(deviceId.trim()), "1").catch((e) =>
+      console.error("[apple_asn_lock] kvPut failed:", e),
+    );
   }
   const remarkForInsert = fromAppleAsn ? REMARK_APPLE_ASN : null;
   const geoRow = buildAccessLogGeoRow(lookupRes, mockAppleRequest, treatApple);
@@ -1329,6 +1334,65 @@ export async function routeRequest(
       headers: { ...Object.fromEntries(r.headers), ...cors },
     });
   }
+  // GET /admin/api/ab-config?bundle_id=xxx  — 查默认或 bundle 级配置
+  // POST /admin/api/ab-config  body: { value:"A"|"B", bundle_id?:"..." }
+  if (
+    path === "/admin/api/ab-config" &&
+    (request.method === "GET" || request.method === "POST")
+  ) {
+    const deny = assertAdmin(request, env);
+    if (deny) {
+      return new Response(deny.body, {
+        status: deny.status,
+        headers: { ...Object.fromEntries(deny.headers), ...cors },
+      });
+    }
+    try {
+      if (request.method === "GET") {
+        const url2 = new URL(request.url);
+        const bid = url2.searchParams.get("bundle_id")?.trim() ?? "";
+        const kvKey = bid ? `ab_config_${bid}` : KV_KEY.DEFAULT;
+        const val = await kvGet(env, kvKey);
+        const j = jsonResponse({ code: 0, data: { key: kvKey, value: val ?? "A (default)" } });
+        return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+      } else {
+        const body = await request.json() as Record<string, string>;
+        const val = (body.value ?? "").toUpperCase().trim();
+        if (val !== "A" && val !== "B") {
+          const j = jsonResponse({ code: 400, message: "value must be A or B" }, 400);
+          return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+        }
+        const bid = (body.bundle_id ?? "").trim();
+        const kvKey = bid ? `ab_config_${bid}` : KV_KEY.DEFAULT;
+        await kvPut(env, kvKey, val);
+        const j = jsonResponse({ code: 0, message: "ok", data: { key: kvKey, value: val } });
+        return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+      }
+    } catch (e) {
+      const j = jsonResponse({ code: 500, message: String(e) }, 500);
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    }
+  }
+
+  // GET /admin/api/kv-locks  — 列出全部 apple_asn_lock_a_* 条目
+  if (path === "/admin/api/kv-locks" && request.method === "GET") {
+    const deny = assertAdmin(request, env);
+    if (deny) {
+      return new Response(deny.body, {
+        status: deny.status,
+        headers: { ...Object.fromEntries(deny.headers), ...cors },
+      });
+    }
+    try {
+      const rows = await kvListPrefix(env, KV_KEY.APPLE_LOCK);
+      const j = jsonResponse({ code: 0, data: { rows } });
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    } catch (e) {
+      const j = jsonResponse({ code: 500, message: String(e) }, 500);
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    }
+  }
+
   if (path === "/admin/api/bundles" && request.method === "GET") {
     const deny = assertAdmin(request, env);
     if (deny) {

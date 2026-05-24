@@ -1,10 +1,10 @@
-export const ADMIN_HTML = `<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script>window.__DADDY_AB_CONFIG_API_BASE__ = "__API_PUBLIC_BASE__";</script>
-  <script>window.__SUPABASE_ANON_KEY__=__SUPABASE_ANON_JSON__;</script>
+  <script>window.__DADDY_AB_CONFIG_API_BASE__ = "https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config";</script>
+  <script>window.__SUPABASE_ANON_KEY__="";</script>
   <title>A/B 配置管理</title>
   <style>
     :root { font-family: system-ui, sans-serif; }
@@ -81,11 +81,11 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     code { font-size: 11px; }
   </style>
 </head>
-<body data-admin-open="__ADMIN_OPEN_ATTR__" data-admin-layout="req-pairs-v3">
+<body data-admin-open="false" data-admin-layout="req-pairs-v3">
   <h1>A/B 配置管理</h1>
   <p class="muted">配置接口：<code>GET /client/api/config</code>。判定顺序：<strong>苹果 ASN（当次 A）→ 苹果设备锁（曾命中 ASN 且上报过 UUID，永久 A）→ 黑名单 → 设备强 B（按<strong>本行 Bundle + 设备</strong>）→ Bundle 全员 B → KV</strong>。苹果 ASN 命中且带 <code>X-Device-Id</code> 时写入 <code>apple_asn_lock_a_*</code>（不按 IP 拉黑）。黑名单内 IP / 设备<strong>永远 A 面</strong>；苹果命中记备注「苹果ASN」。KV：<code>device_force_b_*</code> 键内绑定 Bundle 与 UUID（同一物理机在不同 Bundle 下可分别开关）；另有 <code>apple_asn_fetched_json</code>、<code>bundle_force_b_*</code>、<code>ab_blocklist_*</code>。</p>
-  __DEMO_MOCK_BANNER__
-  __ADMIN_TOKEN_UI__
+  <p class="muted" style="background:#fffbeb;border:1px solid #fcd34d;padding:8px;border-radius:6px"><strong>演示苹果 ASN：</strong>已开启 <code>DEMO_MOCK_APPLE</code>。终端执行：<br /><code style="display:block;word-break:break-all;margin-top:6px">curl -sS "https://ydypblkwkhblghrivwhk.supabase.co/functions/v1/daddy-ab-config/client/api/config" -H "X-Mock-Apple-ASN: 1" -H "X-Bundle-Id: com.demo.app" -H "X-Device-Id: demo-uuid"</code>若配置了 <code>CONFIG_AUTH_TOKEN</code>，请再加 <code>-H "X-Config-Token: …"</code>。应返回 <code>"config":"A"</code>；带设备 UUID 时会写入 <code>apple_asn_lock_a_*</code> 永久 A；刷新下方请求记录可见备注「苹果ASN」、锁 A。</p>
+  <p><label for="tok">CONFIG_AUTH_TOKEN</label></p><input id="tok" type="password" autocomplete="off" placeholder="与 wrangler secret / Supabase Secrets 一致" />
   <p id="err" class="err"></p>
   <h2>零、苹果 ASN（在线同步）</h2>
   <p class="muted">自 <a href="https://www.peeringdb.com" target="_blank" rel="noopener noreferrer">PeeringDB</a> 拉取 <code>org_id=8418</code>（Apple Inc.）下登记 ASN，写入 KV；与内置兜底集合<strong>并集</strong>后参与 <code>cf.asn</code> 判定；仍保留 <code>cf.asOrganization</code> 含 <code>apple</code> 的兜底。</p>
@@ -330,12 +330,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     function parseDeviceSubtitle(sub) {
       var s = sub == null ? "" : String(sub).trim();
       if (!s) return { ios: "", model: "" };
-      var parts = s.split(/\\s*·\\s*/);
+      var parts = s.split(/\s*·\s*/);
       for (var pi = 0; pi < parts.length; pi++) parts[pi] = parts[pi].trim();
-      if (parts.length >= 2 && /^iOS\\s/i.test(parts[0])) {
+      if (parts.length >= 2 && /^iOS\s/i.test(parts[0])) {
         return { ios: parts[0], model: parts.slice(1).join(" · ") };
       }
-      if (/^iOS\\s/i.test(s)) return { ios: s, model: "" };
+      if (/^iOS\s/i.test(s)) return { ios: s, model: "" };
       return { ios: "", model: s };
     }
 
@@ -451,7 +451,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             ? String(row.bundle_subtitle).trim()
             : "";
         var copyBundle = "";
-        if (bid && bsub) copyBundle = bid + "\\n" + bsub;
+        if (bid && bsub) copyBundle = bid + "\n" + bsub;
         else if (bid) copyBundle = bid;
         else if (bsub) copyBundle = bsub;
         var appName =
@@ -497,7 +497,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         if (devMeta.model) devPairs.push({ label: "机型", value: devMeta.model });
         tr.appendChild(makeReqPairsTd(
           devPairs,
-          copyDeviceParts.length ? copyDeviceParts.join("\\n") : "",
+          copyDeviceParts.length ? copyDeviceParts.join("\n") : "",
         ));
         var spF = document.createElement("span");
         spF.className = row.device_forced_b ? "tag" : "tag-off";
@@ -977,4 +977,4 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     }
   </script>
 </body>
-</html>`;
+</html>
