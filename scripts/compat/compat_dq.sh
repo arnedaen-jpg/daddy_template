@@ -25,6 +25,7 @@ import 'package:get_storage/get_storage.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import 'config/view_config_fallback.dart';
 import 'indicator/x_footer.dart';
 import 'indicator/x_qiu_header.dart';
 import 'main.dart' show MainApp;
@@ -49,6 +50,12 @@ class ModuleEntry {
     ]);
     await GetStorage.init();
     await GetStorage.init('view_config');
+
+    // 兜底 view_config（与 dqiu/lib/main.dart 行为一致）：
+    // 壳工程渠道首次启动 menuConfig 还没下发时，用 dqiu 独立运行的真实快照
+    // 预置，避免落地页 TabBar 因 _tabArr.length < 2 被整体隐藏。
+    // 已有 key 不动，后端真实下发的值会通过 saveViewConfig 覆盖兜底。
+    seedDqViewConfigFallback();
 
     final pkg = await PackageInfo.fromPlatform();
     AppDataManager.instance.version = pkg.version;
