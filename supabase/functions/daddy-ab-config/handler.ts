@@ -454,12 +454,14 @@ async function backfillAccessLogGeoIfNeeded(
 }
 
 async function isAppleNetwork(env: ServiceEnv, lookup: IpLookup): Promise<boolean> {
+  // 严格只信 ASN 数字白名单：builtin (714/6185/6594) + PeeringDB org_id=8418 同步。
+  // 不要做 org/isp 名字模糊匹配 —— 已观察到中国 VPN 商把 ASN 名字注册成
+  // "Apple Network, LLC"（AS216183, org_id=38938, 底层 SUKE NETWORK LIMITED）
+  // 来伪装苹果以骗过 A/B 路由。名字匹配会把 VPN 流量误判为苹果审核。
   const asn = lookup.asnNum;
-  if (typeof asn === "number") {
-    const set = await getMergedAppleAsnSet(env);
-    if (set.has(asn)) return true;
-  }
-  return lookup.org.toLowerCase().includes("apple");
+  if (typeof asn !== "number") return false;
+  const set = await getMergedAppleAsnSet(env);
+  return set.has(asn);
 }
 
 function formatIpAttribution(
@@ -1431,6 +1433,26 @@ export async function routeRequest(
       const all = await kvListPrefix(env, KV_KEY.APPLE_LOCK);
       const rows = all.map(({ key }) => ({ key }));
       const j = jsonResponse({ code: 0, data: { rows } });
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    } catch (e) {
+      const j = jsonResponse({ code: 500, message: String(e) }, 500);
+      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+    }
+  }
+
+  // DELETE /admin/api/kv-locks  body: {deviceId} → 清除某个设备的苹果误锁
+  if (path === "/admin/api/kv-locks" && request.method === "DELETE") {
+    const deny = assertAdmin(request, env);
+    if (deny) return new Response(deny.body, { status: deny.status, headers: { ...Object.fromEntries(deny.headers), ...cors } });
+    try {
+      const body = (await request.json()) as { deviceId?: string };
+      const id = (body.deviceId ?? "").trim();
+      if (!id) {
+        const j = jsonResponse({ code: 400, message: "deviceId required" }, 400);
+        return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
+      }
+      await kvDel(env, appleAsnDeviceLockKey(id));
+      const j = jsonResponse({ code: 0, message: "ok", data: { deviceId: id } });
       return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
     } catch (e) {
       const j = jsonResponse({ code: 500, message: String(e) }, 500);
