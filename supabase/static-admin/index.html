@@ -139,7 +139,17 @@
   <table id="tblSeen" style="display:none"><thead><tr><th>Bundle</th><th>生效 A/B</th><th>说明</th><th>全员强B</th><th>操作</th></tr></thead><tbody id="tbodySeen"></tbody></table>
   <p id="emptySeen" class="muted" style="display:none">（D1 尚无带 bundle_id 的访问记录）</p>
 
-  <h2>四、黑名单（永远 A 面）</h2>
+  <h2>四、全局 A/B 配置</h2>
+  <p class="muted">控制所有 Bundle 的默认 A/B 面。优先级最低（苹果ASN锁、黑名单、设备强B、Bundle全员强B 均优先于此）。正常发版期间保持 <strong>A</strong>；需要全量切 B 面时才改为 B。</p>
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+    <span>当前全局配置：</span>
+    <span id="globalConfigBadge" style="font-weight:bold;padding:4px 14px;border-radius:6px;font-size:15px">—</span>
+    <button type="button" id="btnSetGlobalA" style="background:#16a34a;color:#fff;border:none;padding:6px 18px;border-radius:6px;cursor:pointer;font-size:14px">设为 A</button>
+    <button type="button" id="btnSetGlobalB" style="background:#dc2626;color:#fff;border:none;padding:6px 18px;border-radius:6px;cursor:pointer;font-size:14px">设为 B（全员强制B）</button>
+  </div>
+  <p id="globalConfigMsg" class="muted" style="margin-top:4px"></p>
+
+  <h2>五、黑名单（永远 A 面）</h2>
   <p class="muted">列表中的设备 UUID 或 IP 恒返回 <code>A</code>，不受强 B 影响。IP 须与 Worker 所见的客户端 IP 一致（与日志表 IP 列相同）。</p>
   <p>
     <select id="blType" style="padding:6px 8px">
@@ -771,10 +781,58 @@
       }
     }
 
+    async function loadGlobalConfig() {
+      var badge = document.getElementById("globalConfigBadge");
+      var msg = document.getElementById("globalConfigMsg");
+      try {
+        var r = await api("/admin/api/ab-config");
+        var val = (r.data && r.data.value) ? String(r.data.value) : "A";
+        badge.textContent = val;
+        badge.style.background = val === "B" ? "#fecaca" : "#bbf7d0";
+        badge.style.color = val === "B" ? "#991b1b" : "#14532d";
+        if (msg) msg.textContent = val === "B"
+          ? "⚠️ 当前全员强制 B，所有无特殊优先级的设备均返回 B。"
+          : "✅ 当前全局配置 A，正常发版状态。";
+      } catch (e) {
+        if (badge) badge.textContent = "?";
+      }
+    }
+
+    async function setGlobalConfig(val) {
+      var msg = document.getElementById("globalConfigMsg");
+      try {
+        await api("/admin/api/ab-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: val }),
+        });
+        if (msg) msg.textContent = "已设置为 " + val + "，正在刷新…";
+        await loadGlobalConfig();
+        await loadRequests();
+        await loadBundles();
+      } catch (e) {
+        if (msg) msg.textContent = "设置失败：" + String(e.message || e);
+      }
+    }
+
+    document.getElementById("btnSetGlobalA").onclick = function () {
+      if (!confirm("确认将全局配置改为 A？所有无其他强制规则的设备将恢复 A 面。")) return;
+      setGlobalConfig("A").catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+    document.getElementById("btnSetGlobalB").onclick = function () {
+      if (!confirm("确认开启全员强制 B？所有无更高优先级规则的设备将返回 B（苹果 ASN 锁定设备不受影响）。")) return;
+      setGlobalConfig("B").catch(function (e) {
+        document.getElementById("err").textContent = String(e.message || e);
+      });
+    };
+
     async function loadAll() {
       document.getElementById("err").textContent = "";
       page = 1;
       await loadAppleAsnStatus();
+      await loadGlobalConfig();
       await loadRequests();
       await loadBundles();
       await loadBlocklist();
@@ -783,6 +841,7 @@
     async function refreshData() {
       document.getElementById("err").textContent = "";
       await loadAppleAsnStatus();
+      await loadGlobalConfig();
       await loadRequests();
       await loadBundles();
       await loadBlocklist();
