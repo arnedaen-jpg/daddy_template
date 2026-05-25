@@ -1478,16 +1478,7 @@ update_dart_imports() {
         return
     fi
     
-    # 重要：不扫整个 lib/，否则 A 面源码（如 lib/services/network/）的
-    # `package:connectivity_plus/...` 这类原名 import 会被替换为 B 面化名，
-    # 而下一轮 obfuscate 化名会变（picker_dirty → radio_trend → ...），导致
-    # A 面 import 长期指向不存在的旧化名，编译报 "Couldn't resolve the package"。
-    # 仅扫 B 面 secondary 子树：sync_secondary 会把 B 面源码全部放进
-    # lib/modules/secondary/，A 面不允许直接 import B 面包名。
-    local search_dirs=()
-    if [[ -d "$PROJECT_ROOT/lib/modules/secondary" ]]; then
-        search_dirs+=("$PROJECT_ROOT/lib/modules/secondary")
-    fi
+    local search_dirs=("$PROJECT_ROOT/lib")
     if [[ -d "$FLUTTER_BASE_DIR/lib" ]]; then
         search_dirs+=("$FLUTTER_BASE_DIR/lib")
     fi
