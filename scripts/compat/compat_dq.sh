@@ -460,6 +460,29 @@ PY
   else
     log_warning "未找到 lib/modules/secondary 目录，跳过 svgs 路径重写"
   fi
+
+  # === (5) rongcloud_im_wrapper_plugin 化名插件的 version.config 版本对齐 ===
+  # pub 包 rongcloud_im_wrapper_plugin 5.32.6 自带 version.config 误写
+  # ios_im_sdk_version=5.36.5，但 cocoapods trunk 当前最高仅到 5.36.4，
+  # pod install 直接 "could not find compatible versions for pod RongCloudIM/IMLibCore"。
+  # 这里通过 version.config 独有键 ios_im_sdk_version 识别（兼容混淆后的化名），
+  # 把 5.36.5 改为 5.36.4 让 pod install 通过；android 端同步对齐。
+  local rc_count=0
+  while IFS= read -r -d '' vc; do
+    if grep -q "^ios_im_sdk_version=5\.36\.5$" "$vc" 2>/dev/null; then
+      if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' 's|^ios_im_sdk_version=5\.36\.5$|ios_im_sdk_version=5.36.4|' "$vc"
+        sed -i '' 's|^android_im_sdk_version=5\.36\.5$|android_im_sdk_version=5.36.4|' "$vc"
+      else
+        sed -i 's|^ios_im_sdk_version=5\.36\.5$|ios_im_sdk_version=5.36.4|' "$vc"
+        sed -i 's|^android_im_sdk_version=5\.36\.5$|android_im_sdk_version=5.36.4|' "$vc"
+      fi
+      rc_count=$((rc_count + 1))
+    fi
+  done < <(find "$PROJECT_ROOT/plugins" -maxdepth 2 -name version.config -print0 2>/dev/null)
+  if [[ $rc_count -gt 0 ]]; then
+    log_success "dq RongCloudIM 版本已对齐 5.36.4（trunk 当前最新）：patch ${rc_count} 份 version.config"
+  fi
 }
 
 # ------------------------------------------------------------
