@@ -3105,16 +3105,25 @@ _prepare_override_block_for_shell() {
     if [[ -z "$dep_name" ]]; then
         return 1
     fi
+    # path/git 多行块：原样保留
     if echo "$block" | grep -qE '^[[:space:]]{4,}(path|git):'; then
         echo "$block"
         return 0
     fi
+    # 纯版本号单行 override（如 `http: ^1.2.2`、`intl: 0.20.2`、`rxdart: ^0.28.0`）：
+    # 这正是解决依赖冲突的核心机制（B 面常用，如 audioplayers http^1.2.2 vs svgaplayer http^0.13.3），
+    # 必须原样保留，否则壳工程 pub get 解析失败。
+    if echo "$block" | head -1 | grep -qE '^  [a-z_][a-z_0-9]*:[[:space:]]+[^[:space:]]'; then
+        echo "$block"
+        return 0
+    fi
+    # 既无 path/git 也无版本号，但 plugins/ 下恰好有同名目录：兜底转 path override
     if [[ -d "$TARGET_PLUGINS_DIR/$dep_name" && -f "$TARGET_PLUGINS_DIR/$dep_name/pubspec.yaml" ]]; then
         echo "  ${dep_name}:"
         echo "    path: plugins/${dep_name}"
         return 0
     fi
-    log_warning "跳过 dependency_override: ${dep_name}（无 path/git，且 plugins/ 中无该包）" >&2
+    log_warning "跳过 dependency_override: ${dep_name}（无 path/git/版本号，且 plugins/ 中无该包）" >&2
     return 1
 }
 
