@@ -276,6 +276,7 @@ show_help() {
     echo "  -n, --package NAME    源项目包名（默认从 pubspec.yaml 读取）"
     echo "  -l, --list            列出预设项目配置"
     echo "  -d, --dry-run         模拟运行，不实际复制文件"
+    echo "  --no-pull             跳过 git pull --ff-only（源仓库 origin 不可达 / 离线场景）；用源项目当前工作区版本同步"
     echo "  --base64-map          (默认开启) 生成 secondary 图片 Base64 映射；写入 lib/utils 下 Base64 支持 Dart；同步结束后删除"
     echo "                        assets/secondary 下图片（不删 JSON/字体等），避免打进包"
     echo "  --keep-secondary-images  与 --base64-map 同用时保留 secondary 图片文件不删"
@@ -360,6 +361,7 @@ SOURCE_PATH=""
 PROJECT_NAME=""
 SOURCE_PACKAGE=""
 DRY_RUN=false
+NO_PULL=false
 GENERATE_BASE64_MAP=false
 REPLACE_IMAGE_ENTRY=false
 # 与 --base64-map 同用时默认在脚本末尾删除 assets/secondary 内图片；--keep-secondary-images 可关闭
@@ -403,6 +405,10 @@ parse_args() {
             -l|--list)
                 list_projects
                 exit 0
+                ;;
+            --no-pull)
+                NO_PULL=true
+                shift
                 ;;
             -d|--dry-run)
                 DRY_RUN=true
@@ -546,9 +552,14 @@ update_source_repo() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY-RUN] 跳过 git pull，仅检查 Git 状态并读取当前版本信息"
         collect_source_git_info
+    elif [[ "$NO_PULL" == "true" ]]; then
+        log_info "--no-pull: 跳过 git pull，使用源项目当前工作区版本（离线/内网不通时用）"
+        collect_source_git_info
+        log_warning "源项目未拉取最新代码，请确认本地 $SOURCE_GIT_BRANCH 已是期望状态"
     else
         if ! git -C "$SOURCE_PATH" pull --ff-only; then
             log_error "源项目 git pull 失败，已中断同步"
+            log_info "若 origin 不可达（内网/离线），可加 --no-pull 用本地工作区跑"
             exit 1
         fi
         collect_source_git_info
