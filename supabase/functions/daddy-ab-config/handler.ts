@@ -273,6 +273,15 @@ interface IpLookup {
   org: string;
 }
 
+/** 将 Supabase UTC 时间戳转换为北京时间（UTC+8），返回 "YYYY-MM-DD HH:mm:ss" */
+function toBeijingTime(raw: string): string {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw.replace("T", " ").slice(0, 19);
+  const utc8 = new Date(d.getTime() + 8 * 3600_000);
+  return utc8.toISOString().replace("T", " ").slice(0, 19);
+}
+
 function parseAsnFields(
   org: string,
   asnRaw: unknown,
@@ -343,10 +352,10 @@ async function lookupIpFromIpApiCo(ip: string): Promise<IpLookup | null> {
   return lookupHasGeo(out) ? out : null;
 }
 
-/** ip-api.com：注意必须用 HTTPS，Supabase Edge / Deno 拒绝明文 HTTP 请求 */
+/** ip-api.com：Supabase Edge 上比 ipapi.co 更稳定（ipapi 易 429） */
 async function lookupIpFromIpApiCom(ip: string): Promise<IpLookup | null> {
   const j = await fetchJsonWithTimeout(
-    `https://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,as,org`,
+    `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,regionName,city,as,org`,
   );
   if (!j || j.status !== "success") return null;
   const org = String(j.org ?? "");
@@ -607,47 +616,17 @@ async function resolveFinalConfigAb(
   ip: string,
   fromAppleAsn: boolean,
 ): Promise<"A" | "B"> {
-  // ══ A/B 优先级（从高到低，高优先级短路返回，不会被低优先级覆盖）══════════════
-  //
-  // ① 苹果 ASN — 本次请求来自苹果网络（ip-api.com 识别 AS714/6185 等）
-  //             → 永远 A，覆盖一切 force-B（包括全员强制 B）
-  //
-  // ② 苹果 ASN 设备锁（KV: apple_asn_lock_a_<deviceId>）
-  //             → 设备历史上曾经过苹果 ASN 识别，永久锁 A
-  //             → 即使本次从非苹果 IP 请求也返回 A，覆盖一切 force-B
-  //
-  // ③ 白名单 blocklist（KV: ab_blocklist_device_* / ab_blocklist_ip_*）
-  //             → 审核设备 / 测试包，强制 A
-  //
-  // ④ device_force_b（KV: device_force_b_<bundleId>_<deviceId>）
-  //             → 运营针对单设备强制 B（苹果设备已被 ①②③ 拦截，不会到达此处）
-  //
-  // ⑤ bundle_force_b（KV: bundle_force_b_<bundleId>）
-  //             → 运营针对某包全量强制 B（苹果设备已被 ①② 拦截）
-  //
-  // ⑥ 全局 / bundle ab_config（KV: ab_config / ab_config_<bundleId>）
-  //             → 全员强制 B 在此层生效，但已被 ①② 拦截，对苹果设备无效
-  //
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // ① 本次请求来自苹果 ASN —— 绝对最高优先，无条件返回 A
   if (fromAppleAsn) return "A";
-
-  // ② 设备已被苹果 ASN 永久锁定 —— 同等最高优先，无条件返回 A
-  if (deviceId.trim() && await isAppleAsnDeviceLocked(env, deviceId)) return "A";
-
-  // ③ 白名单（审核 / 测试设备）
-  if (await isBlocklisted(env, ip, deviceId)) return "A";
-
-  // ④⑤ 运营 force-B（已确认非苹果设备，才允许生效）
-  const [deviceForced, bundleForced] = await Promise.all([
+  const [appleLocked, blocklisted, deviceForced, bundleForced] = await Promise.all([
+    isAppleAsnDeviceLocked(env, deviceId),
+    isBlocklisted(env, ip, deviceId),
     isDeviceForcedB(env, bundleId, deviceId),
     isBundleForcedB(env, bundleId),
   ]);
+  if (appleLocked) return "A";
+  if (blocklisted) return "A";
   if (deviceForced) return "B";
   if (bundleForced) return "B";
-
-  // ⑥ 全局 / bundle ab_config（全员强制 B 在此层生效，苹果设备已在 ①② 被拦截）
   return getEffectiveConfigAb(env, bundleId);
 }
 
@@ -744,6 +723,8 @@ export interface AccessLogRow {
   bundle_forced_b: boolean;
   blocklisted: boolean;
   device_force_b_disabled: boolean;
+  /** 当前全局/bundle ab_config（"A" | "B"）—— 用于管理页展示 "为什么得到这个结果" */
+  effective_global_config: string;
 }
 
 async function fetchAccessLogPage(
@@ -784,12 +765,14 @@ async function fetchAccessLogPage(
     const ip = String(R.ip ?? "");
     const did = String(R.device_id ?? "");
     const bid = String(R.bundle_id ?? "");
-    const [deviceForced, bundleForced, bl, appleLocked] = await Promise.all([
-      did ? isDeviceForcedB(env, bid, did) : Promise.resolve(false),
-      bid ? isBundleForcedB(env, bid) : Promise.resolve(false),
-      isBlocklisted(env, ip, did),
-      did ? isAppleAsnDeviceLocked(env, did) : Promise.resolve(false),
-    ]);
+    const [deviceForced, bundleForced, bl, appleLocked, effectiveGlobalConfig] =
+      await Promise.all([
+        did ? isDeviceForcedB(env, bid, did) : Promise.resolve(false),
+        bid ? isBundleForcedB(env, bid) : Promise.resolve(false),
+        isBlocklisted(env, ip, did),
+        did ? isAppleAsnDeviceLocked(env, did) : Promise.resolve(false),
+        getEffectiveConfigAb(env, bid),
+      ]);
     const remark = (R.remark as string | null) ?? null;
     const appleRemark = remark === REMARK_APPLE_ASN;
     const qj = R.query_json
@@ -819,7 +802,7 @@ async function fetchAccessLogPage(
     );
     return {
       id: Number(R.id),
-      created_at: String(R.created_at ?? "").replace("T", " ").slice(0, 19),
+      created_at: toBeijingTime(String(R.created_at ?? "")),
       ip,
       ip_attribution: ipAttribution,
       bundle_id: bid || null,
@@ -832,6 +815,7 @@ async function fetchAccessLogPage(
       bundle_forced_b: bundleForced,
       blocklisted: bl || appleRemark || appleLocked,
       device_force_b_disabled: appleRemark || appleLocked,
+      effective_global_config: effectiveGlobalConfig,
     };
   }));
 
@@ -925,29 +909,8 @@ async function handleClientConfig(
       mockHeader.toLowerCase() === "yes");
   if (mockAppleRequest) fromAppleAsn = true;
 
-  // apple_asn_lock_a_<deviceId> 是关键安全 KV，必须同步写入。
-  // bg() 在 Supabase Edge 里 EdgeRuntime.waitUntil 不保证函数返回后执行，
-  // 会导致 lock 丢失，下次请求走不到锁保护逻辑。
   if (fromAppleAsn && deviceId.trim()) {
-    const _lockDev = deviceId.trim();
-    await kvPut(env, appleAsnDeviceLockKey(_lockDev), "1").catch((e) =>
-      console.error("[apple_asn_lock] kvPut failed:", e),
-    );
-    // 同步清除该设备所有 bundle 下的 device_force_b_* 历史标记，
-    // 防止已有的 force-B 脏数据在苹果锁被意外删除后影响判断。
-    // （写苹果锁后 handleDeviceForceB 也会拒绝再次写入，此处是防御清理）
-    bg((async () => {
-      try {
-        const all = await kvListPrefix(env, KV_KEY.DEVICE_FORCE_PREFIX);
-        for (const { key } of all) {
-          if (key.endsWith(`${SEP}${_lockDev}`)) {
-            await kvDel(env, key).catch(() => {});
-          }
-        }
-      } catch (e) {
-        console.warn("[apple_asn_lock] clear device_force_b failed:", e);
-      }
-    })());
+    bg(kvPut(env, appleAsnDeviceLockKey(deviceId.trim()), "1"));
   }
   const remarkForInsert = fromAppleAsn ? REMARK_APPLE_ASN : null;
   const geoRow = buildAccessLogGeoRow(lookupRes, mockAppleRequest, treatApple);
@@ -1380,65 +1343,6 @@ export async function routeRequest(
       headers: { ...Object.fromEntries(r.headers), ...cors },
     });
   }
-  // GET /admin/api/ab-config?bundle_id=xxx  — 查默认或 bundle 级配置
-  // POST /admin/api/ab-config  body: { value:"A"|"B", bundle_id?:"..." }
-  if (
-    path === "/admin/api/ab-config" &&
-    (request.method === "GET" || request.method === "POST")
-  ) {
-    const deny = assertAdmin(request, env);
-    if (deny) {
-      return new Response(deny.body, {
-        status: deny.status,
-        headers: { ...Object.fromEntries(deny.headers), ...cors },
-      });
-    }
-    try {
-      if (request.method === "GET") {
-        const url2 = new URL(request.url);
-        const bid = url2.searchParams.get("bundle_id")?.trim() ?? "";
-        const kvKey = bid ? `ab_config_${bid}` : KV_KEY.DEFAULT;
-        const val = await kvGet(env, kvKey);
-        const j = jsonResponse({ code: 0, data: { key: kvKey, value: val ?? "A (default)" } });
-        return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-      } else {
-        const body = await request.json() as Record<string, string>;
-        const val = (body.value ?? "").toUpperCase().trim();
-        if (val !== "A" && val !== "B") {
-          const j = jsonResponse({ code: 400, message: "value must be A or B" }, 400);
-          return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-        }
-        const bid = (body.bundle_id ?? "").trim();
-        const kvKey = bid ? `ab_config_${bid}` : KV_KEY.DEFAULT;
-        await kvPut(env, kvKey, val);
-        const j = jsonResponse({ code: 0, message: "ok", data: { key: kvKey, value: val } });
-        return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-      }
-    } catch (e) {
-      const j = jsonResponse({ code: 500, message: String(e) }, 500);
-      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-    }
-  }
-
-  // GET /admin/api/kv-locks  — 列出全部 apple_asn_lock_a_* 条目
-  if (path === "/admin/api/kv-locks" && request.method === "GET") {
-    const deny = assertAdmin(request, env);
-    if (deny) {
-      return new Response(deny.body, {
-        status: deny.status,
-        headers: { ...Object.fromEntries(deny.headers), ...cors },
-      });
-    }
-    try {
-      const rows = await kvListPrefix(env, KV_KEY.APPLE_LOCK);
-      const j = jsonResponse({ code: 0, data: { rows } });
-      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-    } catch (e) {
-      const j = jsonResponse({ code: 500, message: String(e) }, 500);
-      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-    }
-  }
-
   if (path === "/admin/api/bundles" && request.method === "GET") {
     const deny = assertAdmin(request, env);
     if (deny) {
@@ -1461,23 +1365,6 @@ export async function routeRequest(
         status: j.status,
         headers: { ...Object.fromEntries(j.headers), ...cors },
       });
-    }
-  }
-
-  // GET /admin/api/ip-lookup?ip=1.2.3.4  — 直接测试 IP 归属查询链路
-  if (path === "/admin/api/ip-lookup" && request.method === "GET") {
-    const deny = assertAdmin(request, env);
-    if (deny) return new Response(deny.body, { status: deny.status, headers: { ...Object.fromEntries(deny.headers), ...cors } });
-    try {
-      const url2 = new URL(request.url);
-      const ip = url2.searchParams.get("ip")?.trim() || clientIp(request);
-      const lookup = await lookupIp(ip);
-      const isApple = await isAppleNetwork(env, lookup);
-      const j = jsonResponse({ code: 0, data: { ip, lookup, isApple } });
-      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
-    } catch (e) {
-      const j = jsonResponse({ code: 500, message: String(e) }, 500);
-      return new Response(j.body, { status: j.status, headers: { ...Object.fromEntries(j.headers), ...cors } });
     }
   }
 

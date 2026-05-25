@@ -93,17 +93,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     <button type="button" id="btnAppleAsnRefresh">更新苹果 ASN 列表</button>
     <span id="appleAsnStatus" class="muted" style="margin-left:10px"></span>
   </p>
-  <p class="muted" style="margin-top:10px">苹果 ASN 设备锁（<code>apple_asn_lock_a_*</code>）：命中苹果网络且上报了 Device-Id 的设备将被永久锁定为 A，即使后续不在苹果网络也不受影响。</p>
-  <p>
-    <button type="button" id="btnLoadLocks">查看设备锁列表</button>
-    <span id="lockStatus" class="muted" style="margin-left:10px"></span>
-  </p>
-  <div id="lockTableWrap" style="display:none;margin-top:8px">
-    <table>
-      <thead><tr><th>KV Key（apple_asn_lock_a_&lt;device_id&gt;）</th><th>值</th></tr></thead>
-      <tbody id="tblLocks"></tbody>
-    </table>
-  </div>
   <p id="warnDb" class="err" style="display:none"></p>
   <p class="muted" style="font-size:11px">打开本页后会<strong>自动加载</strong>下方各表；若仍为空白，请查看上方红色提示（未开 <code>ADMIN_OPEN</code> 时需先填写 Token），填写后可点配置请求记录分页旁的「刷新」。</p>
   <p id="hintReq" class="muted"></p>
@@ -140,19 +129,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     <tbody id="tbodyReq"></tbody>
   </table>
   </div>
-
-  <h2>一·五、默认 A/B 配置</h2>
-  <p class="muted">设置全局默认或指定 Bundle 的 A/B 值。不填 Bundle ID 表示修改全局默认（<code>ab_config</code>）；填写则修改该 Bundle 专属值（<code>ab_config_&lt;bundle_id&gt;</code>）。</p>
-  <p>
-    <label>Bundle ID（留空 = 全局默认）：</label><br>
-    <input type="text" id="abConfigBundle" placeholder="com.example.app（留空为全局）" style="width:100%;max-width:360px;padding:6px 8px;margin:4px 0">
-  </p>
-  <p>
-    <button type="button" id="btnAbConfigGet">查询当前值</button>
-    <button type="button" id="btnAbConfigSetA" style="color:#0369a1;font-weight:600">设为 A</button>
-    <button type="button" id="btnAbConfigSetB" style="color:#6b21a8;font-weight:600">设为 B</button>
-    <span id="abConfigStatus" class="muted" style="margin-left:10px"></span>
-  </p>
 
   <h2>二、KV：Bundle 级 A/B</h2>
   <table id="tblKv" style="display:none"><thead><tr><th>Bundle</th><th>A/B</th><th>KV 键</th></tr></thead><tbody id="tbodyKv"></tbody></table>
@@ -514,10 +490,18 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         var spBb = document.createElement("span");
         spBb.className = row.bundle_forced_b ? "tag" : "tag-off";
         spBb.textContent = row.bundle_forced_b ? "是" : "否";
+        var spGlobal = document.createElement("span");
+        var gc = row.effective_global_config || "A";
+        spGlobal.className = gc === "B" ? "tag" : "tag-off";
+        spGlobal.textContent = gc;
+        spGlobal.title = gc === "B"
+          ? "当前全局/bundle ab_config = B（全员强制B已开启）"
+          : "当前全局/bundle ab_config = A";
         tr.appendChild(makeReqPairsTd([
           { label: "设备强B", node: spF },
           { label: "黑名单", node: spBl },
           { label: "Bundle全员B", node: spBb },
+          { label: "全局配置", node: spGlobal },
           { label: "备注", value: row.remark ? String(row.remark) : "" },
         ]));
         var actNode;
@@ -809,66 +793,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         document.getElementById("err").textContent = String(e.message || e);
       });
     };
-    document.getElementById("btnLoadLocks").onclick = function () {
-      var stEl = document.getElementById("lockStatus");
-      var wrapEl = document.getElementById("lockTableWrap");
-      var tbody = document.getElementById("tblLocks");
-      if (!isAdminOpen() && !tok()) {
-        stEl.textContent = "请先填写 Token";
-        return;
-      }
-      stEl.textContent = "加载中…";
-      api("/admin/api/kv-locks")
-        .then(function (j) {
-          var rows = (j.data && j.data.rows) || [];
-          tbody.innerHTML = "";
-          if (rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" style="color:#888">暂无设备锁记录</td></tr>';
-          } else {
-            rows.forEach(function (r) {
-              var tr = document.createElement("tr");
-              tr.innerHTML = "<td><code>" + r.key + "</code></td><td>" + r.value + "</td>";
-              tbody.appendChild(tr);
-            });
-          }
-          wrapEl.style.display = "block";
-          stEl.textContent = "共 " + rows.length + " 条";
-        })
-        .catch(function (e) {
-          stEl.textContent = "加载失败：" + (e.message || e);
-        });
-    };
-
-    document.getElementById("btnAbConfigGet").onclick = function () {
-      var stEl = document.getElementById("abConfigStatus");
-      var bid = (document.getElementById("abConfigBundle").value || "").trim();
-      var qs = bid ? "?bundle_id=" + encodeURIComponent(bid) : "";
-      if (!isAdminOpen() && !tok()) { stEl.textContent = "请先填写 Token"; return; }
-      api("/admin/api/ab-config" + qs)
-        .then(function (j) {
-          var d = j.data || {};
-          stEl.textContent = "当前：key=" + d.key + "  value=" + d.value;
-        })
-        .catch(function (e) { stEl.textContent = "失败：" + (e.message || e); });
-    };
-
-    function setAbConfig(val) {
-      var stEl = document.getElementById("abConfigStatus");
-      var bid = (document.getElementById("abConfigBundle").value || "").trim();
-      if (!isAdminOpen() && !tok()) { stEl.textContent = "请先填写 Token"; return; }
-      var body = { value: val };
-      if (bid) body.bundle_id = bid;
-      api("/admin/api/ab-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-        .then(function (j) {
-          var d = j.data || {};
-          stEl.textContent = "已设置：key=" + d.key + "  value=" + d.value;
-          loadBundles();
-        })
-        .catch(function (e) { stEl.textContent = "失败：" + (e.message || e); });
-    }
-    document.getElementById("btnAbConfigSetA").onclick = function () { setAbConfig("A"); };
-    document.getElementById("btnAbConfigSetB").onclick = function () { setAbConfig("B"); };
-
     document.getElementById("btnAppleAsnRefresh").onclick = function () {
       var errEl = document.getElementById("err");
       var stEl = document.getElementById("appleAsnStatus");
