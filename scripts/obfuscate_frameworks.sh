@@ -1335,9 +1335,13 @@ rename_plugin() {
     restore_pigeon_host_api_names "$target_path" "$old_class" "$new_class"
     
     # 更新 Dart 代码
+    # 注：第二条原用 BSD sed 嵌套 {} 语法，在 macOS BSD sed 上整体失败（"extra characters at the end of } command"），
+    # 错误被 2>/dev/null 吞掉导致 Dart 字符串内 `/${old_name}/` 子串未被替换；典型受害者 fijkplayer
+    # 的 MethodChannel('befovy.com/fijkplayer/...') 与重命名后 native 端 channel `befovy.com/${new_name}/`
+    # 不一致 → 运行时 MissingPluginException。改用 perl，单语句完成"排除 import/export 行 + 全局替换"。
     find "$target_path" -type f -name "*.dart" 2>/dev/null | while read file; do
         sed -i '' "s|package:${old_name}/|package:${new_name}/|g" "$file" 2>/dev/null || true
-        sed -i '' "/^[[:space:]]*import /!{/^[[:space:]]*export /!{s|/${old_name}/|/${new_name}/|g;}}" "$file" 2>/dev/null || true
+        perl -i -pe 'next if /^\s*(?:import|export)\s/; s{/\Q'"$old_name"'\E/}{/'"$new_name"'/}g' "$file" 2>/dev/null || true
     done
     
     # 创建新的主入口文件
