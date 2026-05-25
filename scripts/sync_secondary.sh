@@ -3098,6 +3098,17 @@ _collect_override_blocks_from_pubspec() {
 }
 
 # 仅当 override 含 path/git 或 plugins/ 下已有对应包时，才写入壳工程 pubspec（避免 pub.dev 拉取 oaid_info_plugin 等本地包失败）
+_override_exists_in_target() {
+    local pubspec="$1"
+    local name="$2"
+    awk -v dep="$name" '
+        /^dependency_overrides:/ { in_section=1; next }
+        in_section && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { in_section=0 }
+        in_section && $0 ~ "^  "dep":" { found=1; exit }
+        END { exit found?0:1 }
+    ' "$pubspec"
+}
+
 _prepare_override_block_for_shell() {
     local block="$1"
     local dep_name
@@ -3336,7 +3347,7 @@ merge_pubspec_impl() {
                         local dep_name
                         dep_name=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
                         if [[ "$dep_name" != "flutter" && "$dep_name" != "flutter_localizations" ]] \
-                            && ! grep -q "^  ${dep_name}:" "$target_pubspec"; then
+                            && ! _override_exists_in_target "$target_pubspec" "$dep_name"; then
                             local prepared_block=""
                             prepared_block=$(_prepare_override_block_for_shell "$block") || true
                             if [[ -n "$prepared_block" ]]; then
@@ -3359,7 +3370,7 @@ merge_pubspec_impl() {
                 local dep_name_flush
                 dep_name_flush=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
                 if [[ "$dep_name_flush" != "flutter" && "$dep_name_flush" != "flutter_localizations" ]] \
-                    && ! grep -q "^  ${dep_name_flush}:" "$target_pubspec"; then
+                    && ! _override_exists_in_target "$target_pubspec" "$dep_name_flush"; then
                     local prepared_flush=""
                     prepared_flush=$(_prepare_override_block_for_shell "$block") || true
                     if [[ -n "$prepared_flush" ]]; then
