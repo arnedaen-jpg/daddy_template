@@ -1472,7 +1472,10 @@ def find_matching_paren(text: str, open_index: int) -> int:
 
 def relax_const_constructors(content: str) -> tuple[str, int]:
     total = 0
-    for ctor_name in ("BoxDecoration", "DecorationImage"):
+    # secondaryAssetProvider 是普通函数（非 const 构造），
+    # 任何在 const 上下文中直接或间接接受它的外层构造都需要去掉 const。
+    # 仅当内层 body 含 secondaryAssetProvider( 时才剥离 const，对正常代码零副作用。
+    for ctor_name in ("BoxDecoration", "DecorationImage", "Image", "FadeInImage"):
         pattern = re.compile(rf"(?<![\w$])const\s+{ctor_name}\(")
         parts = []
         index = 0
