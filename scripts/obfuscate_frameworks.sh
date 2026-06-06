@@ -154,6 +154,8 @@ detect_current_project() {
 }
 
 # 检查项目是否使用 flutter_base
+# 注: dq 不使用 flutter_base —— 其 fijkplayer 等本地 fork 直接位于 plugins/，
+#     走 generate_mapping 的常规 plugins/ 收集与重命名链路（非 flutter_base Step 4）。
 project_uses_flutter_base() {
     local project="$1"
     [[ "$project" == "md" || "$project" == "yms" ]]
@@ -1196,6 +1198,51 @@ restore_apple_system_module_imports_after_plugin_rename() {
     done < <(find "$target_path" -type f \( -name "*.m" -o -name "*.mm" \) -print0 2>/dev/null)
 }
 
+# fijkplayer 重命名后修复：保留 Dart/ObjC 运行时 channel 名 befovy.com/fijkplayer/*
+# rename_plugin 会把 ObjC 源里的 ${old_name}/ 改成 ${new_name}/，导致
+# MethodChannel/EventChannel 名变成 befovy.com/${new_name}/，与 Dart 端 befovy.com/fijkplayer/ 不匹配，
+# 播放器随之失效。这里把被改写的 channel 名还原回 befovy.com/fijkplayer/*。
+restore_fijkplayer_runtime_channels() {
+    local new_name="$1"
+    local target_path="$2"
+
+    [[ -d "$target_path" ]] || return 0
+    [[ "$new_name" != "fijkplayer" ]] || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 保留 fijkplayer runtime channel: befovy.com/fijkplayer/*"
+        return 0
+    fi
+
+    python3 - "$target_path" "$new_name" <<'PY'
+from pathlib import Path
+import sys
+
+target = Path(sys.argv[1])
+new_name = sys.argv[2]
+
+replacements = {
+    f"befovy.com/{new_name}/event/": "befovy.com/fijkplayer/event/",
+    f"befovy.com/{new_name}/": "befovy.com/fijkplayer/",
+}
+
+for path in target.rglob("*"):
+    if path.suffix not in {".dart", ".m", ".mm", ".h", ".swift"}:
+        continue
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError:
+        continue
+    updated = text
+    for old, new in replacements.items():
+        updated = updated.replace(old, new)
+    if updated != text:
+        path.write_text(updated)
+PY
+
+    [[ "$VERBOSE" == "true" ]] && log_info "  fijkplayer runtime channel 已保留为 befovy.com/fijkplayer/*" || true
+}
+
 # 重命名单个插件
 rename_plugin() {
     local source_path="$1"
@@ -1339,6 +1386,12 @@ rename_plugin() {
         sed -i '' "s|package:${old_name}/|package:${new_name}/|g" "$file" 2>/dev/null || true
         sed -i '' "/^[[:space:]]*import /!{/^[[:space:]]*export /!{s|/${old_name}/|/${new_name}/|g;}}" "$file" 2>/dev/null || true
     done
+
+    # 插件专项修复：fijkplayer 重命名后保留运行时 channel 名（Dart/ObjC 均会被上面的
+    # ${old_name}/ → ${new_name}/ 改写，必须还原，否则 MethodChannel/EventChannel 不匹配导致播放器失效）
+    if [[ "$old_name" == "fijkplayer" ]]; then
+        restore_fijkplayer_runtime_channels "$new_name" "$target_path"
+    fi
     
     # 创建新的主入口文件
     local old_main="$target_path/lib/${old_name}.dart"
@@ -1899,6 +1952,24 @@ get_original_plugin_name() {
         [[ -n "$orig" ]] && echo "$orig" && return
     fi
     echo "$plugin_name"
+}
+
+# 获取重命名后的当前插件名（如果有映射的话）
+# 反向映射文件格式为 new:orig，按 orig 反查 new。
+get_renamed_plugin_name() {
+    local original_name="$1"
+    if [[ -n "$_REVERSE_MAP_FILE" && -f "$_REVERSE_MAP_FILE" ]]; then
+        local renamed
+        renamed=$(grep -- ":${original_name}\$" "$_REVERSE_MAP_FILE" 2>/dev/null | head -1 | cut -d: -f1)
+        [[ -n "$renamed" ]] && echo "$renamed" && return
+    fi
+    echo "$original_name"
+}
+
+# 判断文件是否含预处理分支（#if/#ifdef/...），用于 profile 跳过有条件编译的文件
+file_has_preprocessor_blocks() {
+    local file="$1"
+    grep -qE '^[[:space:]]*#(if|ifdef|ifndef|else|elif|endif)\b' "$file" 2>/dev/null
 }
 
 # 获取插件的混淆级别
@@ -3264,6 +3335,177 @@ run_dep_strings() {
     bash "$dep_strings_script" "${args[@]}"
 }
 
+# 混淆完成后校验 fijkplayer 的 Dart/ObjC 运行时 channel 是否一致。
+# 重命名/字符串混淆若把 befovy.com/fijkplayer/* 改写成被混淆后的名字，会导致
+# MethodChannel/EventChannel 两端不匹配，播放器静默失效。此处做最终防线校验。
+verify_fijkplayer_runtime_channels_after_obfuscation() {
+    local renamed
+    renamed=$(get_renamed_plugin_name "fijkplayer")
+
+    local plugin_dir=""
+    local active_name="$renamed"
+    local active_plugin
+    if [[ -f "$PROJECT_ROOT/.flutter-plugins-dependencies" ]]; then
+        active_plugin=$(python3 - "$PROJECT_ROOT/.flutter-plugins-dependencies" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+for plugin in data.get("plugins", {}).get("ios", []):
+    path = Path(plugin.get("path") or "")
+    if (
+        (path / "lib/core/fijkplayer.dart").exists()
+        and (path / "ios/Classes/FijkPlayer.m").exists()
+    ):
+        print(f"{plugin.get('name') or path.name}|{path}")
+        break
+PY
+)
+        if [[ -n "$active_plugin" ]]; then
+            active_name="${active_plugin%%|*}"
+            plugin_dir="${active_plugin#*|}"
+        fi
+    fi
+
+    local candidate
+    for candidate in "$plugin_dir" "$PLUGINS_DIR/$renamed" "$PLUGINS_DIR/fijkplayer" "$FLUTTER_BASE_DIR/fijkplayer"; do
+        [[ -n "$candidate" ]] || continue
+        if [[ -f "$candidate/lib/core/fijkplayer.dart" && -f "$candidate/ios/Classes/FijkPlayer.m" ]]; then
+            plugin_dir="$candidate"
+            break
+        fi
+    done
+
+    [[ -n "$plugin_dir" ]] || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 将校验 fijkplayer runtime channel: $(basename "$plugin_dir")"
+        return 0
+    fi
+
+    local verify_output
+    local verify_rc=0
+    verify_output=$(python3 - "$plugin_dir" "$active_name" 2>&1 <<'PY'
+from pathlib import Path
+import re
+import sys
+
+plugin_dir = Path(sys.argv[1])
+renamed = sys.argv[2]
+
+dart_files = [
+    plugin_dir / "lib/core/fijkplugin.dart",
+    plugin_dir / "lib/core/fijkplayer.dart",
+]
+objc_files = [
+    plugin_dir / "ios/Classes/FijkPlugin.m",
+    plugin_dir / "ios/Classes/FijkPlayer.m",
+]
+
+required = {
+    "befovy.com/fijk",
+    "befovy.com/fijk/event",
+    "befovy.com/fijkplayer/",
+    "befovy.com/fijkplayer/event/",
+}
+
+def decode_objc_escaped(value: str) -> str:
+    out = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        i += 1
+        if i >= len(value):
+            out.append("\\")
+            break
+        esc = value[i]
+        if esc in "01234567":
+            digits = esc
+            i += 1
+            while i < len(value) and len(digits) < 3 and value[i] in "01234567":
+                digits += value[i]
+                i += 1
+            out.append(chr(int(digits, 8)))
+            continue
+        escapes = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+        out.append(escapes.get(esc, esc))
+        i += 1
+    return "".join(out)
+
+def dart_channels(path: Path) -> set:
+    text = path.read_text(errors="replace")
+    channels = set()
+    for nums in re.findall(r"String\.fromCharCodes\(\s*\[([0-9,\s]+)\]\s*\)", text):
+        try:
+            value = "".join(chr(int(part.strip())) for part in nums.split(",") if part.strip())
+        except ValueError:
+            continue
+        if value.startswith("befovy.com/"):
+            channels.add(value)
+    for quote, body in re.findall(r"(['\"])((?:\\.|(?!\1).)*?)\1", text):
+        value = decode_objc_escaped(body)
+        if value.startswith("befovy.com/"):
+            channels.add(value)
+    return channels
+
+def objc_channels(path: Path) -> set:
+    text = path.read_text(errors="replace")
+    channels = set()
+    for body in re.findall(r'@"((?:\\.|[^"\\])*)"', text):
+        value = decode_objc_escaped(body)
+        if value.startswith("befovy.com/"):
+            channels.add(value)
+    return channels
+
+dart = set()
+objc = set()
+for file in dart_files:
+    if file.exists():
+        dart |= dart_channels(file)
+for file in objc_files:
+    if file.exists():
+        objc |= objc_channels(file)
+
+missing_dart = sorted(required - dart)
+missing_objc = sorted(required - objc)
+bad_renamed = []
+if renamed != "fijkplayer":
+    bad_prefixes = {
+        f"befovy.com/{renamed}/",
+        f"befovy.com/{renamed}/event/",
+    }
+    bad_renamed = sorted(channel for channel in objc if channel in bad_prefixes)
+
+if missing_dart or missing_objc or bad_renamed:
+    if missing_dart:
+        print("Dart 缺失 channel: " + ", ".join(missing_dart))
+    if missing_objc:
+        print("ObjC 缺失 channel: " + ", ".join(missing_objc))
+    if bad_renamed:
+        print("ObjC 仍包含被重命名的 player channel: " + ", ".join(bad_renamed))
+    sys.exit(1)
+
+print(f"{plugin_dir.name}: Dart/ObjC fijkplayer runtime channel 一致")
+PY
+) || verify_rc=$?
+
+    if [[ $verify_rc -ne 0 ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "$line" ]] && log_error "$line"
+        done <<< "$verify_output"
+        return "$verify_rc"
+    fi
+
+    [[ -n "$verify_output" ]] && log_success "$verify_output"
+}
+
 # 一键完成全部流程
 run_all() {
     local start_time=$(date +%s)
@@ -3400,6 +3642,16 @@ run_all() {
         log_step "[7/$total_steps] 依赖字符串混淆 (Dep String Obfuscation)..."
         echo ""
         run_dep_strings || log_warning "依赖字符串混淆失败，但不影响其他流程"
+    fi
+
+    # fijkplayer runtime channel 校验（仅当工程使用 fijkplayer 时生效，否则静默通过）
+    echo ""
+    echo "--------------------------------------------"
+    log_step "fijkplayer runtime channel 校验..."
+    echo ""
+    if ! verify_fijkplayer_runtime_channels_after_obfuscation; then
+        log_error "fijkplayer runtime channel 校验失败（Dart/ObjC channel 不一致，播放器会失效）"
+        exit 1
     fi
 
     local end_time=$(date +%s)

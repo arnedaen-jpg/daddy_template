@@ -21,6 +21,16 @@
 # 通用: Profile 源码目录查找
 # =============================================
 
+bt_is_non_runtime_path() {
+    local path="$1"
+    case "$path" in
+        */Tests/*|*/RunnerTests/*|*/test/*|*/tests/*|*/example/*|*/examples/*|*/integration_test/*|*/test_driver/*|*/__tests__/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # 查找 profile 的 iOS 源码目录
 # 优先使用 mutate_plugin 已发现的 _PROFILE_SRC_DIRS（重命名后路径安全），
 # 再尝试按 original_name 搜索，最后按 current_name 搜索
@@ -37,18 +47,34 @@ bt_find_src_dir() {
 
     # 尝试按 original name
     local dir
-    dir=$(find "$plugin_dir" -path "*/Sources/${original_name}" -type d -not -path "*/include/*" 2>/dev/null | head -1)
+    dir=$(find "$plugin_dir" -path "*/Sources/${original_name}" -type d \
+        -not -path "*/include/*" \
+        -not -path "*/Tests/*" -not -path "*/RunnerTests/*" \
+        -not -path "*/test/*" -not -path "*/tests/*" \
+        -not -path "*/example/*" -not -path "*/examples/*" \
+        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+        2>/dev/null | head -1)
     [[ -n "$dir" ]] && echo "$dir" && return
 
     # 尝试按 current name
     local current
     current="${_PROFILE_CURRENT_NAME:-$(basename "$plugin_dir")}"
-    dir=$(find "$plugin_dir" -path "*/Sources/${current}" -type d -not -path "*/include/*" 2>/dev/null | head -1)
+    dir=$(find "$plugin_dir" -path "*/Sources/${current}" -type d \
+        -not -path "*/include/*" \
+        -not -path "*/Tests/*" -not -path "*/RunnerTests/*" \
+        -not -path "*/test/*" -not -path "*/tests/*" \
+        -not -path "*/example/*" -not -path "*/examples/*" \
+        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+        2>/dev/null | head -1)
     [[ -n "$dir" ]] && echo "$dir" && return
 
     # 最终回退：找到任何 iOS 源文件的目录
     dir=$(find "$plugin_dir" -type f \( -name "*.swift" -o -name "*.m" \) \
          -not -name "Package.swift" -not -name "${INJECT_PREFIX}*" \
+         -not -path "*/Tests/*" -not -path "*/RunnerTests/*" \
+         -not -path "*/test/*" -not -path "*/tests/*" \
+         -not -path "*/example/*" -not -path "*/examples/*" \
+         -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
          \( -path "*/ios/*" -o -path "*/darwin/*" \) 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
     [[ -n "$dir" ]] && echo "$dir"
 }
@@ -459,7 +485,7 @@ _BEOF
 _BEOF
                             ;;
                         6) cat >> "$temp_file" << _BEOF
-    if ([[UIScreen mainScreen] bounds].size.width > ${bv}) { NSString *_s = [NSString stringWithFormat:@"_zt_%@_%lu", @"${bs}", (unsigned long)${bv2}UL]; (void)_s; }
+    if ([[NSProcessInfo processInfo] processorCount] > ${bv}) { NSString *_s = [NSString stringWithFormat:@"_zt_%@_%lu", @"${bs}", (unsigned long)${bv2}UL]; (void)_s; }
 _BEOF
                             ;;
                         7) cat >> "$temp_file" << _BEOF
@@ -565,7 +591,7 @@ _BEOF
 _BEOF
                         ;;
                     6) cat >> "$temp_file" << _BEOF
-        if UIScreen.main.bounds.width > CGFloat(${bv}) { let _s = String(format: "_zt_%@_%lu", "${bs}", UInt(${bv2})); _ = _s }
+        if ProcessInfo.processInfo.processorCount > ${bv} { let _s = "_zt_${bs}_\(UInt(${bv2}))"; _ = _s }
 _BEOF
                         ;;
                     7) cat >> "$temp_file" << _BEOF
@@ -596,6 +622,16 @@ _BEOF
     done < "$file"
 
     if [[ -s "$temp_file" ]] && [[ $inject_count -gt 0 ]]; then
+        if ! grep -q '^import Foundation' "$temp_file" 2>/dev/null; then
+            local import_file
+            import_file=$(mktemp)
+            {
+                echo "import Foundation"
+                echo ""
+                cat "$temp_file"
+            } > "$import_file"
+            mv "$import_file" "$temp_file"
+        fi
         mv "$temp_file" "$file"
         [[ "$VERBOSE" == "true" ]] && log_info "    [L3] $(basename "$file"): 注入 $inject_count 个函数 × 多 Swift 死分支" || true
     else

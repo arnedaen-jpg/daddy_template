@@ -3517,6 +3517,264 @@ invalidate_flutter_ios_build_cache() {
     fi
 }
 
+# =============================================
+# fijkplayer（IJK 播放器，BIJKPlayer pod）专项处理
+# 适用项目：B 面以本地 fork plugins/fijkplayer 提供播放器的工程（如 dq 斗球/直播）。
+#   dq 的 B 面无 flutter_base；fijkplayer 位于 plugins/fijkplayer，源 pubspec 在
+#   dependencies 中以 `fijkplayer: path: ./plugins/fijkplayer/` 声明。
+# 背景：原生插件必须落在 dependencies（而非仅 dependency_overrides），否则不会写入
+#       GeneratedPluginRegistrant → MissingPluginException；且合并链路有时会把它降级成
+#       dependency_overrides 里的空条目（无 path）导致解析失败。这里强制把 fijkplayer
+#       规整到 dependencies 且 path 指向本地 plugins/fijkplayer，并校验 Dart/ObjC 的
+#       MethodChannel/EventChannel（befovy.com/fijk*）保持一致，否则播放器静默失效。
+# =============================================
+project_needs_fijkplayer_override() {
+    local project="$1"
+    [[ "$project" == "dq" ]]
+}
+
+# 规整 pubspec 的 fijkplayer：确保位于 dependencies 且 path 指向本地 plugins/fijkplayer
+ensure_fijkplayer_local_override() {
+    project_needs_fijkplayer_override "$PROJECT_NAME" || return 0
+
+    local target_pubspec="$PROJECT_ROOT/pubspec.yaml"
+    local fijk_dir="$PROJECT_ROOT/plugins/fijkplayer"
+
+    [[ -f "$target_pubspec" ]] || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 将确保 fijkplayer 位于 dependencies 且 path: plugins/fijkplayer"
+        return 0
+    fi
+
+    if [[ ! -d "$fijk_dir" ]]; then
+        log_warning "plugins/fijkplayer 不存在，无法规整 fijkplayer 本地依赖"
+        return 0
+    fi
+
+    python3 - "$target_pubspec" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+pubspec = Path(sys.argv[1])
+lines = pubspec.read_text().splitlines()
+
+def section_bounds(name):
+    start = None
+    for idx, line in enumerate(lines):
+        if line.rstrip() == f"{name}:" and not line.startswith(" "):
+            start = idx
+            break
+    if start is None:
+        return None, None
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        ln = lines[idx]
+        if ln and not ln.startswith(" ") and re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", ln):
+            end = idx
+            break
+    return start, end
+
+def remove_dep(section, dep):
+    start, end = section_bounds(section)
+    if start is None:
+        return
+    block = lines[start + 1:end]
+    new_block = []
+    j = 0
+    while j < len(block):
+        ln = block[j]
+        stripped = ln.lstrip(" ")
+        indent = len(ln) - len(stripped)
+        name = stripped.split(":", 1)[0]
+        if indent == 2 and name == dep:
+            j += 1
+            # 吞掉其下的嵌套行（缩进 > 2 的非空行），保留空行/下一条依赖
+            while j < len(block):
+                nx = block[j]
+                if nx.strip() == "":
+                    break
+                nxi = len(nx) - len(nx.lstrip(" "))
+                if nxi <= 2:
+                    break
+                j += 1
+            continue
+        new_block.append(ln)
+        j += 1
+    lines[start + 1:end] = new_block
+
+# 1) 清掉任何位置（dependency_overrides / dependencies）的旧 fijkplayer 条目
+remove_dep("dependency_overrides", "fijkplayer")
+remove_dep("dependencies", "fijkplayer")
+
+# 2) 重新写入 dependencies，path 指向本地 plugins/fijkplayer
+start, end = section_bounds("dependencies")
+if start is None:
+    raise SystemExit("pubspec.yaml 缺少 dependencies 段")
+
+seg = lines[start + 1:end]
+while seg and seg[-1].strip() == "":
+    seg.pop()
+seg.extend([
+    "  fijkplayer:",
+    "    path: plugins/fijkplayer",
+])
+lines[start + 1:end] = seg
+
+pubspec.write_text("\n".join(lines).rstrip() + "\n")
+PY
+
+    log_success "已确保 fijkplayer 位于 dependencies 且 path: plugins/fijkplayer"
+}
+
+# 从 Podfile.lock 找出仍引用 BIJKPlayer 的旧 fijkplayer pod 名（若已是本地 fijkplayer 则返回空）
+get_stale_fijkplayer_pod_name() {
+    local pod_lock="$PROJECT_ROOT/ios/Podfile.lock"
+    [[ -f "$pod_lock" ]] || return 0
+
+    if grep -qE '(^  - fijkplayer \(|\.symlinks/plugins/fijkplayer/ios)' "$pod_lock"; then
+        return 0
+    fi
+
+    if grep -q 'BIJKPlayer' "$pod_lock"; then
+        awk '
+            /^  - [A-Za-z0-9_.-]+ \(/ {
+                pod = $2
+                sub(/\(.*/, "", pod)
+            }
+            /BIJKPlayer/ && pod != "" {
+                print pod
+                exit
+            }
+        ' "$pod_lock"
+    fi
+}
+
+# 若 Podfile.lock 仍是旧的 BIJKPlayer pod，则刷新 iOS Pods
+refresh_fijkplayer_ios_pods_if_needed() {
+    project_needs_fijkplayer_override "$PROJECT_NAME" || return 0
+
+    local stale_pod
+    stale_pod=$(get_stale_fijkplayer_pod_name)
+    [[ -n "$stale_pod" ]] || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Podfile.lock 仍包含旧 fijkplayer Pod: ${stale_pod}，将运行 pod install 刷新 iOS Pods"
+        return 0
+    fi
+
+    if [[ ! -d "$PROJECT_ROOT/ios" ]]; then
+        log_warning "iOS 目录不存在，无法刷新 fijkplayer Pods"
+        return 0
+    fi
+
+    if ! command -v pod >/dev/null 2>&1; then
+        log_warning "pod 命令不可用，请手动运行: cd ios && pod install"
+        return 0
+    fi
+
+    log_step "刷新 fijkplayer iOS Pods（旧 Pod: $stale_pod）..."
+    if (cd "$PROJECT_ROOT/ios" && pod install >/dev/null 2>&1); then
+        log_success "fijkplayer iOS Pods 已刷新"
+    else
+        log_warning "pod install 失败，请手动运行: cd ios && pod install"
+    fi
+}
+
+# 校验 fijkplayer 的 Dart/ObjC channel 文件、iOS 插件路径与 Podfile.lock
+verify_fijkplayer_channel() {
+    project_needs_fijkplayer_override "$PROJECT_NAME" || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 将校验 fijkplayer Dart/ObjC channel 文件、iOS 插件路径与 Podfile.lock"
+        return 0
+    fi
+
+    local fijk_dir="$PROJECT_ROOT/plugins/fijkplayer"
+    if [[ ! -d "$fijk_dir" ]]; then
+        log_warning "fijkplayer 校验跳过: plugins/fijkplayer 不存在"
+        return 0
+    fi
+
+    local dart_plugin="$fijk_dir/lib/core/fijkplugin.dart"
+    local dart_player="$fijk_dir/lib/core/fijkplayer.dart"
+    local objc_plugin="$fijk_dir/ios/Classes/FijkPlugin.m"
+    local objc_player="$fijk_dir/ios/Classes/FijkPlayer.m"
+    local ok=true
+
+    if [[ ! -f "$dart_plugin" || ! -f "$dart_player" ]]; then
+        log_warning "fijkplayer 校验: Dart channel 文件不完整"
+        ok=false
+    fi
+    if [[ ! -f "$objc_plugin" || ! -f "$objc_player" ]]; then
+        log_warning "fijkplayer 校验: iOS ObjC channel 文件不完整"
+        ok=false
+    fi
+
+    if [[ -f "$dart_plugin" ]] && ! grep -q 'befovy.com/fijk' "$dart_plugin"; then
+        log_warning "fijkplayer 校验: Dart 插件 channel 字符串缺失"
+        ok=false
+    fi
+    if [[ -f "$dart_player" ]] && ! grep -q 'befovy.com/fijkplayer/' "$dart_player"; then
+        log_warning "fijkplayer 校验: Dart player channel 字符串缺失"
+        ok=false
+    fi
+    if [[ -f "$objc_plugin" ]] && ! grep -q 'befovy.com/fijk' "$objc_plugin"; then
+        log_warning "fijkplayer 校验: ObjC 插件 channel 字符串缺失"
+        ok=false
+    fi
+    if [[ -f "$objc_player" ]] && ! grep -q 'befovy.com/fijkplayer/' "$objc_player"; then
+        log_warning "fijkplayer 校验: ObjC player channel 字符串缺失"
+        ok=false
+    fi
+
+    local plugins_file="$PROJECT_ROOT/.flutter-plugins-dependencies"
+    if [[ -f "$plugins_file" ]]; then
+        local plugin_path
+        plugin_path=$(python3 - "$plugins_file" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+for plugin in data.get("plugins", {}).get("ios", []):
+    if plugin.get("name") == "fijkplayer":
+        print(plugin.get("path") or "")
+        break
+PY
+)
+        if [[ "$plugin_path" == "$PROJECT_ROOT/plugins/fijkplayer/" || "$plugin_path" == "$PROJECT_ROOT/plugins/fijkplayer" ]]; then
+            log_success "fijkplayer iOS 插件路径已指向 plugins/fijkplayer"
+        else
+            log_warning "fijkplayer iOS 插件路径异常: ${plugin_path:-未找到}，预期 plugins/fijkplayer"
+            ok=false
+        fi
+    else
+        log_warning ".flutter-plugins-dependencies 不存在，无法校验 fijkplayer iOS 插件路径"
+        ok=false
+    fi
+
+    local pod_lock="$PROJECT_ROOT/ios/Podfile.lock"
+    if [[ -f "$pod_lock" ]]; then
+        if grep -qE '(^  - fijkplayer \(|\.symlinks/plugins/fijkplayer/ios)' "$pod_lock"; then
+            log_success "Podfile.lock 已包含 fijkplayer Pod"
+        elif grep -q 'BIJKPlayer' "$pod_lock"; then
+            local stale_pod
+            stale_pod=$(get_stale_fijkplayer_pod_name)
+            log_warning "Podfile.lock 未包含 fijkplayer，但仍包含 BIJKPlayer（可能来自旧 Pod: ${stale_pod:-未知}）；请刷新 iOS Pods，否则 Dart/ObjC 可能实际来自不同插件"
+            ok=false
+        fi
+    else
+        log_info "Podfile.lock 不存在，首次 pod install / iOS 构建时会生成"
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        log_success "fijkplayer channel 校验通过（Dart 与 iOS ObjC 均已迁移）"
+    fi
+}
+
 # 主函数
 main() {
     echo "=============================================="
@@ -3590,6 +3848,7 @@ sync_flutter_base
         log_step "写入项目专用 pubspec 覆盖..."
         "$compat_pubspec_func" "$PROJECT_ROOT/pubspec.yaml" || true
     fi
+    ensure_fijkplayer_local_override          # 规整 fijkplayer 到 dependencies 且 path: plugins/fijkplayer（须在 pub get 前）
     show_summary
     write_current_project         # 记录当前项目名
     write_sync_log                # 写入同步日志
@@ -3600,6 +3859,8 @@ sync_flutter_base
         log_step "运行 pub get 后项目专用修复..."
         "$compat_post_pub_get_func" || true
     fi
+    refresh_fijkplayer_ios_pods_if_needed     # 若 Podfile.lock 仍是旧 BIJKPlayer pod 则刷新
+    verify_fijkplayer_channel                 # 校验 Dart/ObjC channel 与插件路径一致（plugins/fijkplayer）
     invalidate_flutter_ios_build_cache
     type -t clean_and_reinstall_pods &>/dev/null && clean_and_reinstall_pods
 
