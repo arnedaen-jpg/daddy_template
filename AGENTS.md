@@ -36,7 +36,7 @@
 
 ## 开发约定
 
-- 统一使用 `fvm flutter`，`.fvmrc` 当前指定 Flutter `3.35.1`。
+- 统一使用 `fvm flutter`，`.fvmrc` 当前指定 Flutter `3.38.3`。
 - 先看 `ab_config.yaml`，再判断当前同步的是哪个 B 面项目。
 - 先看 `docs/AB_MAKE.md`，再决定当前任务位于迁移、混淆、打包还是上传阶段。
 - 如果需要适配新 B 面项目，重点看 `docs/ADAPT_NEW_PROJECT.md`、`scripts/compat/`、`scripts/project_manifests/`。
