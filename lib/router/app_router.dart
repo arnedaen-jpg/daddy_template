@@ -1,11 +1,6 @@
 import 'package:flutter/material.dart';
-import '../config/env_config.dart';
 import '../services/config_service.dart';
-import '../services/domain_manager.dart';
-import '../services/network/http_client.dart';
-import '../services/network/network_permission_service.dart';
 import '../modules/primary/pages/home_page.dart';
-import '../modules/secondary/module_entry.dart';
 import '../utils/s.dart';
 
 /// 路由名称常量
@@ -17,10 +12,10 @@ class AppRoutes {
 }
 
 /// 动态路由管理器
-/// 根据配置动态切换路由
+///
+/// 注意：B 面（次要模块）不再作为子路由 push，而是由 [AbRootHost] 在根部按模式挂载。
+/// 因此本路由仅服务于「壳工程（A 面 / 启动页）」内部导航。
 class AppRouter {
-  static final ConfigService _configService = ConfigService();
-
   /// 生成路由
   static Route<dynamic> generateRoute(RouteSettings settings) {
     final name = settings.name;
@@ -31,17 +26,15 @@ class AppRouter {
     } else if (name == AppRoutes.primaryHome) {
       return _buildRoute(const HomePage(), settings);
     } else if (name == AppRoutes.secondaryHome) {
-      return _buildRoute(ModuleEntry.getHomePage(), settings);
+      // 次要模式由根宿主切换，壳工程内不再渲染 B 面
+      return _buildRoute(const HomePage(), settings);
     } else {
       return _buildRoute(_getHomePage(), settings);
     }
   }
 
-  /// 根据配置获取首页
+  /// 壳工程首页（A 面）
   static Widget _getHomePage() {
-    if (_configService.isSecondaryMode) {
-      return ModuleEntry.getHomePage();
-    }
     return const HomePage();
   }
 
@@ -54,7 +47,8 @@ class AppRouter {
   }
 
   /// 构建无动画路由
-  static PageRouteBuilder _buildRouteNoAnimation(Widget page, RouteSettings settings) {
+  static PageRouteBuilder _buildRouteNoAnimation(
+      Widget page, RouteSettings settings) {
     return PageRouteBuilder(
       pageBuilder: (_, __, ___) => page,
       settings: settings,
@@ -63,7 +57,7 @@ class AppRouter {
     );
   }
 
-  /// 导航到首页（根据当前配置，无动画）
+  /// 导航到首页（壳工程内，无动画）
   static void navigateToHome(BuildContext context) {
     final page = _getHomePage();
     Navigator.of(context).pushAndRemoveUntil(
@@ -72,67 +66,31 @@ class AppRouter {
     );
   }
 
-  /// 导航到指定模式的首页（无动画）
+  /// 切换到指定模式
+  ///
+  /// 次要模式不走 Navigator（由根宿主按模式重建），统一交给 ConfigService 切换。
   static void navigateToMode(BuildContext context, FeatureMode mode) {
-    final page = mode == FeatureMode.primary 
-        ? const HomePage() 
-        : ModuleEntry.getHomePage();
-    
+    if (mode == FeatureMode.secondary) {
+      ConfigService().switchToSecondary();
+      return;
+    }
+
+    const page = HomePage();
     Navigator.of(context).pushAndRemoveUntil(
-      _buildRouteNoAnimation(page, RouteSettings(
-        name: mode == FeatureMode.primary ? AppRoutes.primaryHome : AppRoutes.secondaryHome,
-      )),
+      _buildRouteNoAnimation(
+        page,
+        RouteSettings(name: AppRoutes.primaryHome),
+      ),
       (route) => false,
     );
   }
 }
 
 /// 启动页
-class SplashPage extends StatefulWidget {
+///
+/// 真正的初始化序列已上移到 [AbRootHost]，此处仅作为壳工程的占位加载界面。
+class SplashPage extends StatelessWidget {
   const SplashPage({super.key});
-
-  @override
-  State<SplashPage> createState() => _SplashPageState();
-}
-
-class _SplashPageState extends State<SplashPage> {
-  @override
-  void initState() {
-    super.initState();
-    _initialize();
-  }
-
-  Future<void> _initialize() async {
-    // 1. 初始化环境配置
-    await EnvConfig.initialize();
-
-    // 2. 初始化网络权限服务（触发 iOS 网络权限弹窗）
-    // 这一步会请求 apple.com 来触发系统的网络权限弹窗
-    // 并监听网络状态变化
-    await NetworkPermissionService().initialize();
-
-    // 3. 初始化网络客户端
-    await HttpClient().initialize();
-
-    // 4. 初始化域名管理服务
-    await DomainManager().initialize();
-
-    // 5. 初始化配置服务
-    // ConfigService 会检查 NetworkPermissionService.networkEnabled
-    // 如果网络不可用，会注册回调等待网络可用后再获取配置
-    await ConfigService().initialize();
-
-    // 6. 如果需要显示次要模式，确保次要模块已初始化
-    await ConfigService().ensureSecondaryInitialized();
-
-    // 延迟一下显示启动画面
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    if (mounted) {
-      // 导航到首页
-      AppRouter.navigateToHome(context);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {

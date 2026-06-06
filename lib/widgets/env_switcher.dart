@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../config/env_config.dart';
-import '../router/app_router.dart';
 import '../services/config_service.dart';
 import '../services/domain_manager.dart';
 
@@ -17,12 +16,10 @@ const bool _kShowDevFloatButton = bool.fromEnvironment(
 /// 显示应用信息、环境配置、远程配置等开发者信息
 class EnvFloatingIndicator extends StatefulWidget {
   final Widget child;
-  final GlobalKey<NavigatorState>? navigatorKey;
 
   const EnvFloatingIndicator({
     super.key,
     required this.child,
-    this.navigatorKey,
   });
 
   @override
@@ -31,6 +28,7 @@ class EnvFloatingIndicator extends StatefulWidget {
 
 class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
   PackageInfo? _packageInfo;
+  bool _isOptionsVisible = false;
 
   @override
   void initState() {
@@ -55,15 +53,26 @@ class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
       return widget.child;
     }
 
-    return Stack(
-      children: [
-        widget.child,
-        Positioned(
-          right: 16,
-          bottom: 100,
-          child: _buildFloatingButton(),
-        ),
-      ],
+    // 本组件位于 MaterialApp 之上（A 面壳工程或 B 面独立 App 均可作为 child），
+    // 因此自带 Directionality 与 Material，弹窗也走自渲染 overlay，
+    // 不依赖任何 Navigator / showModalBottomSheet。
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          widget.child,
+          if (_isOptionsVisible) _buildOptionsOverlay(),
+          Positioned(
+            right: 16,
+            bottom: 100,
+            child: Material(
+              type: MaterialType.transparency,
+              child: _buildFloatingButton(),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -121,17 +130,48 @@ class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
   }
 
   void _showDevOptions() {
-    final navContext = widget.navigatorKey?.currentContext;
-    if (navContext == null) return;
+    setState(() => _isOptionsVisible = true);
+  }
 
-    showModalBottomSheet(
-      context: navContext,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => _DevOptionsSheet(
-        packageInfo: _packageInfo,
-        navigatorKey: widget.navigatorKey,
-        onEnvChanged: () => setState(() {}),
+  void _hideDevOptions() {
+    setState(() => _isOptionsVisible = false);
+  }
+
+  Widget _buildOptionsOverlay() {
+    return Positioned.fill(
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Material(
+          type: MaterialType.transparency,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _hideDevOptions,
+                      child: Container(color: Colors.black26),
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: constraints.maxHeight * 0.86,
+                      ),
+                      child: _DevOptionsSheet(
+                        packageInfo: _packageInfo,
+                        onClose: _hideDevOptions,
+                        onEnvChanged: () => setState(() {}),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -140,12 +180,12 @@ class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
 /// 开发者选项面板
 class _DevOptionsSheet extends StatefulWidget {
   final PackageInfo? packageInfo;
-  final GlobalKey<NavigatorState>? navigatorKey;
+  final VoidCallback onClose;
   final VoidCallback onEnvChanged;
 
   const _DevOptionsSheet({
     required this.packageInfo,
-    this.navigatorKey,
+    required this.onClose,
     required this.onEnvChanged,
   });
 
@@ -156,13 +196,6 @@ class _DevOptionsSheet extends StatefulWidget {
 class _DevOptionsSheetState extends State<_DevOptionsSheet> {
   final ConfigService _configService = ConfigService();
   final DomainManager _domainManager = DomainManager();
-
-  void _navigateToMode(FeatureMode mode) {
-    final navContext = widget.navigatorKey?.currentContext;
-    if (navContext != null) {
-      AppRouter.navigateToMode(navContext, mode);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -205,7 +238,9 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
             ),
           ),
           // 底部安全区
-          SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
+          SizedBox(
+            height: (MediaQuery.maybeOf(context)?.padding.bottom ?? 0) + 8,
+          ),
         ],
       ),
     );
@@ -228,7 +263,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           const Spacer(),
           IconButton(
             icon: const Icon(Icons.close),
-            onPressed: () => Navigator.pop(context),
+            onPressed: widget.onClose,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
           ),
@@ -502,8 +537,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
                   color: Colors.blue,
                   onTap: () async {
                     await _configService.debugResetMemoryMode();
-                    Navigator.pop(context);
-                    _navigateToMode(FeatureMode.primary);
+                    widget.onClose();
                   },
                 ),
               ),
@@ -515,8 +549,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
                   color: Colors.purple,
                   onTap: () async {
                     await _configService.switchToSecondary();
-                    Navigator.pop(context);
-                    _navigateToMode(FeatureMode.secondary);
+                    widget.onClose();
                   },
                 ),
               ),
