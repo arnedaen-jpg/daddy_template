@@ -276,6 +276,7 @@ show_help() {
     echo "  -n, --package NAME    源项目包名（默认从 pubspec.yaml 读取）"
     echo "  -l, --list            列出预设项目配置"
     echo "  -d, --dry-run         模拟运行，不实际复制文件"
+    echo "  --no-pull             跳过 git pull --ff-only（源仓库 origin 不可达 / 离线场景）；用源项目当前工作区版本同步"
     echo "  --base64-map          (默认开启) 生成 secondary 图片 Base64 映射；写入 lib/utils 下 Base64 支持 Dart；同步结束后删除"
     echo "                        assets/secondary 下图片（不删 JSON/字体等），避免打进包"
     echo "  --keep-secondary-images  与 --base64-map 同用时保留 secondary 图片文件不删"
@@ -360,6 +361,7 @@ SOURCE_PATH=""
 PROJECT_NAME=""
 SOURCE_PACKAGE=""
 DRY_RUN=false
+NO_PULL=false
 GENERATE_BASE64_MAP=false
 REPLACE_IMAGE_ENTRY=false
 # 与 --base64-map 同用时默认在脚本末尾删除 assets/secondary 内图片；--keep-secondary-images 可关闭
@@ -403,6 +405,10 @@ parse_args() {
             -l|--list)
                 list_projects
                 exit 0
+                ;;
+            --no-pull)
+                NO_PULL=true
+                shift
                 ;;
             -d|--dry-run)
                 DRY_RUN=true
@@ -546,9 +552,14 @@ update_source_repo() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY-RUN] 跳过 git pull，仅检查 Git 状态并读取当前版本信息"
         collect_source_git_info
+    elif [[ "$NO_PULL" == "true" ]]; then
+        log_info "--no-pull: 跳过 git pull，使用源项目当前工作区版本（离线/内网不通时用）"
+        collect_source_git_info
+        log_warning "源项目未拉取最新代码，请确认本地 $SOURCE_GIT_BRANCH 已是期望状态"
     else
         if ! git -C "$SOURCE_PATH" pull --ff-only; then
             log_error "源项目 git pull 失败，已中断同步"
+            log_info "若 origin 不可达（内网/离线），可加 --no-pull 用本地工作区跑"
             exit 1
         fi
         collect_source_git_info
@@ -1524,6 +1535,66 @@ print(
     f"[INFO] AssetImage -> secondaryAssetProvider 替换完成: 文件 {replaced_files} 个, "
     f"替换 {replaced_count} 处, 去除 const {relaxed_const_count} 处{_sap_extra}"
 )
+
+# --- Pass 2 (合并自 zeus 上游): rewrite AssetImage subclasses to delegate to secondaryAssetProvider ---
+# E.g. DecryptedAssetImageProvider extends AssetImage → becomes a function alias.
+# 修复 Base64 模式下自定义 AssetImage 子类编译失败问题。
+subclass_def_re = re.compile(
+    r"class\s+(\w+)\s+extends\s+(?:AssetImage|ExactAssetImage)\s*\{",
+)
+subclass_names: list[str] = []
+subclass_locations: dict[str, Path] = {}
+
+for file_path in root.rglob("*.dart"):
+    content = file_path.read_text(encoding="utf-8")
+    for m in subclass_def_re.finditer(content):
+        name = m.group(1)
+        subclass_names.append(name)
+        subclass_locations[name] = file_path
+
+if subclass_names:
+    for name, file_path in subclass_locations.items():
+        content = file_path.read_text(encoding="utf-8")
+        cls_re = re.compile(
+            rf"class\s+{re.escape(name)}\s+extends\s+\w+\s*\{{",
+        )
+        m = cls_re.search(content)
+        if not m:
+            continue
+        open_brace = m.end() - 1
+        depth = 0
+        i = open_brace
+        while i < len(content):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            continue
+        close_brace = i
+        replacement = (
+            f"ImageProvider<Object> {name}("
+            f"String assetName, {{AssetBundle? bundle, String? package}}) =>\n"
+            f"    secondaryAssetProvider(assetName, bundle: bundle, package: package);"
+        )
+        content = content[:m.start()] + replacement + content[close_brace + 1:]
+        file_path.write_text(content, encoding="utf-8")
+        ensure_helper_import(file_path)
+        print(f"[INFO] 子类 {name} -> secondaryAssetProvider 函数代理 ({file_path.name})")
+
+    for name in subclass_names:
+        const_sub_re = re.compile(rf"\bconst\s+{re.escape(name)}\(")
+        for file_path in root.rglob("*.dart"):
+            content = file_path.read_text(encoding="utf-8")
+            new_content, n = const_sub_re.subn(f"{name}(", content)
+            if n > 0:
+                file_path.write_text(new_content, encoding="utf-8")
+                print(f"[INFO] 去除 const {name} {n} 处 ({file_path.name})")
+
+    print(f"[INFO] AssetImage 子类处理完成: {', '.join(subclass_names)}")
 PY
 }
 
@@ -2099,7 +2170,7 @@ obfuscate_asset_filenames() {
     fi
 }
 
-# 同步 plugins（源项目含 plugins/ 目录时自动同步: hjsq, 51pc, hlw, tiktok 等）
+# 同步 plugins/ 与 plugin/（dq/xty：path 依赖放在 B 面根目录 plugin/ 单数；旧项目可能用 plugins/）
 sync_plugins() {
     if [[ ! -d "$SOURCE_PATH/plugins" ]]; then
         return
@@ -2782,7 +2853,7 @@ update_assets_paths() {
                 "images" "translations" "icons" "fonts" "player" "icon" "tabbar" 
                 "comics" "live" "mine" "search" "short" "community" "shi_pin" "ann" "novel"
                 "lottie" "json" "svga" "video" "audio" "animation" "file"
-                "tab" "app" "play" "reader" "mv" "girl"
+                "tab" "app" "play" "reader" "mv" "girl" "theme_images"
             )
             if [[ "$(uname)" == "Darwin" ]]; then
                 for dir in "${asset_dirs[@]}"; do
@@ -2874,6 +2945,21 @@ sync_sdk_version() {
             fi
             log_success "flutter_lints 版本已同步: $source_lints"
         fi
+    fi
+}
+
+# 合并自 zeus 上游：清理 pubspec.yaml 行尾空白（避免 yaml 解析/格式问题）
+trim_pubspec_trailing_whitespace() {
+    local pubspec="$1"
+
+    if [[ "$DRY_RUN" == true ]] || [[ ! -f "$pubspec" ]]; then
+        return 0
+    fi
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -E 's/[[:space:]]+$//' "$pubspec"
+    else
+        sed -i -E 's/[[:space:]]+$//' "$pubspec"
     fi
 }
 
@@ -2973,6 +3059,83 @@ merge_pubspec() {
 
     # 执行合并
     merge_pubspec_impl
+}
+
+# 从 B 面 pubspec 的 dependency_overrides 段拆成条目块（须保留 path:/git: 等多行子项；
+# 若只合并 «包名:» 单行，pub 会当成从 pub.dev 拉 any，导致 oaid_info_plugin 等本地包解析失败）
+_collect_override_blocks_from_pubspec() {
+    local source_pubspec="$1"
+    local out_blocks="$2"
+    : > "$out_blocks"
+    local temp_body="/tmp/secondary_override_body_$$.yaml"
+    awk '
+        /^dependency_overrides:/ { grab=1; next }
+        grab && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { exit }
+        grab { print }
+    ' "$source_pubspec" > "$temp_body" 2>/dev/null || true
+    [[ ! -s "$temp_body" ]] && { rm -f "$temp_body"; return 0; }
+
+    local block=""
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+        # 仅识别真实包名行（须以字母开头）；纯注释行勿单独成块，避免 tr -d 空格后误入 pubspec
+        if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*: ]]; then
+            if [[ -n "$block" ]]; then
+                if echo "$block" | grep -qE '^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:'; then
+                    printf '%s\n\n' "$block" >> "$out_blocks"
+                fi
+            fi
+            block="$line"
+        else
+            if [[ -n "$block" ]]; then
+                block+=$'\n'"$line"
+            fi
+        fi
+    done < "$temp_body"
+    if [[ -n "$block" ]] && echo "$block" | grep -qE '^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:'; then
+        printf '%s\n\n' "$block" >> "$out_blocks"
+    fi
+    rm -f "$temp_body"
+}
+
+# 仅当 override 含 path/git 或 plugins/ 下已有对应包时，才写入壳工程 pubspec（避免 pub.dev 拉取 oaid_info_plugin 等本地包失败）
+_override_exists_in_target() {
+    local pubspec="$1"
+    local name="$2"
+    awk -v dep="$name" '
+        /^dependency_overrides:/ { in_section=1; next }
+        in_section && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { in_section=0 }
+        in_section && $0 ~ "^  "dep":" { found=1; exit }
+        END { exit found?0:1 }
+    ' "$pubspec"
+}
+
+_prepare_override_block_for_shell() {
+    local block="$1"
+    local dep_name
+    dep_name=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+    if [[ -z "$dep_name" ]]; then
+        return 1
+    fi
+    # path/git 多行块：原样保留
+    if echo "$block" | grep -qE '^[[:space:]]{4,}(path|git):'; then
+        echo "$block"
+        return 0
+    fi
+    # 纯版本号单行 override（如 `http: ^1.2.2`、`intl: 0.20.2`、`rxdart: ^0.28.0`）：
+    # 这正是解决依赖冲突的核心机制（B 面常用，如 audioplayers http^1.2.2 vs svgaplayer http^0.13.3），
+    # 必须原样保留，否则壳工程 pub get 解析失败。
+    if echo "$block" | head -1 | grep -qE '^  [a-z_][a-z_0-9]*:[[:space:]]+[^[:space:]]'; then
+        echo "$block"
+        return 0
+    fi
+    # 既无 path/git 也无版本号，但 plugins/ 下恰好有同名目录：兜底转 path override
+    if [[ -d "$TARGET_PLUGINS_DIR/$dep_name" && -f "$TARGET_PLUGINS_DIR/$dep_name/pubspec.yaml" ]]; then
+        echo "  ${dep_name}:"
+        echo "    path: plugins/${dep_name}"
+        return 0
+    fi
+    log_warning "跳过 dependency_override: ${dep_name}（无 path/git/版本号，且 plugins/ 中无该包）" >&2
+    return 1
 }
 
 # pubspec 合并实现（使用 sed/grep）
@@ -3166,34 +3329,58 @@ merge_pubspec_impl() {
     fi
 
     # --- 合并 dependency_overrides ---
-    # 某些 B 面项目在 dependency_overrides 中放置了实际使用的依赖（如 hlw 的 qr_flutter），
-    # 这些 override 如果不带过来，同步后会缺失导致编译报错。
-    local temp_overrides="/tmp/secondary_overrides_$$.yaml"
-    > "$temp_overrides"
+    # 某些 B 面在 dependency_overrides 里含 path/git 多行条目，必须整块合并；
+    # 旧逻辑只取 «  xx: » 单行会生成「空约束」，pub 会去 pub.dev 拉 any（如 oaid_info_plugin）并解析失败。
+    local temp_overrides_blocks="/tmp/secondary_overrides_blocks_$$.yaml"
+    local temp_overrides_filtered="/tmp/secondary_overrides_filtered_$$.yaml"
+    > "$temp_overrides_filtered"
 
     if grep -q "^dependency_overrides:" "$source_pubspec" 2>/dev/null; then
-        # 提取 override 条目（仅普通 key: value 格式，跳过 flutter 相关）
-        sed -n '/^dependency_overrides:/,/^[a-z_-]*:/p' "$source_pubspec" | \
-            grep -v "^dependency_overrides:" | \
-            grep -v "^[a-z_-]*:" | \
-            grep -v "^$" | \
-            grep "^  [a-z]" > "$temp_overrides" || true
+        _collect_override_blocks_from_pubspec "$source_pubspec" "$temp_overrides_blocks"
 
         local override_count=0
-        if [[ -s "$temp_overrides" ]]; then
-            local temp_overrides_filtered="/tmp/secondary_overrides_filtered_$$.yaml"
-            > "$temp_overrides_filtered"
-            while IFS= read -r line; do
-                local dep_name
-                dep_name=$(echo "$line" | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
-                [[ "$dep_name" == "flutter" || "$dep_name" == "flutter_localizations" ]] && continue
-                # 只合并目标 dependencies 中尚未出现的
-                if ! grep -q "^  ${dep_name}:" "$target_pubspec"; then
-                    echo "$line" >> "$temp_overrides_filtered"
+        if [[ -s "$temp_overrides_blocks" ]]; then
+            local block=""
+            while IFS= read -r line || [[ -n "${line:-}" ]]; do
+                if [[ -z "$line" ]]; then
+                    if [[ -n "$block" ]]; then
+                        local dep_name
+                        dep_name=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+                        if [[ "$dep_name" != "flutter" && "$dep_name" != "flutter_localizations" ]] \
+                            && ! _override_exists_in_target "$target_pubspec" "$dep_name"; then
+                            local prepared_block=""
+                            prepared_block=$(_prepare_override_block_for_shell "$block") || true
+                            if [[ -n "$prepared_block" ]]; then
+                                printf '%s\n' "$prepared_block" >> "$temp_overrides_filtered"
+                                echo "" >> "$temp_overrides_filtered"
+                                override_count=$((override_count + 1))
+                            fi
+                        fi
+                        block=""
+                    fi
+                    continue
                 fi
-            done < "$temp_overrides"
+                if [[ -n "$block" ]]; then
+                    block+=$'\n'"$line"
+                else
+                    block="$line"
+                fi
+            done < "$temp_overrides_blocks"
+            if [[ -n "$block" ]]; then
+                local dep_name_flush
+                dep_name_flush=$(echo "$block" | head -1 | sed 's/^  //' | sed 's/:.*$//' | tr -d ' ')
+                if [[ "$dep_name_flush" != "flutter" && "$dep_name_flush" != "flutter_localizations" ]] \
+                    && ! _override_exists_in_target "$target_pubspec" "$dep_name_flush"; then
+                    local prepared_flush=""
+                    prepared_flush=$(_prepare_override_block_for_shell "$block") || true
+                    if [[ -n "$prepared_flush" ]]; then
+                        printf '%s\n' "$prepared_flush" >> "$temp_overrides_filtered"
+                        echo "" >> "$temp_overrides_filtered"
+                        override_count=$((override_count + 1))
+                    fi
+                fi
+            fi
 
-            override_count=$(wc -l < "$temp_overrides_filtered" | tr -d ' ')
             if [[ "$override_count" -gt 0 ]]; then
                 # 写入 dependency_overrides 段到目标 pubspec
                 if grep -q "^dependency_overrides:" "$target_pubspec"; then
@@ -3231,12 +3418,12 @@ merge_pubspec_impl() {
                     } > "${target_pubspec}.tmp"
                     mv "${target_pubspec}.tmp" "$target_pubspec"
                 fi
-                log_info "已合并 $override_count 个 dependency_overrides"
+                log_info "已合并 $override_count 条 dependency_overrides（含 path/git 多行）"
             fi
             rm -f "$temp_overrides_filtered"
         fi
     fi
-    rm -f "$temp_overrides"
+    rm -f "$temp_overrides_blocks"
 
     # 清理临时文件
     rm -f "$temp_deps" "$temp_deps_filtered" "$temp_git_deps" "$temp_assets"
@@ -3825,7 +4012,7 @@ sync_flutter_base
     replace_image_asset_entries   # 批量替换图片入口组件（可选）
     replace_asset_image_providers # 批量替换 AssetImage/ExactAssetImage（Base64 下的 DecorationImage 等场景）
     type -t create_md_assets_symlinks &>/dev/null && create_md_assets_symlinks
-    sync_plugins
+    sync_plugins                  # 须在 merge_pubspec 前完成，供 path override 解析 plugins/
     sync_ios_permissions          # 同步 iOS 权限配置
     sync_ios_podfile              # 同步 iOS Podfile 配置（解决 iOS 18.5 libswiftWebKit 问题）
     type -t sync_md_ios_native_files &>/dev/null && sync_md_ios_native_files
@@ -3849,6 +4036,7 @@ sync_flutter_base
         "$compat_pubspec_func" "$PROJECT_ROOT/pubspec.yaml" || true
     fi
     ensure_fijkplayer_local_override          # 规整 fijkplayer 到 dependencies 且 path: plugins/fijkplayer（须在 pub get 前）
+    trim_pubspec_trailing_whitespace "$PROJECT_ROOT/pubspec.yaml"  # 合并自 zeus 上游：清理 pubspec 行尾空白
     show_summary
     write_current_project         # 记录当前项目名
     write_sync_log                # 写入同步日志

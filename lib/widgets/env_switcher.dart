@@ -7,6 +7,12 @@ import '../router/app_router.dart';
 import '../services/config_service.dart';
 import '../services/domain_manager.dart';
 
+/// 壳工程 Debug 下是否显示开发者选项悬浮按钮（AB 包工厂可通过 `--dart-define` 关闭）
+const bool _kShowDevFloatButton = bool.fromEnvironment(
+  'AB_SHOW_DEV_FLOAT',
+  defaultValue: true,
+);
+
 /// 开发者选项悬浮按钮
 /// 显示应用信息、环境配置、远程配置等开发者信息
 class EnvFloatingIndicator extends StatefulWidget {
@@ -43,6 +49,9 @@ class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
   Widget build(BuildContext context) {
     // 非调试模式直接返回子组件
     if (!kDebugMode) {
+      return widget.child;
+    }
+    if (!_kShowDevFloatButton) {
       return widget.child;
     }
 

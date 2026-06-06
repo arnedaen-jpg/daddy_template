@@ -13,11 +13,13 @@ PROFILE_STATUS="draft"
 
 PROFILE_PROTECTED=(
     "AudioSessionPlugin"
-    "TicketFilterPlugin"
     "DarwinAudioSession"
-    "DarwinTicketFilter"
     "registerWithRegistrar"
     "handleMethodCall"
+    "register"
+    "handle"
+    "initWithRegistrar"
+    "channel"
 )
 
 profile_apply() {

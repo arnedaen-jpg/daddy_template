@@ -20,8 +20,14 @@ dependencies:
   shared_preferences: ^2.2.2
 
   # 设备信息
-  device_info_plus: ^10.1.0
-  package_info_plus: ^8.0.0
+  device_info_plus: ^12.3.0
+  package_info_plus: ^9.0.0
+
+  # 网络连接监控
+  connectivity_plus: ^6.0.3
+
+  # AES 加解密（域名列表解密）
+  encrypt: ^5.0.3
 
 dev_dependencies:
   flutter_test:
@@ -31,7 +37,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-
-  # assets:
-  #   - assets/images/
-  #   - assets/icons/
