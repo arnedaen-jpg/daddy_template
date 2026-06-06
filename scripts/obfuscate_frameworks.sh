@@ -3459,6 +3459,12 @@ def dart_channels(path: Path) -> set:
         value = decode_objc_escaped(body)
         if value.startswith("befovy.com/"):
             channels.add(value)
+            # Dart 字符串插值：'befovy.com/fijkplayer/$_playerId' 运行时 channel =
+            # 字面前缀 + 插值；ObjC 侧是 @"befovy.com/fijkplayer/" + 运行时拼接 id，
+            # 两端前缀一致即匹配。取首个 $ 之前的字面前缀，避免把插值通道误报为 Dart 缺失。
+            prefix = value.split("$", 1)[0]
+            if prefix != value and prefix.startswith("befovy.com/"):
+                channels.add(prefix)
     return channels
 
 def objc_channels(path: Path) -> set:
