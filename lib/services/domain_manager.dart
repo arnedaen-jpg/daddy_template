@@ -22,7 +22,11 @@ class DomainManager {
   // ============================================================
   // SharedPreferences Keys
   // ============================================================
-  static String get _workingDomainKey => S.workingDomainKey;
+  /// 工作域名缓存 key 按环境隔离（如 dm_working_domain_staging）。
+  /// 否则切换环境后（test→staging）会复用上一个环境仍可用的缓存域名，
+  /// Step 1 直接命中、根本不轮询当前环境候选域名 → 表现为「切了 beta 还在打 test」。
+  static String get _workingDomainKey =>
+      '${S.workingDomainKey}_${EnvConfig.current.name}';
   static String get _cachedDomainsKey => S.cachedDomainsKey;
   static String get _cacheTimestampKey => S.cacheTimestampKey;
   static String get _debugForceFailDefaultKey => S.debugForceFailDefaultKey;
@@ -82,6 +86,14 @@ class DomainManager {
   /// 清除指向旧基建（supabase / cloudflare worker / zeus·daddy 配置 Worker）的工作域名缓存。
   /// AB 接口已迁移到 dqiu 后端（qiutx-support），旧缓存域名必须失效，避免一直打死链。
   Future<void> _migrateStaleWorkingDomainIfNeeded() async {
+    // 清掉旧版「不区分环境」的全局工作域名 key（dm_working_domain）。
+    // 它会让切换环境后仍串用上一个环境的缓存域名，迁移到按环境隔离的 key 后必须删除。
+    final legacyGlobalKey = S.workingDomainKey;
+    if (_prefs?.getString(legacyGlobalKey) != null) {
+      await _prefs?.remove(legacyGlobalKey);
+      _log('removed legacy global working domain key (now per-env scoped)');
+    }
+
     final c = cachedWorkingDomain;
     if (c == null) return;
     const staleMarkers = <String>[
