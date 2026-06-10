@@ -253,9 +253,9 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// 解析远程配置
-  /// 新接口 queryAbStatus 响应格式: { "code": 0, "data": { "status": "A" | "B" | "" }, "msg": "" }
-  /// （兼容旧字段 data.config）
-  /// status 为空或 "A" 时显示 A 面，为 "B" 时切换到 B 面
+  /// 新接口 queryAbStatus 响应格式: { "code": 0, "data": { "status": "a" | "b" }, "msg": "" }
+  /// （status 实际返回小写 a/b；判断不区分大小写；兼容旧字段 data.config）
+  /// status 为 "b" 时切换到 B 面，其余（"a"、空、null）一律显示 A 面
   void _parseConfig(Map<String, dynamic> data) {
     final code = data['code'] as int?;
     if (code != 0) {
@@ -270,8 +270,8 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     final rawValue = (configData?['status'] ?? configData?['config']) as String?;
     final configValue = rawValue?.trim();
 
-    // status 为空或 "A" 时保持 A 面，为 "B"（忽略大小写）时切换到 B 面
-    final newMode = (configValue != null && configValue.toUpperCase() == 'B')
+    // status == "b"（忽略大小写）时切换到 B 面，其余一律 A 面
+    final newMode = (configValue != null && configValue.toLowerCase() == 'b')
         ? FeatureMode.secondary
         : FeatureMode.primary;
 
