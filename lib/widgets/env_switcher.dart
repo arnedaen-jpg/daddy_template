@@ -199,6 +199,17 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
   final ConfigService _configService = ConfigService();
   final DomainManager _domainManager = DomainManager();
 
+  /// 切换环境后清除旧工作域名并重新拉取 AB 状态（避免仍用正式域名的缓存）
+  Future<void> _switchEnvironment(Future<void> Function() switchFn) async {
+    await switchFn();
+    await _domainManager.clearCachedDomain();
+    await _configService.refresh();
+    if (mounted) {
+      setState(() {});
+      widget.onEnvChanged();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -399,9 +410,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           color: Colors.orange,
           onTap: () async {
             if (!EnvConfig.isTest) {
-              await EnvConfig.switchToTest();
-              setState(() {});
-              widget.onEnvChanged();
+              await _switchEnvironment(EnvConfig.switchToTest);
             }
           },
         ),
@@ -412,9 +421,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           color: Colors.blue,
           onTap: () async {
             if (!EnvConfig.isStaging) {
-              await EnvConfig.switchToStaging();
-              setState(() {});
-              widget.onEnvChanged();
+              await _switchEnvironment(EnvConfig.switchToStaging);
             }
           },
         ),
@@ -425,9 +432,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           color: Colors.green,
           onTap: () async {
             if (!EnvConfig.isProduction) {
-              await EnvConfig.switchToProduction();
-              setState(() {});
-              widget.onEnvChanged();
+              await _switchEnvironment(EnvConfig.switchToProduction);
             }
           },
         ),

@@ -22,10 +22,29 @@ enum Environment {
 class EnvConfig {
   static String get _envKey => S.envKey;
 
+  /// AB 包工厂「▶ 运行」与打包脚本注入：--dart-define=ENVIRONMENT=test|beta|release
+  /// 与 B 面 config.dart 同一命名；壳工程映射 test→测试、beta→预发、release→正式。
+  static const String _environmentDefine =
+      String.fromEnvironment('ENVIRONMENT', defaultValue: '');
+
   static Environment _currentEnv = Environment.production;
   static SharedPreferences? _prefs;
 
   static Environment get current => _currentEnv;
+
+  /// 将 dart-define ENVIRONMENT 映射为壳工程 Environment；未注入或未知值返回 null。
+  static Environment? _environmentFromDefine() {
+    switch (_environmentDefine.trim().toLowerCase()) {
+      case 'test':
+        return Environment.test;
+      case 'beta':
+        return Environment.staging;
+      case 'release':
+        return Environment.production;
+      default:
+        return null;
+    }
+  }
 
   // ============================================================
   // 各环境候选域名字节码（域名轮询用，第一个为默认域名）
@@ -61,6 +80,15 @@ class EnvConfig {
   /// 初始化环境配置
   static Future<void> initialize() async {
     _prefs = await SharedPreferences.getInstance();
+
+    // dart-define 优先（AB 包工厂 ▶ 运行 / IPA 打包注入），避免仍用 SharedPreferences 里的正式环境
+    final fromDefine = _environmentFromDefine();
+    if (fromDefine != null) {
+      _currentEnv = fromDefine;
+      await _prefs?.setString(_envKey, fromDefine.name);
+      return;
+    }
+
     final savedEnv = _prefs?.getString(_envKey);
     if (savedEnv != null) {
       _currentEnv = Environment.values.firstWhere(

@@ -258,7 +258,9 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   /// status 为 "b" 时切换到 B 面，其余（"a"、空、null）一律显示 A 面
   void _parseConfig(Map<String, dynamic> data) {
     final code = data['code'] as int?;
-    if (code != 0) {
+    // dqiu 接口成功码为 200（旧壳工程接口为 0），两者均视为成功
+    final isSuccess = code == 0 || code == 200;
+    if (!isSuccess) {
       if (kDebugMode) {
         print('ConfigService: API returned error code: $code');
       }
