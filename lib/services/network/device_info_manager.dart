@@ -90,6 +90,37 @@ class DeviceInfoManager {
     return code;
   }
 
+  /// 渠道号：构建时可用 --dart-define=APP_CHANNEL=xxx 覆盖，缺省走默认渠道
+  String get appChannel {
+    const fromDefine = String.fromEnvironment('APP_CHANNEL', defaultValue: '');
+    return fromDefine.isNotEmpty ? fromDefine : S.defaultChannel;
+  }
+
+  /// AB 状态查询接口（qiutx-support/app/client/queryAbStatus）的请求头。
+  /// 与 dqiu 客户端 getHeader 对齐：version / client-type / source / channel /
+  /// client-tag / channelApp / deviceId / Authorization / x-user-header，
+  /// 外加接口文档要求的 bundleid / language / phoneType。
+  ///
+  /// 注: sign / t / r 为业务接口防篡改签名（依赖 signMD5 密钥与登录态），
+  /// 该状态查询接口不需要，故不同步。未登录态统一用 Basic 默认凭证。
+  Map<String, String> getAbQueryHeaders() {
+    final channel = appChannel;
+    return {
+      S.hVersion: _sanitizeHeaderValue(appVersion),
+      S.hClientType: S.vClientTypeIos,
+      S.hSource: channel,
+      S.hChannel: channel,
+      S.hClientTag: S.vClientTag,
+      S.hChannelApp: channel,
+      S.hDeviceIdLower: _sanitizeHeaderValue(deviceId),
+      S.hAuthorization: S.vBasicAuth,
+      S.hXUserHeader: S.vAnonUserHeader,
+      S.hBundleIdLower: _sanitizeHeaderValue(bundleId),
+      S.hLanguage: _sanitizeHeaderValue(language),
+      S.hPhoneType: S.vClientTypeIos,
+    };
+  }
+
   /// 是否为物理设备
   bool get isPhysicalDevice => _iosDeviceInfo?.isPhysicalDevice ?? false;
 

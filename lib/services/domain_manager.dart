@@ -229,10 +229,9 @@ class DomainManager {
         await deviceInfo.initialize();
         headers.addAll(deviceInfo.getRequestHeaders());
         headers['User-Agent'] = deviceInfo.userAgent;
-        // queryAbStatus 接口要求的 header：bundleid / language / phoneType
-        headers[S.hBundleIdLower] = deviceInfo.bundleId;
-        headers[S.hLanguage] = deviceInfo.language;
-        headers[S.hPhoneType] = 'ios';
+        // 与 dqiu 客户端对齐的 header（client-type / version / channel / deviceId /
+        // Authorization / x-user-header 等）+ 文档要求的 bundleid / language / phoneType
+        headers.addAll(deviceInfo.getAbQueryHeaders());
       } catch (_) {}
       headers[S.xEnvHeader] = EnvConfig.current.name;
 

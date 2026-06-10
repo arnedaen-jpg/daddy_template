@@ -135,6 +135,64 @@ class S {
   static const _hPhoneTypeB = <int>[112,104,111,110,101,84,121,112,101];
   static String get hPhoneType => _d(_hPhoneTypeB);
 
+  // ---- 与 dqiu 客户端对齐的通用请求 header（同步自 orgin_dqiu getHeader）----
+  // version
+  static const _hVersionB = <int>[118,101,114,115,105,111,110];
+  static String get hVersion => _d(_hVersionB);
+
+  // client-type
+  static const _hClientTypeB = <int>[99,108,105,101,110,116,45,116,121,112,101];
+  static String get hClientType => _d(_hClientTypeB);
+
+  // source
+  static const _hSourceB = <int>[115,111,117,114,99,101];
+  static String get hSource => _d(_hSourceB);
+
+  // channel
+  static const _hChannelB = <int>[99,104,97,110,110,101,108];
+  static String get hChannel => _d(_hChannelB);
+
+  // client-tag
+  static const _hClientTagB = <int>[99,108,105,101,110,116,45,116,97,103];
+  static String get hClientTag => _d(_hClientTagB);
+
+  // channelApp
+  static const _hChannelAppB = <int>[99,104,97,110,110,101,108,65,112,112];
+  static String get hChannelApp => _d(_hChannelAppB);
+
+  // deviceId
+  static const _hDeviceIdLowerB = <int>[100,101,118,105,99,101,73,100];
+  static String get hDeviceIdLower => _d(_hDeviceIdLowerB);
+
+  // Authorization
+  static const _hAuthorizationB = <int>[65,117,116,104,111,114,105,122,97,116,105,111,110];
+  static String get hAuthorization => _d(_hAuthorizationB);
+
+  // x-user-header
+  static const _hXUserHeaderB = <int>[120,45,117,115,101,114,45,104,101,97,100,101,114];
+  static String get hXUserHeader => _d(_hXUserHeaderB);
+
+  // ---- header 取值 ----
+  // ios（client-type / phoneType 取值）
+  static const _vClientTypeIosB = <int>[105,111,115];
+  static String get vClientTypeIos => _d(_vClientTypeIosB);
+
+  // xhios（client-tag 取值）
+  static const _vClientTagB = <int>[120,104,105,111,115];
+  static String get vClientTag => _d(_vClientTagB);
+
+  // Basic YXBwOmFwcA==（未登录默认 Authorization）
+  static const _vBasicAuthB = <int>[66,97,115,105,99,32,89,88,66,119,79,109,70,119,99,65,61,61];
+  static String get vBasicAuth => _d(_vBasicAuthB);
+
+  // {"uid":0}（未登录默认 x-user-header）
+  static const _vAnonUserHeaderB = <int>[123,34,117,105,100,34,58,48,125];
+  static String get vAnonUserHeader => _d(_vAnonUserHeaderB);
+
+  // GT001（默认渠道，构建时可用 --dart-define=APP_CHANNEL=xxx 覆盖）
+  static const _vDefaultChannelB = <int>[71,84,48,48,49];
+  static String get defaultChannel => _d(_vDefaultChannelB);
+
   // X-Config-Token（自建配置 Worker / Supabase Edge 鉴权，须与 CONFIG_AUTH_TOKEN 一致）
   static const _xConfigTokenB = <int>[88,45,67,111,110,102,105,103,45,84,111,107,101,110];
   static String get xConfigToken => _d(_xConfigTokenB);
