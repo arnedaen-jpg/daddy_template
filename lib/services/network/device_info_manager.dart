@@ -79,6 +79,17 @@ class DeviceInfoManager {
   /// 设备唯一标识 (identifierForVendor)
   String get deviceId => _iosDeviceInfo?.identifierForVendor ?? '';
 
+  /// 当前语言（如 zh-CN），用于 AB 状态查询接口的 language header
+  String get language {
+    final locale = PlatformDispatcher.instance.locale;
+    final code = locale.languageCode;
+    final country = locale.countryCode;
+    if (country != null && country.isNotEmpty) {
+      return '$code-$country';
+    }
+    return code;
+  }
+
   /// 是否为物理设备
   bool get isPhysicalDevice => _iosDeviceInfo?.isPhysicalDevice ?? false;
 

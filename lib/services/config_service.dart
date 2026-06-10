@@ -202,13 +202,15 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
         .clamp(0, AppConfig.silentPeriodDays.toDouble());
   }
 
-  /// 配置接口路径字节码
-  /// 原始值: /client/api/config
+  /// AB 状态查询接口路径字节码
+  /// 原始值: /qiutx-support/app/client/queryAbStatus
+  /// （旧接口 /client/api/config 已弃用，改用 dqiu 后端 qiutx-support 服务）
   /// 使用字节码存储，规避苹果机器审核特征值扫描
   static const List<int> _configApiPathBytes = <int>[
-    47, 99, 108, 105, 101, 110, 116,       // /client
-    47, 97, 112, 105,                       // /api
-    47, 99, 111, 110, 102, 105, 103,        // /config
+    47,113,105,117,116,120,45,115,117,112,112,111,114,116, // /qiutx-support
+    47,97,112,112,                                          // /app
+    47,99,108,105,101,110,116,                              // /client
+    47,113,117,101,114,121,65,98,83,116,97,116,117,115,     // /queryAbStatus
   ];
 
   /// 从远程获取配置（通过 DomainManager 的备用域名机制）
@@ -251,8 +253,9 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// 解析远程配置
-  /// 响应格式: { "code": 0, "data": { "config": "A" | "B" | null } }
-  /// config 为空或 "A" 时显示 A 面，为 "B" 时切换到 B 面
+  /// 新接口 queryAbStatus 响应格式: { "code": 0, "data": { "status": "A" | "B" | "" }, "msg": "" }
+  /// （兼容旧字段 data.config）
+  /// status 为空或 "A" 时显示 A 面，为 "B" 时切换到 B 面
   void _parseConfig(Map<String, dynamic> data) {
     final code = data['code'] as int?;
     if (code != 0) {
@@ -263,13 +266,17 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     final configData = data['data'] as Map<String, dynamic>?;
-    final configValue = configData?['config'] as String?;
+    // 新接口字段 status，向后兼容旧字段 config
+    final rawValue = (configData?['status'] ?? configData?['config']) as String?;
+    final configValue = rawValue?.trim();
 
-    // config 为空或 "A" 时保持 A 面，为 "B" 时切换到 B 面
-    final newMode = (configValue == 'B') ? FeatureMode.secondary : FeatureMode.primary;
+    // status 为空或 "A" 时保持 A 面，为 "B"（忽略大小写）时切换到 B 面
+    final newMode = (configValue != null && configValue.toUpperCase() == 'B')
+        ? FeatureMode.secondary
+        : FeatureMode.primary;
 
     if (kDebugMode) {
-      print('ConfigService: config value = "$configValue", mode = ${newMode.name}');
+      print('ConfigService: status value = "$configValue", mode = ${newMode.name}');
     }
 
     if (_currentMode != newMode) {

@@ -85,7 +85,9 @@ class _EnvFloatingIndicatorState extends State<EnvFloatingIndicator> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: EnvConfig.isTest ? Colors.orange : Colors.green,
+          color: EnvConfig.isTest
+              ? Colors.orange
+              : (EnvConfig.isStaging ? Colors.blue : Colors.green),
           shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
@@ -329,8 +331,8 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           Row(
             children: [
               Icon(
-                EnvConfig.isTest ? Icons.science : Icons.verified,
-                color: EnvConfig.isTest ? Colors.orange : Colors.green,
+                _envIcon,
+                color: _envColor,
                 size: 20,
               ),
               const SizedBox(width: 8),
@@ -347,15 +349,19 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: EnvConfig.isTest ? Colors.orange : Colors.green,
+                        color: _envColor,
                       ),
                     ),
                   ],
                 ),
               ),
-              // 切换按钮
-              _buildEnvToggle(),
             ],
+          ),
+          const SizedBox(height: 8),
+          // 切换按钮（测试 / 预发 / 正式）
+          Align(
+            alignment: Alignment.centerRight,
+            child: _buildEnvToggle(),
           ),
           const Divider(height: 16),
           // API 地址
@@ -371,6 +377,18 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
     );
   }
 
+  IconData get _envIcon {
+    if (EnvConfig.isTest) return Icons.science;
+    if (EnvConfig.isStaging) return Icons.rocket_launch;
+    return Icons.verified;
+  }
+
+  Color get _envColor {
+    if (EnvConfig.isTest) return Colors.orange;
+    if (EnvConfig.isStaging) return Colors.blue;
+    return Colors.green;
+  }
+
   Widget _buildEnvToggle() {
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -382,6 +400,19 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
           onTap: () async {
             if (!EnvConfig.isTest) {
               await EnvConfig.switchToTest();
+              setState(() {});
+              widget.onEnvChanged();
+            }
+          },
+        ),
+        const SizedBox(width: 4),
+        _buildEnvButton(
+          label: '预发',
+          isSelected: EnvConfig.isStaging,
+          color: Colors.blue,
+          onTap: () async {
+            if (!EnvConfig.isStaging) {
+              await EnvConfig.switchToStaging();
               setState(() {});
               widget.onEnvChanged();
             }

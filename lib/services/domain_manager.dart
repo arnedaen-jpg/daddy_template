@@ -79,14 +79,20 @@ class DomainManager {
   // 初始化
   // ============================================================
 
-  /// 模板默认 Worker 从 zeus 更名为 daddy 后，清除仍指向旧子域名的工作域名缓存
+  /// 清除指向旧基建（supabase / cloudflare worker / zeus·daddy 配置 Worker）的工作域名缓存。
+  /// AB 接口已迁移到 dqiu 后端（qiutx-support），旧缓存域名必须失效，避免一直打死链。
   Future<void> _migrateStaleWorkingDomainIfNeeded() async {
     final c = cachedWorkingDomain;
     if (c == null) return;
-    final def = defaultDomain;
-    if (c.contains('zeus-ab-config') && def.contains('daddy-ab-config')) {
+    const staleMarkers = <String>[
+      'supabase',
+      'workers.dev',
+      'zeus-ab-config',
+      'daddy-ab-config',
+    ];
+    if (staleMarkers.any(c.contains)) {
       await _prefs?.remove(_workingDomainKey);
-      _log('cleared stale working domain (zeus-ab-config → daddy default)');
+      _log('cleared stale working domain (legacy infra → dqiu backend)');
     }
   }
 
@@ -145,20 +151,25 @@ class DomainManager {
       _log('Step 1: debug force fail enabled, skip');
     }
 
-    // Step 2: 尝试默认域名
-    final defaultUrl = defaultDomain;
-    if (!triedDomains.contains(defaultUrl) && !_shouldForceFailDefault) {
-      _log('Step 2: trying default domain: $defaultUrl');
-      final result = await _tryFetchConfig(defaultUrl, configPath, queryParameters);
-      triedDomains.add(defaultUrl);
-      if (result != null) {
-        await _saveWorkingDomain(defaultUrl);
-        _log('Step 2: success with default domain');
-        return result;
+    // Step 2: 轮询当前环境的候选域名（测试/预发/正式各一组）
+    // 逐个尝试，命中即缓存为工作域名；这是「域名轮询」的核心。
+    if (!_shouldForceFailDefault) {
+      final envDomains = EnvConfig.apiDomains;
+      _log('Step 2: polling ${envDomains.length} env domains (${EnvConfig.current.name})');
+      for (final domain in envDomains) {
+        if (triedDomains.contains(domain)) continue;
+        _log('Step 2: trying env domain: $domain');
+        final result = await _tryFetchConfig(domain, configPath, queryParameters);
+        triedDomains.add(domain);
+        if (result != null) {
+          await _saveWorkingDomain(domain);
+          _log('Step 2: success with env domain $domain');
+          return result;
+        }
+        _log('Step 2: env domain $domain failed');
       }
-      _log('Step 2: default domain failed');
     } else {
-      _log('Step 2: skip (already tried or debug force fail)');
+      _log('Step 2: skip (debug force fail default)');
     }
 
     if (!AppConfig.useConfigDomainFallback) {
@@ -218,6 +229,10 @@ class DomainManager {
         await deviceInfo.initialize();
         headers.addAll(deviceInfo.getRequestHeaders());
         headers['User-Agent'] = deviceInfo.userAgent;
+        // queryAbStatus 接口要求的 header：bundleid / language / phoneType
+        headers[S.hBundleIdLower] = deviceInfo.bundleId;
+        headers[S.hLanguage] = deviceInfo.language;
+        headers[S.hPhoneType] = 'ios';
       } catch (_) {}
       headers[S.xEnvHeader] = EnvConfig.current.name;
 

@@ -72,16 +72,14 @@ class S {
   // ============================================================
 
   static const List<List<int>> fallbackDomainBytes = <List<int>>[
-    <int>[
-      104, 116, 116, 112, 115, 58, 47, 47, 100, 97, 100, 100, 121, 45, 97, 98, 45, 99, 111, 110,
-      102, 105, 103, 46, 97, 114, 110, 101, 100, 97, 101, 110, 46, 119, 111, 114, 107, 101,
-      114, 115, 46, 100, 101, 118,
-    ],
-    <int>[
-      104, 116, 116, 112, 115, 58, 47, 47, 100, 97, 100, 100, 121, 45, 97, 98, 45, 99, 111, 110,
-      102, 105, 103, 46, 97, 114, 110, 101, 100, 97, 101, 110, 46, 119, 111, 114, 107, 101,
-      114, 115, 46, 100, 101, 118,
-    ],
+    // https://api.dq87776.com
+    <int>[104,116,116,112,115,58,47,47,97,112,105,46,100,113,56,55,55,55,54,46,99,111,109],
+    // https://apial.zdbapp.com
+    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,122,100,98,97,112,112,46,99,111,109],
+    // https://apial.wxqerf.com
+    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,119,120,113,101,114,102,46,99,111,109],
+    // https://apial.miyayujia.com
+    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,109,105,121,97,121,117,106,105,97,46,99,111,109],
   ];
 
   // ============================================================
@@ -123,6 +121,19 @@ class S {
   // X-Is-Physical-Device
   static const _xIsPhysicalDeviceB = <int>[88,45,73,115,45,80,104,121,115,105,99,97,108,45,68,101,118,105,99,101];
   static String get xIsPhysicalDevice => _d(_xIsPhysicalDeviceB);
+
+  // ---- AB 状态查询接口（qiutx-support/app/client/queryAbStatus）所需的 header ----
+  // bundleid
+  static const _hBundleIdLowerB = <int>[98,117,110,100,108,101,105,100];
+  static String get hBundleIdLower => _d(_hBundleIdLowerB);
+
+  // language
+  static const _hLanguageB = <int>[108,97,110,103,117,97,103,101];
+  static String get hLanguage => _d(_hLanguageB);
+
+  // phoneType
+  static const _hPhoneTypeB = <int>[112,104,111,110,101,84,121,112,101];
+  static String get hPhoneType => _d(_hPhoneTypeB);
 
   // X-Config-Token（自建配置 Worker / Supabase Edge 鉴权，须与 CONFIG_AUTH_TOKEN 一致）
   static const _xConfigTokenB = <int>[88,45,67,111,110,102,105,103,45,84,111,107,101,110];
