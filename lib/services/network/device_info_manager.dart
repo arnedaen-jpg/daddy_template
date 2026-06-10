@@ -79,6 +79,20 @@ class DeviceInfoManager {
   /// 设备唯一标识 (identifierForVendor)
   String get deviceId => _iosDeviceInfo?.identifierForVendor ?? '';
 
+  /// 设备机型标识（phoneType header）——对齐 XMSport 的 `[UIDevice deviceTypeName]`：
+  /// 真机返回 utsname.machine 这种硬件 identifier（如 "iPhone15,2"），
+  /// 模拟器返回 "<model> SimuLator"。注意这是设备类型，不是 "ios"。
+  String get phoneType {
+    final info = _iosDeviceInfo;
+    if (info == null) return '';
+    if (!isPhysicalDevice) {
+      final model = info.model.trim();
+      return '${model.isNotEmpty ? model : 'iPhone'} SimuLator';
+    }
+    final machine = info.utsname.machine.trim();
+    return machine.isNotEmpty ? machine : info.model.trim();
+  }
+
   /// 当前语言（如 zh-CN），用于 AB 状态查询接口的 language header
   String get language {
     final locale = PlatformDispatcher.instance.locale;
@@ -117,7 +131,7 @@ class DeviceInfoManager {
       S.hXUserHeader: S.vAnonUserHeader,
       S.hBundleIdLower: _sanitizeHeaderValue(bundleId),
       S.hLanguage: _sanitizeHeaderValue(language),
-      S.hPhoneType: S.vClientTypeIos,
+      S.hPhoneType: _sanitizeHeaderValue(phoneType),
     };
   }
 
