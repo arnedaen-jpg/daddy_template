@@ -52,7 +52,9 @@ app.*.map.json
 # B-side code (synced from external repo)
 lib/modules/secondary/*
 !lib/modules/secondary/module_entry.dart
-assets/
+# B 面资源默认忽略；壳工程自有配置资源（assets/config）需保留
+assets/*
+!assets/config/
 plugins/
 
 # Lock files
