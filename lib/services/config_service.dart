@@ -25,6 +25,11 @@ enum FeatureMode {
 /// - app 启动时
 /// - 网络授权成功时
 /// - app 从后台切换到前台时
+///
+/// 模式确定策略（避免「先进 A 面再跳 B 面」的闪烁）：
+/// - 启动时阻塞等待「拉到开关」后才进入对应页面（有超时兜底）
+/// - 初始模式一旦确定，本次会话锁定显示的「面」，不再实时跳面；
+///   后续拉取结果仅持久化记忆模式，下次冷启动直接进入正确的面
 class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   static final ConfigService _instance = ConfigService._internal();
   factory ConfigService() => _instance;
@@ -41,6 +46,12 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   /// 是否已初始化
   bool _isInitialized = false;
   bool get isInitialized => _isInitialized;
+
+  /// 初始模式是否已确定（启动时「拉到开关」后置为 true）。
+  /// 一旦确定，本次会话锁定显示的「面」，前台刷新 / 迟到结果不再实时跳面，
+  /// 避免「先进 A 面再跳 B 面」这类突兀切换；新结果仅用于持久化记忆模式。
+  bool _initialModeResolved = false;
+  bool get initialModeResolved => _initialModeResolved;
 
   /// 是否正在加载
   bool _isLoading = false;
@@ -105,6 +116,7 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     if (_isMemoryModeEnabled) {
       // 记忆模式已开启，直接显示次要模式，无需请求远程配置
       _currentMode = FeatureMode.secondary;
+      _initialModeResolved = true;
       _isInitialized = true;
       notifyListeners();
       return;
@@ -128,19 +140,41 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // 先设置默认值
+    // 先设置默认值（仅作启动页阶段的占位，真正进入哪个面要等拉到开关）
     _currentMode =
         AppConfig.defaultShowSecondary ? FeatureMode.secondary : FeatureMode.primary;
 
-    // 检查网络是否可用
+    // 关键：启动时「先拉到开关，再进入对应页面」。
+    // 阻塞等待网络就绪 + 首次 AB 状态返回，避免先渲染 A 面、
+    // 随后配置异步到达再跳到 B 面的闪烁。
+    await _resolveInitialMode();
+
+    // 初始模式已确定：锁定本次会话显示的「面」。
+    _initialModeResolved = true;
+    _isInitialized = true;
+    notifyListeners();
+  }
+
+  /// 启动时阻塞解析初始模式：先等网络就绪（有界等待），再拉取一次 AB 状态。
+  /// 全程有超时保护，超时则维持默认模式（A 面），避免卡死在启动页；
+  /// 迟到的结果只会持久化记忆模式，供下次冷启动使用，不会实时跳面。
+  Future<void> _resolveInitialMode() async {
     final networkService = NetworkPermissionService();
-    if (networkService.networkEnabled) {
-      // 网络可用，从远程获取配置
-      await _fetchRemoteConfig();
-    } else {
-      // 网络不可用，注册回调，等网络可用时再获取配置
+
+    // 启动序列中 NetworkPermissionService 已先行探测过网络；
+    // 若此刻仍不可用（如权限弹窗未处理完），有界等待网络就绪
+    if (!networkService.networkEnabled) {
+      await networkService.waitForNetworkEnabled(
+        timeout: const Duration(seconds: 8),
+      );
+    }
+
+    if (!networkService.networkEnabled) {
+      // 网络仍不可用：维持默认模式进入，注册一次性回调。
+      // 由于随后会锁定模式，该回调拉到的结果只持久化、不实时跳面。
       if (kDebugMode) {
-        print('ConfigService: Network not available, waiting for permission...');
+        print('ConfigService: Network not ready at startup, '
+            'entering default mode; will fetch config when network is up');
       }
       networkService.onNetworkEnabled(() {
         if (kDebugMode) {
@@ -148,10 +182,19 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
         }
         _fetchRemoteConfig();
       });
+      return;
     }
 
-    _isInitialized = true;
-    notifyListeners();
+    // 网络就绪：阻塞拉取一次 AB 状态（DomainManager 内部已有逐域名超时）。
+    // 外层再加总超时兜底，确保启动页等待时长有上限。
+    try {
+      await _fetchRemoteConfig().timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      if (kDebugMode) {
+        print('ConfigService: Initial AB status fetch timed out, '
+            'entering default mode');
+      }
+    }
   }
 
   /// 监听 app 生命周期
@@ -214,7 +257,10 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   ];
 
   /// 从远程获取配置（通过 DomainManager 的备用域名机制）
-  Future<void> _fetchRemoteConfig() async {
+  ///
+  /// [allowLiveSwitch] 仅调试面板使用：允许本次结果实时切换「面」
+  /// （绕过会话锁定），便于切环境后立即验证 AB 状态。
+  Future<void> _fetchRemoteConfig({bool allowLiveSwitch = false}) async {
     if (_isMemoryModeEnabled) return;
     if (_isInSilentPeriod) return;
 
@@ -222,6 +268,14 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     if (!networkService.networkEnabled) {
       if (kDebugMode) {
         print('ConfigService: Network not available, skipping config fetch');
+      }
+      return;
+    }
+
+    // 防并发：启动期阻塞拉取与前台 resume 刷新可能同时触发
+    if (_isLoading) {
+      if (kDebugMode) {
+        print('ConfigService: Config fetch already in progress, skipping');
       }
       return;
     }
@@ -240,7 +294,7 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
       );
 
       if (result != null) {
-        _parseConfig(result);
+        _parseConfig(result, allowLiveSwitch: allowLiveSwitch);
       }
     } catch (e) {
       if (kDebugMode) {
@@ -256,7 +310,7 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   /// 新接口 queryAbStatus 响应格式: { "code": 0, "data": { "status": "a" | "b" }, "msg": "" }
   /// （status 实际返回小写 a/b；判断不区分大小写；兼容旧字段 data.config）
   /// status 为 "b" 时切换到 B 面，其余（"a"、空、null）一律显示 A 面
-  void _parseConfig(Map<String, dynamic> data) {
+  void _parseConfig(Map<String, dynamic> data, {bool allowLiveSwitch = false}) {
     final code = data['code'] as int?;
     // dqiu 接口成功码为 200（旧壳工程接口为 0），两者均视为成功
     final isSuccess = code == 0 || code == 200;
@@ -279,6 +333,20 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
 
     if (kDebugMode) {
       print('ConfigService: status value = "$configValue", mode = ${newMode.name}');
+    }
+
+    // 初始模式确定后锁定：本次会话不再实时切换「面」，避免 A↔B 突兀跳转。
+    // 若新结果为 B，仅持久化记忆模式，使下次冷启动直接进入 B 面。
+    // （调试面板可通过 allowLiveSwitch 绕过锁定，便于切环境后立即验证）
+    if (_initialModeResolved && !allowLiveSwitch) {
+      if (newMode == FeatureMode.secondary && !_isMemoryModeEnabled) {
+        _enableMemoryMode();
+        if (kDebugMode) {
+          print('ConfigService: Session mode locked to ${_currentMode.name}; '
+              'remembered secondary for next launch');
+        }
+      }
+      return;
     }
 
     if (_currentMode != newMode) {
@@ -314,10 +382,13 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// 手动刷新配置
-  Future<void> refresh() async {
+  ///
+  /// [force] 仅调试可用：允许刷新结果实时切换「面」（绕过会话锁定）。
+  /// 生产环境的前台刷新只持久化记忆模式，不实时跳面。
+  Future<void> refresh({bool force = false}) async {
     // 静默期内不允许刷新
     if (_isInSilentPeriod) return;
-    await _fetchRemoteConfig();
+    await _fetchRemoteConfig(allowLiveSwitch: force && kDebugMode);
   }
 
   /// 是否为主要模式

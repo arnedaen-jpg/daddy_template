@@ -200,10 +200,11 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
   final DomainManager _domainManager = DomainManager();
 
   /// 切换环境后清除旧工作域名并重新拉取 AB 状态（避免仍用正式域名的缓存）
+  /// force: 调试面板允许实时切面（生产会话锁定不受影响）
   Future<void> _switchEnvironment(Future<void> Function() switchFn) async {
     await switchFn();
     await _domainManager.clearCachedDomain();
-    await _configService.refresh();
+    await _configService.refresh(force: true);
     if (mounted) {
       setState(() {});
       widget.onEnvChanged();
@@ -712,7 +713,7 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
                   color: Colors.teal,
                   onTap: () async {
                     dm.clearLog();
-                    await _configService.refresh();
+                    await _configService.refresh(force: true);
                     setState(() {});
                   },
                 ),
