@@ -82,56 +82,102 @@ class EnvConfig {
   ];
 
   // ============================================================
-  // 正式环境域名快照（编译时由 scripts/update_prod_domains.sh 写入）
-  // 参考 XMSport 的 ScriptGetObsData：打包前从 OBS 拉取最新正式域名，
-  // 原样（base64(JSON)）写入随包资源 assets/config/prod_domains.b64，
-  // 运行时解码、仅正式环境使用，覆盖上面的硬编码兜底域名。
+  // 各环境域名快照（编译时由 scripts/update_domain_snapshots.sh 写入）
+  // 参考 XMSport：
+  //   正式 → OBS app_eight.json（UpdateDomain / ScriptGetObsData）
+  //   测试 → unpkg @hd-team/app-dnpkg-test
+  //   预发 → unpkg @hd-team/app-dnpkg-beta
+  // 运行时解码后覆盖下方硬编码兜底；快照为空 / 解析失败则回退硬编码。
   // ============================================================
 
-  /// 随包域名快照资源路径（base64 编码的 OBS 响应）
+  static const String _testDomainsAsset = 'assets/config/test_domains.b64';
+  static const String _stagingDomainsAsset = 'assets/config/staging_domains.b64';
   static const String _prodDomainsAsset = 'assets/config/prod_domains.b64';
 
-  /// 运行时解码出的正式环境域名（按权重降序）；为空表示未拉取到，走硬编码兜底
+  static List<String> _obsTestDomains = const <String>[];
+  static List<String> _obsStagingDomains = const <String>[];
   static List<String> _obsProductionDomains = const <String>[];
 
-  /// 加载并解码随包正式域名快照。任何失败都静默回退到硬编码域名。
-  static Future<void> _loadObsProductionDomains() async {
+  /// 从 base64(JSON) 快照解析候选域名（按 weight 降序）。
+  ///
+  /// 关于 openFlag（重要）：参考 XMSport `XMDomainProvider.getResponseDomains`
+  /// 与 dqiu `XXDomainManager`，openFlag 不是「域名可用开关」：
+  ///   - XMSport 仅用它决定是否给 CDN 域名加签名，域名一律纳入轮询；
+  ///   - dqiu `XXDomainEntity` 默认 openFlag=true，且 `checkDomainList` 从不按它
+  ///     过滤，靠逐个 ping 决定真实可用性；
+  ///   - 实测「测试」源所有域名 openFlag 均为 false，但仍是有效域名。
+  /// 因此这里不按 openFlag 过滤（过滤会误删整组测试域名）；真实可用性由
+  /// `DomainManager` 在请求时逐个探测、命中即缓存来保证。
+  static List<String> _parseDomainSnapshotB64(String b64Raw) {
     try {
-      final raw = await rootBundle.loadString(_prodDomainsAsset);
-      final b64 = raw.replaceAll(RegExp(r'\s'), '');
-      if (b64.isEmpty) return;
+      final b64 = b64Raw.replaceAll(RegExp(r'\s'), '');
+      if (b64.isEmpty) return const <String>[];
 
       final jsonStr = utf8.decode(base64.decode(b64));
       final decoded = jsonDecode(jsonStr);
-      if (decoded is! Map) return;
+      if (decoded is! Map) return const <String>[];
       final data = decoded['data'];
-      if (data is! List) return;
+      if (data is! List) return const <String>[];
 
-      // 收集 (域名, 权重)，过滤未开启 / 非法项
       final entries = <MapEntry<String, num>>[];
       for (final item in data) {
         if (item is! Map) continue;
-        if (item['openFlag'] == false) continue;
         final domain = item['domain'];
         if (domain is! String) continue;
         final d = domain.trim();
         if (!d.startsWith('http')) continue;
-        final weight = item['weight'];
-        entries.add(MapEntry(d, weight is num ? weight : 0));
+        // weight 下限 1，与 XMSport getResponseDomains（weight<1 → 1）对齐
+        final rawWeight = item['weight'];
+        final num weight = (rawWeight is num && rawWeight >= 1) ? rawWeight : 1;
+        entries.add(MapEntry(d, weight));
       }
 
-      // 按权重降序：权重高者优先作为默认/首选域名
+      // 按 weight 降序：高权重域名优先作为默认/首选（与 dqiu 权重轮询意图一致）
       entries.sort((a, b) => b.value.compareTo(a.value));
 
       final domains = <String>[];
       for (final e in entries) {
         if (!domains.contains(e.key)) domains.add(e.key);
       }
-      if (domains.isNotEmpty) {
-        _obsProductionDomains = List<String>.unmodifiable(domains);
-      }
+      return domains;
     } catch (_) {
-      // 资源缺失 / base64 / JSON 解析失败 → 保持空，回退硬编码
+      return const <String>[];
+    }
+  }
+
+  static Future<List<String>> _loadSnapshotAsset(String assetPath) async {
+    try {
+      final raw = await rootBundle.loadString(assetPath);
+      return _parseDomainSnapshotB64(raw);
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
+  /// 加载三套环境的编译期域名快照
+  static Future<void> _loadObsDomainSnapshots() async {
+    final test = await _loadSnapshotAsset(_testDomainsAsset);
+    if (test.isNotEmpty) _obsTestDomains = List<String>.unmodifiable(test);
+
+    final staging = await _loadSnapshotAsset(_stagingDomainsAsset);
+    if (staging.isNotEmpty) {
+      _obsStagingDomains = List<String>.unmodifiable(staging);
+    }
+
+    final prod = await _loadSnapshotAsset(_prodDomainsAsset);
+    if (prod.isNotEmpty) {
+      _obsProductionDomains = List<String>.unmodifiable(prod);
+    }
+  }
+
+  static List<String> get _obsDomainsForCurrentEnv {
+    switch (_currentEnv) {
+      case Environment.test:
+        return _obsTestDomains;
+      case Environment.staging:
+        return _obsStagingDomains;
+      case Environment.production:
+        return _obsProductionDomains;
     }
   }
 
@@ -139,8 +185,8 @@ class EnvConfig {
   static Future<void> initialize() async {
     _prefs = await SharedPreferences.getInstance();
 
-    // 加载编译时拉取的正式环境域名快照（仅正式环境使用，失败则回退硬编码）
-    await _loadObsProductionDomains();
+    // 加载编译时拉取的三套环境域名快照（失败则回退硬编码）
+    await _loadObsDomainSnapshots();
 
     // dart-define 优先（AB 包工厂 ▶ 运行 / IPA 打包注入），避免仍用 SharedPreferences 里的正式环境
     final fromDefine = _environmentFromDefine();
@@ -199,13 +245,11 @@ class EnvConfig {
 
   /// 当前环境的候选域名列表（运行时从字节码解码，供域名轮询使用）
   ///
-  /// 正式环境：优先返回编译时拉取的 OBS 域名快照（_obsProductionDomains），
-  /// 快照为空时回退到硬编码的 _productionDomainBytes。测试/预发不受影响。
+  /// 优先返回编译时拉取的 OBS/unpkg 域名快照（按 weight 降序）；
+  /// 快照为空时回退到硬编码的 _test/_staging/_productionDomainBytes。
   static List<String> get apiDomains {
-    if (_currentEnv == Environment.production &&
-        _obsProductionDomains.isNotEmpty) {
-      return List<String>.from(_obsProductionDomains);
-    }
+    final obs = _obsDomainsForCurrentEnv;
+    if (obs.isNotEmpty) return List<String>.from(obs);
     return _currentDomainBytes.map((bytes) => utf8.decode(bytes)).toList();
   }
 

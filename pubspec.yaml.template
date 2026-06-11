@@ -38,6 +38,8 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # 壳工程自有资源：正式环境域名快照（编译时由 scripts/update_prod_domains.sh 拉取覆盖）
+  # 壳工程自有资源：编译期域名快照（scripts/update_domain_snapshots.sh 拉取覆盖）
   assets:
+    - assets/config/test_domains.b64
+    - assets/config/staging_domains.b64
     - assets/config/prod_domains.b64

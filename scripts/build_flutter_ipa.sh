@@ -481,18 +481,19 @@ else
   echo "  ⚠️  未找到 app_config.dart: $APP_CONFIG_FILE"
 fi
 
-# ========== 拉取正式环境最新域名快照 ==========
-# 参考 XMSport 的 UpdateDomain 构建期脚本：编译时从 OBS 拉取最新正式域名，
-# 覆盖随包资源 assets/config/prod_domains.b64（运行时仅正式环境读取）。
-# 失败不影响打包：保留本地旧快照，运行时回退到硬编码域名。
+# ========== 拉取测试/预发/正式环境最新域名快照 ==========
+# 参考 XMSport：正式 OBS app_eight.json；测试/预发 unpkg app-dnpkg-test/beta
 echo ""
-echo "🌐 拉取正式环境域名快照（覆盖本地旧域名）..."
-echo "============================================="
-if [[ -x "$SCRIPT_DIR/update_prod_domains.sh" ]]; then
+echo "🌐 拉取域名快照（测试/预发/正式，覆盖本地旧域名）..."
+echo "====================================================="
+if [[ -x "$SCRIPT_DIR/update_domain_snapshots.sh" ]]; then
+  "$SCRIPT_DIR/update_domain_snapshots.sh" --project-dir "$FLUTTER_PROJECT_DIR" \
+    || echo "  ⚠️  域名快照更新失败（保留旧快照，不影响打包）"
+elif [[ -x "$SCRIPT_DIR/update_prod_domains.sh" ]]; then
   "$SCRIPT_DIR/update_prod_domains.sh" --project-dir "$FLUTTER_PROJECT_DIR" \
     || echo "  ⚠️  域名快照更新失败（保留旧快照，不影响打包）"
 else
-  echo "  ⚠️  未找到 update_prod_domains.sh，跳过域名快照更新"
+  echo "  ⚠️  未找到 update_domain_snapshots.sh，跳过域名快照更新"
 fi
 
 # ========== Flutter Build IPA ==========
