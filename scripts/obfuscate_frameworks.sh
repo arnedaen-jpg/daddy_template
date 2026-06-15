@@ -2473,9 +2473,18 @@ rename_plugin() {
     
     # 更新原生代码
     find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.mm" \) 2>/dev/null | while read file; do
+        # 保护与插件 CamelCase 名(old_class)同名的系统框架 import：被改名的 pod 自身模块是
+        # snake_case(old_name)，独立的 `import <PascalCase>` 基本只可能是 Apple 系统框架
+        # (如 app_tracking_transparency 的 CamelCase 恰好等于 Apple 的 AppTrackingTransparency)，
+        # 误改会导致 "Unable to find module dependency"；故先占位保护、改名后还原。
+        sed -i '' -E "s/^([[:space:]]*import[[:space:]]+)${old_class}([[:space:]]*)$/\1__FW_KEEP_IMPORT__\2/" "$file" 2>/dev/null || true
+        sed -i '' -E "s/^([[:space:]]*@import[[:space:]]+)${old_class}([[:space:]]*;[[:space:]]*)$/\1__FW_KEEP_IMPORT__\2/" "$file" 2>/dev/null || true
+
         sed -i '' -E "s/${old_class}([A-Z])/${new_class}\1/g" "$file" 2>/dev/null || true
         sed -i '' -E "s/${old_class}([^A-Za-z0-9])/${new_class}\1/g" "$file" 2>/dev/null || true
         sed -i '' -E "s/${old_class}\$/${new_class}/g" "$file" 2>/dev/null || true
+
+        sed -i '' "s/__FW_KEEP_IMPORT__/${old_class}/g" "$file" 2>/dev/null || true
         
         sed -i '' "s|${old_name}-Swift\.h|${new_name}-Swift.h|g" "$file" 2>/dev/null || true
         sed -i '' "s|@import ${old_name};|@import ${new_name};|g" "$file" 2>/dev/null || true
