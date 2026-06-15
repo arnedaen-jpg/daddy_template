@@ -1214,14 +1214,71 @@ def _is_ident_continue_char(c: str) -> bool:
 
 
 def find_next_standalone_image_asset(text: str, start: int) -> int:
-    """查找独立的 Image.asset(，跳过 CCCCImage.asset、ExtendedImage.asset 等误匹配。"""
-    while True:
-        idx = text.find(prefix, start)
-        if idx < 0:
-            return -1
-        if idx == 0 or not _is_ident_continue_char(text[idx - 1]):
-            return idx
-        start = idx + 1
+    """查找「代码区」里独立的 Image.asset(，跳过 CCCCImage.asset、ExtendedImage.asset 等误匹配。
+
+    关键：搜索时必须同步跳过注释 / 字符串里的 Image.asset(。否则一旦命中被注释掉的
+    `// Image.asset(`，随后的 find_matching_paren 会因注释里的 ) 被忽略而一路吞进下方真实代码，
+    把紧跟其后的真实 Image.asset(...) 整段当成「参数」原样保留，导致它被漏改写
+    （dqiu material_data_item.dart 两个 Image.asset 块之间夹了一行 `// Image.asset(` 即触发此 bug）。
+    """
+    in_single = in_double = in_line_comment = in_block_comment = False
+    escape = False
+    i = start
+    n = len(text)
+
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_single:
+            if not escape and c == "'":
+                in_single = False
+            escape = (c == "\\") and not escape
+            i += 1
+            continue
+        if in_double:
+            if not escape and c == '"':
+                in_double = False
+            escape = (c == "\\") and not escape
+            i += 1
+            continue
+
+        if c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            escape = False
+            i += 1
+            continue
+        if c == '"':
+            in_double = True
+            escape = False
+            i += 1
+            continue
+
+        if text.startswith(prefix, i) and (i == 0 or not _is_ident_continue_char(text[i - 1])):
+            return i
+        i += 1
+
+    return -1
 
 
 def find_matching_paren(text: str, start_idx: int) -> int:
@@ -1620,6 +1677,43 @@ delete_secondary_image_files() {
         \) ! -path "*/lottie/*" -print0 2>/dev/null)
 
     log_success "已删除 secondary 栅格图片文件: $deleted 个（SVG/JSON/字体等未删；lottie/ 下图片保留）"
+}
+
+# 为 pubspec 里登记的资源目录补 .gitkeep。
+# Base64 化后 delete_secondary_image_files 会清空图片目录，而 git 不跟踪空目录——
+# 全新 clone / CI 上这些目录不存在，pubspec 的目录条目会触发
+# “Error: unable to find directory entry in pubspec.yaml: assets/secondary/xxx/”。
+# 给空目录写入 .gitkeep 即可保证其在 clone 后仍存在（占位文件被一并打包，无副作用）。
+ensure_asset_dir_placeholders() {
+    local pubspec="$PROJECT_ROOT/pubspec.yaml"
+    [[ -f "$pubspec" ]] || return 0
+
+    log_step "为 pubspec 资源目录补 .gitkeep（避免全新 clone/CI 报 unable to find directory entry）..."
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 将为 pubspec 中以 / 结尾的资源目录里「无普通文件」的目录写入 .gitkeep"
+        return
+    fi
+
+    local kept=0
+    local dir abs
+    while IFS= read -r dir; do
+        [[ -z "$dir" ]] && continue
+        # 跳过绝对路径 / 含 .. 的条目，避免越界创建
+        case "$dir" in
+            /*|*..*) continue ;;
+        esac
+        abs="$PROJECT_ROOT/$dir"
+        mkdir -p "$abs" 2>/dev/null || true
+        # 仅当本目录没有任何「非隐藏的普通文件」时补占位：
+        # .DS_Store 等隐藏文件常被 .gitignore 忽略，不能保证 clone 后目录存在，故视作空。
+        if [[ -z "$(find "$abs" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null)" ]]; then
+            : > "$abs/.gitkeep" 2>/dev/null && kept=$((kept + 1))
+        fi
+    done < <(grep -oE '^[[:space:]]*-[[:space:]]+[^[:space:]#]+/[[:space:]]*$' "$pubspec" \
+             | sed -E 's/^[[:space:]]*-[[:space:]]+//; s/[[:space:]]+$//')
+
+    log_success "已为 $kept 个空资源目录写入 .gitkeep（全新 clone/CI 不再因空目录报错）"
 }
 
 # 修改图片元数据，生成不同的文件 hash（快速版本）
@@ -4045,6 +4139,7 @@ sync_flutter_base
     type -t clean_and_reinstall_pods &>/dev/null && clean_and_reinstall_pods
 
     delete_secondary_image_files
+    ensure_asset_dir_placeholders             # 给清空后的资源目录补 .gitkeep（避免全新 clone/CI 报 unable to find directory entry）
 
     echo ""
     log_success "========================================"
