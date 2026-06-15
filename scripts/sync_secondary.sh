@@ -2,8 +2,8 @@
 
 # ============================================================
 # 次要模块代码同步脚本（本地文件版）
-# 从本地 B 面项目同步到「当前壳工程」：请在壳工程根目录下执行，或由调用方将 cwd 设为壳工程
-#（旧版固定写入脚本所在 repo，易误把内容写到 daddy_template；现已按 cwd / SYNC_TARGET_ROOT 优先）
+# 从本地 B 面项目同步到「脚本所在工程」：本脚本应位于目标工程的 scripts/ 下并从该工程执行
+#（PROJECT_ROOT = 脚本父目录 = 工程根；与原始 zeus_template 行为一致）
 # 核心功能：复制代码 + 批量替换包名为相对路径
 # ============================================================
 
@@ -19,17 +19,9 @@ NC='\033[0m' # No Color
 
 # 配置变量
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_TPL_ROOT="$(dirname "$SCRIPT_DIR")"
-# 目标壳工程根目录：
-# - AB 包工厂等会用 cwd=用户壳工程 调用本脚本，但脚本路径在模板下；不能再用「脚本父目录」当 PROJECT_ROOT，否则会误写到 daddy_template。
-# - 优先环境变量 SYNC_TARGET_ROOT；否则若当前目录是合法 Flutter 工程根，则用 cwd；否则回退为脚本所在仓库根（在模板内直接执行时保持旧行为）
-if [[ -n "${SYNC_TARGET_ROOT:-}" && -f "${SYNC_TARGET_ROOT}/pubspec.yaml" ]]; then
-    PROJECT_ROOT="$(cd "$SYNC_TARGET_ROOT" && pwd)"
-elif [[ -f "$(pwd)/pubspec.yaml" && -d "$(pwd)/lib" ]]; then
-    PROJECT_ROOT="$(pwd -P 2>/dev/null || pwd)"
-else
-    PROJECT_ROOT="$_TPL_ROOT"
-fi
+# 工程根 = 脚本父目录（本脚本随工程存在于「工程/scripts」下，并从该工程执行）。
+# AB 包工厂已改为优先调用「工程自身」的这份脚本，确保 PROJECT_ROOT / assets / Base64 相对路径都指向当前工程。
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 REPORT_DIR="$SCRIPT_DIR/reports"
 LOG_FILE=""
 
