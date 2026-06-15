@@ -47,11 +47,14 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
   bool _isInitialized = false;
   bool get isInitialized => _isInitialized;
 
-  /// 初始模式是否已确定（启动时「拉到开关」后置为 true）。
-  /// 一旦确定，本次会话锁定显示的「面」，前台刷新 / 迟到结果不再实时跳面，
-  /// 避免「先进 A 面再跳 B 面」这类突兀切换；新结果仅用于持久化记忆模式。
-  bool _initialModeResolved = false;
-  bool get initialModeResolved => _initialModeResolved;
+  /// 本次会话是否已锁定显示的「面」。
+  /// 仅在「服务端确实返回了一次 AB 状态」或「记忆模式直接进 B」后置为 true。
+  /// 锁定后，前台刷新 / 迟到结果不再实时跳面，仅用于持久化记忆模式。
+  ///
+  /// 注意：启动时若网络不可用 / 拉取超时而兜底进入默认 A 面，**不会**锁定；
+  /// 这样后续真正拉到 status=b 时仍会切到 B 面（拉到 B 就跳 B）。
+  bool _modeLocked = false;
+  bool get isModeLocked => _modeLocked;
 
   /// 是否正在加载
   bool _isLoading = false;
@@ -116,7 +119,7 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     if (_isMemoryModeEnabled) {
       // 记忆模式已开启，直接显示次要模式，无需请求远程配置
       _currentMode = FeatureMode.secondary;
-      _initialModeResolved = true;
+      _modeLocked = true;
       _isInitialized = true;
       notifyListeners();
       return;
@@ -147,17 +150,18 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
     // 关键：启动时「先拉到开关，再进入对应页面」。
     // 阻塞等待网络就绪 + 首次 AB 状态返回，避免先渲染 A 面、
     // 随后配置异步到达再跳到 B 面的闪烁。
+    // 成功拉到状态会在 _parseConfig 内锁定会话；若超时/无网兜底进 A 面，
+    // 则保持未锁定，后续真正拉到 status=b 仍会切到 B 面。
     await _resolveInitialMode();
 
-    // 初始模式已确定：锁定本次会话显示的「面」。
-    _initialModeResolved = true;
     _isInitialized = true;
     notifyListeners();
   }
 
   /// 启动时阻塞解析初始模式：先等网络就绪（有界等待），再拉取一次 AB 状态。
-  /// 全程有超时保护，超时则维持默认模式（A 面），避免卡死在启动页；
-  /// 迟到的结果只会持久化记忆模式，供下次冷启动使用，不会实时跳面。
+  /// 全程有超时保护，超时/无网则维持默认模式（A 面），避免卡死在启动页；
+  /// 此时不锁定会话——后续（网络回调 / 前台刷新 / 迟到完成）真正拉到 status=b
+  /// 时仍会切到 B 面（拉到 B 就跳 B）。
   Future<void> _resolveInitialMode() async {
     final networkService = NetworkPermissionService();
 
@@ -335,10 +339,10 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
       print('ConfigService: status value = "$configValue", mode = ${newMode.name}');
     }
 
-    // 初始模式确定后锁定：本次会话不再实时切换「面」，避免 A↔B 突兀跳转。
+    // 会话已锁定后不再实时切换「面」，避免 A↔B 突兀跳转。
     // 若新结果为 B，仅持久化记忆模式，使下次冷启动直接进入 B 面。
     // （调试面板可通过 allowLiveSwitch 绕过锁定，便于切环境后立即验证）
-    if (_initialModeResolved && !allowLiveSwitch) {
+    if (_modeLocked && !allowLiveSwitch) {
       if (newMode == FeatureMode.secondary && !_isMemoryModeEnabled) {
         _enableMemoryMode();
         if (kDebugMode) {
@@ -348,6 +352,10 @@ class ConfigService extends ChangeNotifier with WidgetsBindingObserver {
       }
       return;
     }
+
+    // 服务端已确实返回一次 AB 状态：应用该结果，并锁定本次会话。
+    // 含「超时兜底进 A 后，迟到结果返回 B」的场景——此处仍会切到 B 面。
+    _modeLocked = true;
 
     if (_currentMode != newMode) {
       _currentMode = newMode;
