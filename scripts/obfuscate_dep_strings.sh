@@ -7,7 +7,8 @@
 # 设计原则：
 #   - 每个 plugin 单独配置，通过 dep_strings_manifests/<project>.conf 管理
 #   - 支持 dry-run 预览
-#   - 生成详细报告
+#   - 生成详细文本报告
+#   - 按 plugin/package 自动并行处理（无需额外参数）
 #   - Dart 复用 dart_obfuscator 工具；Swift/ObjC(++) 用 shell+perl 替换
 #
 # 字符串混淆方法：
@@ -32,6 +33,10 @@ VERBOSE=false
 CURRENT_PROJECT=""
 SINGLE_PLUGIN=""
 REPORT_FILE=""
+REPORT_STARTED_AT=""
+REPORT_STARTED_EPOCH=""
+REPORT_COMMAND_LINE=""
+REPORT_TRAP_ENABLED=false
 DART_CMD=""
 
 # Manifest: parallel arrays (bash 3.x compatible)
@@ -58,6 +63,11 @@ _REPORT_OBJC_STRINGS=0
 _REPORT_PLUGINS_PROCESSED=0
 _REPORT_PLUGINS_SKIPPED=0
 declare -a _REPORT_ENTRIES
+declare -a _REPORT_WARNINGS
+
+# Plugin/package task queue (bash 3.x compatible)
+_PLUGIN_TASK_DIRS=()
+_PLUGIN_TASK_NAMES=()
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,10 +78,252 @@ NC='\033[0m'
 
 log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_warning() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+    _REPORT_WARNINGS+=("$1")
+}
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()    { echo -e "${CYAN}[STEP]${NC} $1"; }
 log_debug()   { [[ "$VERBOSE" == "true" ]] && echo -e "  ${NC}$1" || true; }
+
+reset_plugin_report_state() {
+    _REPORT_DART_FILES=0
+    _REPORT_DART_STRINGS=0
+    _REPORT_SWIFT_FILES=0
+    _REPORT_SWIFT_STRINGS=0
+    _REPORT_OBJC_FILES=0
+    _REPORT_OBJC_STRINGS=0
+    _REPORT_PLUGINS_PROCESSED=0
+    _REPORT_PLUGINS_SKIPPED=0
+    _REPORT_ENTRIES=()
+    _REPORT_WARNINGS=()
+}
+
+enqueue_plugin_task() {
+    local plugin_dir="${1%/}"
+    local plugin_name="$2"
+    plugin_dir=$(normalize_dir_path "$plugin_dir")
+    [[ -z "$plugin_name" ]] && plugin_name=$(basename "$plugin_dir")
+
+    local existing
+    for existing in "${_PLUGIN_TASK_DIRS[@]}"; do
+        [[ "$existing" == "$plugin_dir" ]] && return 0
+    done
+
+    _PLUGIN_TASK_DIRS+=("$plugin_dir")
+    _PLUGIN_TASK_NAMES+=("$plugin_name")
+}
+
+is_queued_plugin_task_dir() {
+    local plugin_dir="${1%/}"
+    plugin_dir=$(normalize_dir_path "$plugin_dir")
+
+    local existing
+    for existing in "${_PLUGIN_TASK_DIRS[@]}"; do
+        [[ "$existing" == "$plugin_dir" ]] && return 0
+    done
+    return 1
+}
+
+is_under_other_queued_task_dir() {
+    local path="$1"
+    local current_dir="${2%/}"
+    current_dir=$(normalize_dir_path "$current_dir")
+
+    local existing
+    for existing in "${_PLUGIN_TASK_DIRS[@]}"; do
+        [[ "$existing" == "$current_dir" ]] && continue
+        case "$path" in
+            "$existing"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+dep_strings_worker_jobs() {
+    if [[ -n "$SINGLE_PLUGIN" ]]; then
+        echo 1
+        return 0
+    fi
+
+    local cpu_count=4
+    if command -v sysctl >/dev/null 2>&1; then
+        cpu_count=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    elif command -v getconf >/dev/null 2>&1; then
+        cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    fi
+    [[ "$cpu_count" =~ ^[0-9]+$ ]] || cpu_count=4
+
+    local jobs=$((cpu_count - 2))
+    [[ $jobs -lt 2 ]] && jobs=2
+    [[ $jobs -gt 8 ]] && jobs=8
+    echo "$jobs"
+}
+
+write_worker_result() {
+    local base="$1"
+    local rc="${2:-0}"
+
+    {
+        echo "DS_DART_FILES=$_REPORT_DART_FILES"
+        echo "DS_DART_STRINGS=$_REPORT_DART_STRINGS"
+        echo "DS_SWIFT_FILES=$_REPORT_SWIFT_FILES"
+        echo "DS_SWIFT_STRINGS=$_REPORT_SWIFT_STRINGS"
+        echo "DS_OBJC_FILES=$_REPORT_OBJC_FILES"
+        echo "DS_OBJC_STRINGS=$_REPORT_OBJC_STRINGS"
+        echo "DS_PLUGINS_PROCESSED=$_REPORT_PLUGINS_PROCESSED"
+        echo "DS_PLUGINS_SKIPPED=$_REPORT_PLUGINS_SKIPPED"
+        echo "DS_RC=$rc"
+    } > "$base.stats"
+
+    printf '%s\n' "${_REPORT_ENTRIES[@]}" > "$base.entries"
+    printf '%s\n' "${_REPORT_WARNINGS[@]}" > "$base.warnings"
+}
+
+merge_worker_result() {
+    local base="$1"
+
+    [[ -f "$base.log" ]] && cat "$base.log"
+
+    if [[ -f "$base.stats" ]]; then
+        local DS_DART_FILES=0
+        local DS_DART_STRINGS=0
+        local DS_SWIFT_FILES=0
+        local DS_SWIFT_STRINGS=0
+        local DS_OBJC_FILES=0
+        local DS_OBJC_STRINGS=0
+        local DS_PLUGINS_PROCESSED=0
+        local DS_PLUGINS_SKIPPED=0
+        local DS_RC=0
+
+        # shellcheck disable=SC1090
+        source "$base.stats"
+
+        _REPORT_DART_FILES=$((_REPORT_DART_FILES + DS_DART_FILES))
+        _REPORT_DART_STRINGS=$((_REPORT_DART_STRINGS + DS_DART_STRINGS))
+        _REPORT_SWIFT_FILES=$((_REPORT_SWIFT_FILES + DS_SWIFT_FILES))
+        _REPORT_SWIFT_STRINGS=$((_REPORT_SWIFT_STRINGS + DS_SWIFT_STRINGS))
+        _REPORT_OBJC_FILES=$((_REPORT_OBJC_FILES + DS_OBJC_FILES))
+        _REPORT_OBJC_STRINGS=$((_REPORT_OBJC_STRINGS + DS_OBJC_STRINGS))
+        _REPORT_PLUGINS_PROCESSED=$((_REPORT_PLUGINS_PROCESSED + DS_PLUGINS_PROCESSED))
+        _REPORT_PLUGINS_SKIPPED=$((_REPORT_PLUGINS_SKIPPED + DS_PLUGINS_SKIPPED))
+    else
+        log_warning "并行任务缺少统计文件: $(basename "$base")"
+    fi
+
+    if [[ -f "$base.entries" ]]; then
+        local line
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            _REPORT_ENTRIES+=("$line")
+        done < "$base.entries"
+    fi
+
+    if [[ -f "$base.warnings" ]]; then
+        local warning
+        while IFS= read -r warning || [[ -n "$warning" ]]; do
+            [[ -n "$warning" ]] && _REPORT_WARNINGS+=("$warning")
+        done < "$base.warnings"
+    fi
+}
+
+run_plugin_worker() {
+    local plugin_dir="$1"
+    local plugin_name="$2"
+    local worker_dir="$3"
+    local task_index="$4"
+    local base="$worker_dir/task_$task_index"
+
+    (
+        reset_plugin_report_state
+        export DART_STRING_OBFUSCATION_REPORT="$base.dart_string_report.txt"
+
+        local rc=0
+        set +e
+        process_plugin "$plugin_dir" "$plugin_name"
+        rc=$?
+        set -e
+
+        write_worker_result "$base" "$rc"
+        exit "$rc"
+    ) > "$base.log" 2>&1
+}
+
+run_plugin_tasks_parallel() {
+    local task_count=${#_PLUGIN_TASK_DIRS[@]}
+    if [[ $task_count -eq 0 ]]; then
+        log_warning "没有匹配到需要扫描的 plugin/package"
+        return 0
+    fi
+
+    local jobs
+    jobs=$(dep_strings_worker_jobs)
+    [[ $jobs -gt $task_count ]] && jobs=$task_count
+    [[ $jobs -lt 1 ]] && jobs=1
+
+    if [[ $jobs -gt 1 ]]; then
+        log_info "插件级并行: $task_count 个任务, 并发 $jobs"
+    else
+        log_info "插件级处理: $task_count 个任务"
+    fi
+
+    local worker_dir
+    worker_dir=$(mktemp -d "${TMPDIR:-/tmp}/dep_strings_workers.XXXXXX")
+
+    local overall_rc=0
+    local idx=0
+    while [[ $idx -lt $task_count ]]; do
+        local pids=()
+        local bases=()
+        local names=()
+        local batch=0
+
+        while [[ $batch -lt $jobs && $idx -lt $task_count ]]; do
+            local base="$worker_dir/task_$idx"
+            run_plugin_worker "${_PLUGIN_TASK_DIRS[$idx]}" "${_PLUGIN_TASK_NAMES[$idx]}" "$worker_dir" "$idx" &
+            pids+=("$!")
+            bases+=("$base")
+            names+=("${_PLUGIN_TASK_NAMES[$idx]}")
+            idx=$((idx + 1))
+            batch=$((batch + 1))
+        done
+
+        local i=0
+        while [[ $i -lt ${#pids[@]} ]]; do
+            local task_rc=0
+            wait "${pids[$i]}" || task_rc=$?
+            merge_worker_result "${bases[$i]}"
+            if [[ $task_rc -ne 0 ]]; then
+                overall_rc=$task_rc
+                log_warning "${names[$i]}: 并行任务失败 (rc=$task_rc)"
+            fi
+            i=$((i + 1))
+        done
+    done
+
+    rm -rf "$worker_dir" 2>/dev/null || true
+    return "$overall_rc"
+}
+
+is_non_runtime_path() {
+    local path="$1"
+    case "$path" in
+        */Tests/*|*/RunnerTests/*|*/test/*|*/tests/*|*/example/*|*/examples/*|*/integration_test/*|*/test_driver/*|*/__tests__/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_non_ios_native_path() {
+    local path="$1"
+    is_non_runtime_path "$path" && return 0
+    case "$path" in
+        */macos/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
 
 # =============================================
 # 项目检测
@@ -99,11 +351,49 @@ detect_current_project() {
 
 project_uses_flutter_base() {
     local project="$1"
-    [[ "$project" == "md" || "$project" == "yms" ]]
+    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "txpjb" || "$project" == "xjpjb" ]]
+}
+
+reject_retired_project() {
+    local project="$1"
+    if [[ "$project" == "md" ]]; then
+        log_error "md 项目已下线，不再支持依赖字符串混淆"
+        exit 1
+    fi
+}
+
+project_uses_root_flutter_base_path_dep() {
+    local project="$1"
+    [[ "$project" == "xjpjb" ]]
+}
+
+find_latest_framework_report() {
+    local project="$1"
+    local report_dir="$SCRIPT_DIR/reports"
+    local candidates=()
+    local file=""
+    while IFS= read -r file; do
+        [[ -n "$file" ]] && candidates+=("$file")
+    done < <(find "$report_dir" -maxdepth 1 -type f \( \
+        -name "obf_${project}_frameworks_*.txt" -o \
+        -name "${project}_*.txt" \
+    \) ! -name "*_dep_strings_*" -print 2>/dev/null)
+
+    [[ ${#candidates[@]} -eq 0 ]] && return 0
+    ls -1t "${candidates[@]}" 2>/dev/null | head -1
 }
 
 extract_path_value() {
-    echo "$1" | sed 's/.*path://' | tr -d "'" | tr -d '"' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+    echo "$1" | sed 's/.*path://' | sed 's/[[:space:]]*#.*$//' | tr -d "'" | tr -d '"' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+}
+
+normalize_dir_path() {
+    local dir="${1%/}"
+    if [[ -d "$dir" ]]; then
+        (cd "$dir" 2>/dev/null && pwd -P) || printf '%s\n' "$dir"
+    else
+        printf '%s\n' "$dir"
+    fi
 }
 
 read_package_name_from_pubspec() {
@@ -135,7 +425,7 @@ get_original_plugin_name() {
 
     if [[ -z "$original_name" && -n "$CURRENT_PROJECT" ]]; then
         local latest_report
-        latest_report=$(ls -1t "$SCRIPT_DIR/reports/${CURRENT_PROJECT}_"*.txt 2>/dev/null | grep -v '_dep_strings_' | head -1)
+        latest_report=$(find_latest_framework_report "$CURRENT_PROJECT")
         if [[ -f "$latest_report" ]]; then
             original_name=$(awk -F'→' -v current="$current_name" '
                 /^[[:space:]]*[[:alnum:]_.+-]+[[:space:]]+→[[:space:]]+[[:alnum:]_.+-]+[[:space:]]*$/ {
@@ -176,7 +466,14 @@ collect_extra_path_packages() {
             current_dep=""
 
             [[ -d "$abs_path" ]] || continue
+            abs_path=$(normalize_dir_path "$abs_path")
             [[ -f "$abs_path/pubspec.yaml" ]] || continue
+
+            if [[ "$abs_path" == "$FLUTTER_BASE_DIR" ]] && \
+                ! project_uses_flutter_base "$CURRENT_PROJECT" && \
+                ! project_uses_root_flutter_base_path_dep "$CURRENT_PROJECT"; then
+                continue
+            fi
 
             case "$abs_path" in
                 "$PLUGINS_DIR"/*|"$FLUTTER_BASE_DIR"/*)
@@ -320,9 +617,25 @@ _scan_named_plugin_dir() {
     [[ -z "$name" ]] && name=$(basename "$plugin_dir")
 
     local dart_count swift_count objc_count
-    dart_count=$(find "$plugin_dir" -name "*.dart" -not -path "*/test/*" -not -path "*/example/*" 2>/dev/null | wc -l | tr -d ' ')
-    swift_count=$(find "$plugin_dir" -name "*.swift" -not -name "_zt_*" -not -name "Package.swift" -not -path "*/Tests/*" -not -path "*/test/*" -not -path "*/macos/*" 2>/dev/null | wc -l | tr -d ' ')
-    objc_count=$(find "$plugin_dir" \( -name "*.m" -o -name "*.mm" \) -not -name "_zt_*" -not -path "*/Tests/*" -not -path "*/test/*" -not -path "*/macos/*" -not -path "*/RunnerTests/*" 2>/dev/null | wc -l | tr -d ' ')
+    dart_count=$(find "$plugin_dir" -name "*.dart" \
+        -not -path "*/test/*" -not -path "*/tests/*" \
+        -not -path "*/example/*" -not -path "*/examples/*" \
+        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+        2>/dev/null | wc -l | tr -d ' ')
+    swift_count=$(find "$plugin_dir" -name "*.swift" -not -name "_zt_*" -not -name "Package.swift" \
+        -not -path "*/Tests/*" -not -path "*/RunnerTests/*" \
+        -not -path "*/test/*" -not -path "*/tests/*" \
+        -not -path "*/example/*" -not -path "*/examples/*" \
+        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+        -not -path "*/macos/*" \
+        2>/dev/null | wc -l | tr -d ' ')
+    objc_count=$(find "$plugin_dir" \( -name "*.m" -o -name "*.mm" \) -not -name "_zt_*" \
+        -not -path "*/Tests/*" -not -path "*/RunnerTests/*" \
+        -not -path "*/test/*" -not -path "*/tests/*" \
+        -not -path "*/example/*" -not -path "*/examples/*" \
+        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+        -not -path "*/macos/*" \
+        2>/dev/null | wc -l | tr -d ' ')
 
     local langs_avail=""
     [[ $dart_count -gt 0 ]] && langs_avail="${langs_avail}dart "
@@ -872,7 +1185,9 @@ obfuscate_objc_file() {
 # =============================================
 
 check_dart() {
-    if command -v fvm &> /dev/null; then
+    if [[ -x "$PROJECT_ROOT/.fvm/flutter_sdk/bin/dart" ]]; then
+        DART_CMD="$PROJECT_ROOT/.fvm/flutter_sdk/bin/dart"
+    elif command -v fvm &> /dev/null; then
         DART_CMD="fvm dart"
     elif command -v dart &> /dev/null; then
         DART_CMD="dart"
@@ -912,6 +1227,11 @@ kernel_needs_rebuild() {
     [[ ! -f "$meta" ]] && return 0
     [[ "$src" -nt "$kernel" ]] && return 0
 
+    local newer_source=""
+    newer_source=$(find "$DART_OBFUSCATOR_DIR/bin" "$DART_OBFUSCATOR_DIR/lib" \
+        -name "*.dart" -newer "$kernel" -print -quit 2>/dev/null || true)
+    [[ -n "$newer_source" ]] && return 0
+
     local saved_signature=""
     saved_signature=$(cat "$meta" 2>/dev/null | head -1 | tr -d '\r')
     [[ "$saved_signature" != "$DART_RUNTIME_SIGNATURE" ]] && return 0
@@ -931,25 +1251,31 @@ init_dart_obfuscator() {
         $DART_CMD pub get
     fi
 
-    local kernel="$DART_OBFUSCATOR_DIR/build/obfuscate.dill"
-    DART_RUNTIME_SIGNATURE=$(get_dart_runtime_signature)
-    if kernel_needs_rebuild; then
-        compile_dart_kernel
+    if [[ "${DEP_STRINGS_USE_KERNEL:-false}" == "true" ]]; then
+        local kernel="$DART_OBFUSCATOR_DIR/build/obfuscate.dill"
+        DART_RUNTIME_SIGNATURE=$(get_dart_runtime_signature)
+        if kernel_needs_rebuild; then
+            compile_dart_kernel
+        fi
+        [[ -f "$kernel" ]] && DART_KERNEL="$kernel"
     fi
-    [[ -f "$kernel" ]] && DART_KERNEL="$kernel"
     cd "$PROJECT_ROOT"
 }
 
 obfuscate_dart_plugin() {
     local plugin_dir="${1%/}"
     local plugin_name="$2"
+    plugin_dir=$(normalize_dir_path "$plugin_dir")
 
     local dart_pkgs=()
     if [[ -d "$plugin_dir/lib" ]] && [[ -f "$plugin_dir/pubspec.yaml" ]]; then
         dart_pkgs+=("$plugin_dir")
     fi
     while IFS= read -r sub; do
-        [[ -d "$sub/lib" ]] && [[ -f "$sub/pubspec.yaml" ]] && dart_pkgs+=("${sub%/}")
+        [[ -d "$sub/lib" ]] || continue
+        [[ -f "$sub/pubspec.yaml" ]] || continue
+        is_queued_plugin_task_dir "$sub" && continue
+        dart_pkgs+=("${sub%/}")
     done < <(find "$plugin_dir" -mindepth 1 -maxdepth 2 -type d 2>/dev/null)
 
     if [[ ${#dart_pkgs[@]} -eq 0 ]]; then
@@ -962,7 +1288,11 @@ obfuscate_dart_plugin() {
         dart_pkg="${dart_pkg%/}"
         local dart_lib="$dart_pkg/lib"
         local dart_count
-        dart_count=$(find "$dart_lib" -name "*.dart" -not -path "*/test/*" 2>/dev/null | wc -l | tr -d ' ')
+        dart_count=$(find "$dart_lib" -name "*.dart" \
+            -not -path "*/test/*" -not -path "*/tests/*" \
+            -not -path "*/example/*" -not -path "*/examples/*" \
+            -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
+            2>/dev/null | wc -l | tr -d ' ')
         [[ $dart_count -eq 0 ]] && continue
 
         local rel_path="${dart_lib#$PROJECT_ROOT/}"
@@ -974,13 +1304,17 @@ obfuscate_dart_plugin() {
         [[ "$VERBOSE" == "true" ]] && args+=("-v")
 
         cd "$DART_OBFUSCATOR_DIR"
+        local dart_report="${DART_STRING_OBFUSCATION_REPORT:-$DART_OBFUSCATOR_DIR/build/string_obfuscation_report_${CURRENT_PROJECT}.txt}"
+        mkdir -p "$(dirname "$dart_report")"
+        rm -f "$dart_report" 2>/dev/null || true
+
         local dart_tmpfile dart_rc=0 retry_with_run=false
         dart_tmpfile=$(mktemp)
         if [[ -n "$DART_KERNEL" ]]; then
             # .dill kernel snapshots must be invoked directly, not via `dart run`
-            $DART_CMD "$DART_KERNEL" "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
+            DART_STRING_OBFUSCATION_REPORT="$dart_report" $DART_CMD "$DART_KERNEL" "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
         else
-            $DART_CMD run bin/obfuscate.dart "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
+            DART_STRING_OBFUSCATION_REPORT="$dart_report" $DART_CMD run bin/obfuscate.dart "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
         fi
 
         local clean_output
@@ -995,7 +1329,7 @@ obfuscate_dart_plugin() {
             : > "$dart_tmpfile"
             dart_rc=0
             if [[ -n "$DART_KERNEL" ]]; then
-                $DART_CMD "$DART_KERNEL" "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
+                DART_STRING_OBFUSCATION_REPORT="$dart_report" $DART_CMD "$DART_KERNEL" "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
             else
                 retry_with_run=true
             fi
@@ -1006,10 +1340,15 @@ obfuscate_dart_plugin() {
             retry_with_run=true
         fi
 
+        if [[ $dart_rc -ne 0 ]] && [[ -n "$DART_KERNEL" ]] && [[ "$retry_with_run" != "true" ]]; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name: kernel 执行失败，回退到 dart run" || true
+            retry_with_run=true
+        fi
+
         if [[ "$retry_with_run" == "true" ]]; then
             : > "$dart_tmpfile"
             dart_rc=0
-            $DART_CMD run bin/obfuscate.dart "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
+            DART_STRING_OBFUSCATION_REPORT="$dart_report" $DART_CMD run bin/obfuscate.dart "${args[@]}" > "$dart_tmpfile" 2>&1 || dart_rc=$?
             clean_output=$(perl -pe 's/\e\[[0-9;]*m//g' "$dart_tmpfile")
         fi
 
@@ -1019,6 +1358,9 @@ obfuscate_dart_plugin() {
         if [[ $dart_rc -ne 0 ]]; then
             local err_msg
             err_msg=$(echo "$clean_output" | grep -E "^错误:|^Error|Can't load Kernel binary" | head -1)
+            if [[ -z "$err_msg" ]]; then
+                err_msg=$(echo "$clean_output" | sed -n '/[^[:space:]]/ { p; q; }')
+            fi
             log_warning "  $plugin_name: Dart 混淆失败 (rc=$dart_rc) ${err_msg}"
             _REPORT_ENTRIES+=("    [dart]  $rel_path/  (失败: $err_msg)")
             continue
@@ -1033,7 +1375,6 @@ obfuscate_dart_plugin() {
             _REPORT_DART_STRINGS=$((_REPORT_DART_STRINGS + strings_count))
             _REPORT_ENTRIES+=("    [dart]  $rel_path/  ($files_count 文件, $strings_count 字符串)")
 
-            local dart_report="$DART_OBFUSCATOR_DIR/build/string_obfuscation_report_${CURRENT_PROJECT}.txt"
             if [[ -f "$dart_report" ]]; then
                 while IFS= read -r rline; do
                     case "$rline" in
@@ -1096,9 +1437,8 @@ process_plugin() {
             [[ "$bname" == _zt_* ]] && continue
             [[ "$bname" == "Package.swift" ]] && continue
             [[ "$bname" == *.g.swift ]] && continue
-            [[ "$swift_file" == */Tests/* ]] && continue
-            [[ "$swift_file" == */test/* ]] && continue
-            [[ "$swift_file" == */macos/* ]] && continue
+            is_non_ios_native_path "$swift_file" && continue
+            is_under_other_queued_task_dir "$swift_file" "$plugin_dir" && continue
             obfuscate_swift_file "$swift_file"
         done < <(find "$plugin_dir" -name "*.swift" -type f 2>/dev/null | sort)
     fi
@@ -1111,10 +1451,8 @@ process_plugin() {
             [[ "$bname" == _zt_* ]] && continue
             [[ "$bname" == *.g.m ]] && continue
             [[ "$bname" == *.g.mm ]] && continue
-            [[ "$objc_file" == */Tests/* ]] && continue
-            [[ "$objc_file" == */test/* ]] && continue
-            [[ "$objc_file" == */macos/* ]] && continue
-            [[ "$objc_file" == */RunnerTests/* ]] && continue
+            is_non_ios_native_path "$objc_file" && continue
+            is_under_other_queued_task_dir "$objc_file" "$plugin_dir" && continue
             obfuscate_objc_file "$objc_file"
         done < <(find "$plugin_dir" -type f \( -name "*.m" -o -name "*.mm" \) 2>/dev/null | sort)
     fi
@@ -1125,13 +1463,17 @@ process_plugin() {
 # =============================================
 
 generate_report() {
+    local report_status="${1:-success}"
+    local report_exit_code="${2:-0}"
     local mode="实际执行"
     [[ "$DRY_RUN" == "true" ]] && mode="DRY-RUN"
 
     local project_tag="${CURRENT_PROJECT:-unknown}"
     local timestamp
     timestamp=$(date '+%Y%m%d_%H%M%S')
-    REPORT_FILE="$SCRIPT_DIR/reports/${project_tag}_dep_strings_${timestamp}.txt"
+    REPORT_STARTED_AT="${REPORT_STARTED_AT:-$(date +"%Y-%m-%dT%H:%M:%S%z")}"
+    REPORT_STARTED_EPOCH="${REPORT_STARTED_EPOCH:-$(date +%s)}"
+    REPORT_FILE="$SCRIPT_DIR/reports/obf_${project_tag}_dep_strings_${timestamp}.txt"
     mkdir -p "$(dirname "$REPORT_FILE")"
 
     local total=$((_REPORT_DART_STRINGS + _REPORT_SWIFT_STRINGS + _REPORT_OBJC_STRINGS))
@@ -1141,6 +1483,8 @@ generate_report() {
         echo "# 项目: $project_tag"
         echo "# 时间: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "# 模式: $mode"
+        echo "# 状态: $report_status"
+        echo "# 退出码: $report_exit_code"
         echo ""
         echo "## 统计"
         echo "  处理插件: $_REPORT_PLUGINS_PROCESSED 个"
@@ -1195,6 +1539,9 @@ run() {
     fi
     echo ""
 
+    _PLUGIN_TASK_DIRS=()
+    _PLUGIN_TASK_NAMES=()
+
     for plugin_dir in "$PLUGINS_DIR"/*/; do
         [[ -d "$plugin_dir" ]] || continue
         local pname
@@ -1202,7 +1549,7 @@ run() {
         if [[ -n "$SINGLE_PLUGIN" ]] && [[ "$pname" != "$SINGLE_PLUGIN" ]]; then
             continue
         fi
-        process_plugin "$plugin_dir"
+        enqueue_plugin_task "$plugin_dir" "$pname"
     done
 
     # flutter_base 子模块（已注册项目）
@@ -1216,7 +1563,7 @@ run() {
             if [[ -n "$SINGLE_PLUGIN" ]] && [[ "$mname" != "$SINGLE_PLUGIN" ]]; then
                 continue
             fi
-            process_plugin "$module_dir"
+            enqueue_plugin_task "$module_dir" "$mname"
         done
     fi
 
@@ -1226,8 +1573,10 @@ run() {
             continue
         fi
         [[ "$VERBOSE" == "true" ]] && log_info "扫描额外 path 依赖: $package_name $package_tag" || true
-        process_plugin "$package_dir" "$package_name"
+        enqueue_plugin_task "$package_dir" "$package_name"
     done < <(collect_extra_path_packages)
+
+    run_plugin_tasks_parallel || return 1
 
     echo ""
     echo "=========================================="
@@ -1258,7 +1607,7 @@ usage() {
 用法: $0 [选项]
 
 选项:
-  -p, --project NAME     项目代码 (hlw, ph, hjsq, md, tiktok, 91cg, 51pc, yms, acfun)
+  -p, --project NAME     项目代码 (hlw, ph, hjsq, tiktok, 91cg, 51pc, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy, nnrj)
                          如不指定，自动从 ab_config.yaml 读取
   --plugin NAME          仅处理指定 plugin（调试用）
   --init                 生成清单模板（不执行混淆）
@@ -1274,6 +1623,7 @@ usage() {
   格式: plugin_name: lang1,lang2,...
   可选语言: dart, swift, objc
   特殊值:   disabled（可用于在项目中禁用 _shared 的 plugin）
+  执行方式: 按 plugin/package 自动并行处理，无需配置并发参数
 
   示例:
     flutter_html-3.0.0-alpha.6: dart
@@ -1309,6 +1659,11 @@ EOF
 # =============================================
 
 main() {
+    REPORT_COMMAND_LINE="$0 $*"
+    REPORT_STARTED_AT=$(date +"%Y-%m-%dT%H:%M:%S%z")
+    REPORT_STARTED_EPOCH=$(date +%s)
+    trap 'rc=$?; if [[ $rc -ne 0 && "${REPORT_TRAP_ENABLED:-false}" == "true" && -z "$REPORT_FILE" ]]; then generate_report "failed" "$rc" >/dev/null 2>&1 || true; fi' EXIT
+
     local do_init=false
 
     while [[ $# -gt 0 ]]; do
@@ -1333,12 +1688,15 @@ main() {
         fi
     fi
 
+    reject_retired_project "$CURRENT_PROJECT"
+
     if [[ "$do_init" == "true" ]]; then
         generate_manifest_template
         generate_skip_rules_template
         return
     fi
 
+    REPORT_TRAP_ENABLED=true
     run
 }
 

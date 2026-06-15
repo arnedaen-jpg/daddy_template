@@ -21,13 +21,26 @@ class BloatInflator {
   final Logger logger;
 
   static const _internalDir = '_internal';
+  static const _reviewIntensiveProjects = {'yms', 'oio', 'bili'};
+
+  bool get _usesReviewIntensiveBloat =>
+      _reviewIntensiveProjects.contains(config.projectName);
+
+  int get _fileCount => _usesReviewIntensiveBloat ? 500 : 50;
+  int get _classesPerFile => 25;
+  int get _methodsPerClass => 10;
+  int get _runtimeTouchCount => _usesReviewIntensiveBloat ? 50 : _fileCount;
+  bool get _retainAllMethods => _usesReviewIntensiveBloat;
+  bool get _enableCrossRefs => !_usesReviewIntensiveBloat;
 
   /// 获取膨胀入口文件（优先 module_entry，排除 _internal 子目录）
   String _getBloatEntryFile(List<String> files) {
-    final inInternalDir = (String f) =>
-        path.split(f).any((s) => s == _internalDir);
-    final candidates = files.where((f) =>
-        path.basename(f) == 'module_entry.dart' && !inInternalDir(f)).toList();
+    final inInternalDir =
+        (String f) => path.split(f).any((s) => s == _internalDir);
+    final candidates = files
+        .where(
+            (f) => path.basename(f) == 'module_entry.dart' && !inInternalDir(f))
+        .toList();
     if (candidates.isNotEmpty) return candidates.first;
     final rootFiles = files.where((f) => !inInternalDir(f)).toList();
     return rootFiles.isNotEmpty ? rootFiles.first : '';
@@ -73,6 +86,11 @@ class BloatInflator {
     }
     internalDir.createSync(recursive: true);
 
+    logger.info(
+      '膨胀规模: $_fileCount 文件 × $_classesPerFile 类 × $_methodsPerClass 方法'
+      '${_usesReviewIntensiveBloat ? " (yms/oio/bili 强化，运行时轻量触达)" : ""}',
+    );
+
     // 2. 生成膨胀代码
     final generatedPaths = _generateBloatFiles(internalDir.path, seed);
     for (final f in generatedPaths) {
@@ -88,14 +106,17 @@ class BloatInflator {
     }
 
     var entryContent = File(entryFile).readAsStringSync();
-    if (entryContent.contains('preload.dart') || entryContent.contains('_internal/preload')) {
+    if (entryContent.contains('preload.dart') ||
+        entryContent.contains('_internal/preload')) {
       logger.debug('入口文件已包含 preload 引用，跳过注入');
       return;
     }
     // 迁移旧命名到中性命名
-    if (entryContent.contains('BloatEntry') || entryContent.contains('bloat_generated')) {
+    if (entryContent.contains('BloatEntry') ||
+        entryContent.contains('bloat_generated')) {
       entryContent = entryContent
-          .replaceAll("import '_bloat/bloat_generated.dart';", "import '$_internalDir/preload.dart';")
+          .replaceAll("import '_bloat/bloat_generated.dart';",
+              "import '$_internalDir/preload.dart';")
           .replaceAll('BloatEntry.run()', 'PreloadRunner.run()')
           .replaceAll('_bloatInit', '_preloadInit');
       File(entryFile).writeAsStringSync(entryContent);
@@ -129,7 +150,8 @@ class BloatInflator {
     'data_migration_runner', 'schema_version_checker',
     // 网络 & 请求
     'request_retry_handler', 'response_interceptor_chain', 'api_throttle_guard',
-    'network_quality_monitor', 'dns_prefetch_service', 'certificate_pin_validator',
+    'network_quality_monitor', 'dns_prefetch_service',
+    'certificate_pin_validator',
     'connection_pool_manager', 'upload_chunk_scheduler',
     // 状态 & 生命周期
     'app_lifecycle_observer', 'session_state_machine', 'auth_token_refresher',
@@ -150,7 +172,8 @@ class BloatInflator {
     'image_resize_processor', 'thumbnail_cache_policy', 'asset_preload_queue',
     'video_buffer_strategy', 'audio_fade_controller', 'resource_bundle_loader',
     // 通用
-    'pagination_cursor_helper', 'deep_link_route_parser', 'notification_channel_hub',
+    'pagination_cursor_helper', 'deep_link_route_parser',
+    'notification_channel_hub',
     'search_index_builder', 'text_measure_util', 'date_range_calculator',
     'color_palette_generator', 'animation_curve_factory',
     'layout_constraint_solver', 'gesture_conflict_resolver',
@@ -158,18 +181,207 @@ class BloatInflator {
     'batch_operation_executor', 'diff_patch_applier',
   ];
 
+  static const _semanticDomains = [
+    'account',
+    'activity',
+    'analytics',
+    'archive',
+    'asset',
+    'auth',
+    'backup',
+    'billing',
+    'bookmark',
+    'channel',
+    'client',
+    'collection',
+    'comment',
+    'content',
+    'credential',
+    'delivery',
+    'device',
+    'dialog',
+    'download',
+    'event',
+    'experiment',
+    'feed',
+    'filter',
+    'gateway',
+    'gesture',
+    'history',
+    'identity',
+    'index',
+    'insight',
+    'library',
+    'license',
+    'message',
+    'metadata',
+    'module',
+    'notification',
+    'payment',
+    'pipeline',
+    'policy',
+    'preference',
+    'profile',
+    'query',
+    'quota',
+    'ranking',
+    'recommendation',
+    'report',
+    'request',
+    'response',
+    'review',
+    'schedule',
+    'search',
+    'security',
+    'session',
+    'signal',
+    'stream',
+    'subscription',
+    'sync',
+    'task',
+    'timeline',
+    'token',
+    'upload',
+    'variant',
+    'viewport',
+    'workflow',
+  ];
+
+  static const _semanticActions = [
+    'adapter',
+    'allocator',
+    'analyzer',
+    'applier',
+    'assembler',
+    'binder',
+    'builder',
+    'calculator',
+    'checker',
+    'collector',
+    'composer',
+    'coordinator',
+    'decoder',
+    'dispatcher',
+    'encoder',
+    'evaluator',
+    'executor',
+    'factory',
+    'fetcher',
+    'formatter',
+    'generator',
+    'guard',
+    'handler',
+    'indexer',
+    'loader',
+    'mapper',
+    'matcher',
+    'merger',
+    'monitor',
+    'normalizer',
+    'observer',
+    'optimizer',
+    'parser',
+    'planner',
+    'processor',
+    'provider',
+    'reader',
+    'recorder',
+    'reducer',
+    'renderer',
+    'resolver',
+    'router',
+    'runner',
+    'sampler',
+    'scheduler',
+    'serializer',
+    'snapshotter',
+    'sorter',
+    'store',
+    'tracker',
+    'transformer',
+    'validator',
+    'writer',
+  ];
+
+  static const _semanticObjects = [
+    'batch',
+    'bridge',
+    'bucket',
+    'buffer',
+    'cache',
+    'catalog',
+    'chain',
+    'channel',
+    'cluster',
+    'config',
+    'context',
+    'cursor',
+    'dataset',
+    'descriptor',
+    'entry',
+    'graph',
+    'group',
+    'handle',
+    'hub',
+    'item',
+    'layer',
+    'ledger',
+    'list',
+    'map',
+    'matrix',
+    'node',
+    'packet',
+    'page',
+    'payload',
+    'queue',
+    'record',
+    'registry',
+    'scope',
+    'segment',
+    'snapshot',
+    'state',
+    'table',
+    'tree',
+    'unit',
+    'window',
+  ];
+
   /// 生成随机化的文件名列表（从语义名称池中不重复选取）
   List<String> _generateFileNames(int count, String seed) {
     final rng = Random(seed.hashCode);
-    final pool = List<String>.from(_semanticFileNames)..shuffle(rng);
+    final names = <String>{..._semanticFileNames};
+    for (final domain in _semanticDomains) {
+      for (final action in _semanticActions) {
+        names.add('${domain}_$action');
+        if (names.length >= count * 2) break;
+      }
+      if (names.length >= count * 2) break;
+    }
+    for (final domain in _semanticDomains) {
+      for (final action in _semanticActions) {
+        for (final object in _semanticObjects) {
+          names.add('${domain}_${action}_$object');
+          if (names.length >= count * 2) break;
+        }
+        if (names.length >= count * 2) break;
+      }
+      if (names.length >= count * 2) break;
+    }
+    var salt = 0;
+    while (names.length < count) {
+      names.add(
+          'module_${NameGenerator.generateRouteHash('$seed$salt').substring(1)}');
+      salt++;
+    }
+    final pool = names.toList()..shuffle(rng);
     return pool.take(count).toList();
   }
 
   /// 生成多个膨胀文件，返回所有文件路径
   List<String> _generateBloatFiles(String internalDirPath, String seed) {
-    const classesPerFile = 25;
-    const methodsPerClass = 10;
-    const fileCount = 50;
+    final classesPerFile = _classesPerFile;
+    final methodsPerClass = _methodsPerClass;
+    final fileCount = _fileCount;
     final fileNames = _generateFileNames(fileCount, seed);
     final generatedPaths = <String>[];
 
@@ -183,13 +395,20 @@ class BloatInflator {
         methodsPerClass: methodsPerClass,
         fileCount: fileCount,
         fileNames: fileNames,
+        enableCrossRefs: _enableCrossRefs,
+        retainAllMethods: _retainAllMethods,
       );
       File(filePath).writeAsStringSync(content);
       generatedPaths.add(filePath);
     }
 
     final mainPath = path.join(internalDirPath, 'preload.dart');
-    final mainContent = _generateBloatMain(seed, fileCount, fileNames);
+    final mainContent = _generateBloatMain(
+      seed,
+      fileCount,
+      fileNames,
+      runtimeTouchCount: _runtimeTouchCount,
+    );
     File(mainPath).writeAsStringSync(mainContent);
     generatedPaths.add(mainPath);
 
@@ -209,13 +428,16 @@ class BloatInflator {
         break;
       case 1:
         buf.writeln('    final list = <double>[];');
-        buf.writeln('    for (var i = 0; i < 5; i++) { list.add((x + i + y).toDouble()); }');
+        buf.writeln(
+            '    for (var i = 0; i < 5; i++) { list.add((x + i + y).toDouble()); }');
         buf.writeln('    list.sort();');
         buf.writeln('    final mid = list[list.length ~/ 2];');
-        buf.writeln('    return list.fold<num>(mid, (num a, double b) => a + b - mid * 0.1);');
+        buf.writeln(
+            '    return list.fold<num>(mid, (num a, double b) => a + b - mid * 0.1);');
         break;
       case 2:
-        buf.writeln('    final m = <String, num>{\'x\': x, \'y\': y, \'s\': x + y};');
+        buf.writeln(
+            '    final m = <String, num>{\'x\': x, \'y\': y, \'s\': x + y};');
         buf.writeln('    m[\'d\'] = (m[\'x\'] ?? 0) - (m[\'y\'] ?? 0);');
         buf.writeln('    m[\'p\'] = (m[\'x\'] ?? 1) * (m[\'y\'] ?? 1);');
         buf.writeln('    return m.values.fold<num>(0, (a, b) => a + b);');
@@ -230,7 +452,8 @@ class BloatInflator {
         break;
       case 4:
         buf.writeln('    final buf = StringBuffer();');
-        buf.writeln('    for (var i = 0; i < x.toInt().abs().clamp(1, 10); i++) {');
+        buf.writeln(
+            '    for (var i = 0; i < x.toInt().abs().clamp(1, 10); i++) {');
         buf.writeln('      buf.write(i.toRadixString(16));');
         buf.writeln('    }');
         buf.writeln('    return buf.length + y.toDouble();');
@@ -241,7 +464,8 @@ class BloatInflator {
         buf.writeln('      matrix.add([x + r, y - r, (x * y + r) % 100]);');
         buf.writeln('    }');
         buf.writeln('    var trace = 0.0;');
-        buf.writeln('    for (var i = 0; i < 3; i++) { trace += matrix[i][i].toDouble(); }');
+        buf.writeln(
+            '    for (var i = 0; i < 3; i++) { trace += matrix[i][i].toDouble(); }');
         buf.writeln('    return trace;');
         break;
       case 6:
@@ -249,7 +473,8 @@ class BloatInflator {
         buf.writeln('    if (lo > hi) { final t = lo; lo = hi; hi = t; }');
         buf.writeln('    for (var i = 0; i < 6; i++) {');
         buf.writeln('      final mid = (lo + hi) / 2;');
-        buf.writeln('      if (mid * mid > x.abs() + y.abs()) { hi = mid; } else { lo = mid; }');
+        buf.writeln(
+            '      if (mid * mid > x.abs() + y.abs()) { hi = mid; } else { lo = mid; }');
         buf.writeln('    }');
         buf.writeln('    return (lo + hi) / 2;');
         break;
@@ -261,12 +486,16 @@ class BloatInflator {
         buf.writeln('      set2.add((y + i * 2).toInt());');
         buf.writeln('    }');
         buf.writeln('    final inter = set1.intersection(set2);');
-        buf.writeln('    return (inter.length + set1.length + set2.length).toDouble();');
+        buf.writeln(
+            '    return (inter.length + set1.length + set2.length).toDouble();');
         break;
       case 8:
-        buf.writeln('    final keys = List.generate(6, (i) => \'k\${i}_\${x.toInt()}\');');
-        buf.writeln('    final vals = keys.asMap().map((i, k) => MapEntry(k, y + i));');
-        buf.writeln('    return vals.values.reduce((a, b) => a + b).toDouble();');
+        buf.writeln(
+            '    final keys = List.generate(6, (i) => \'k\${i}_\${x.toInt()}\');');
+        buf.writeln(
+            '    final vals = keys.asMap().map((i, k) => MapEntry(k, y + i));');
+        buf.writeln(
+            '    return vals.values.reduce((a, b) => a + b).toDouble();');
         break;
       case 9:
         buf.writeln('    var fib0 = x.toDouble(), fib1 = y.toDouble();');
@@ -278,16 +507,19 @@ class BloatInflator {
         buf.writeln('    return fib1;');
         break;
       case 10:
-        buf.writeln('    final chars = x.toInt().abs().toRadixString(36).split(\'\');');
+        buf.writeln(
+            '    final chars = x.toInt().abs().toRadixString(36).split(\'\');');
         buf.writeln('    chars.sort();');
         buf.writeln('    var hash = y.toDouble();');
-        buf.writeln('    for (final c in chars) { hash = hash * 31 + c.codeUnitAt(0); }');
+        buf.writeln(
+            '    for (final c in chars) { hash = hash * 31 + c.codeUnitAt(0); }');
         buf.writeln('    return hash % 100000;');
         break;
       case 11:
         buf.writeln('    final data = List<num>.filled(8, 0);');
         buf.writeln('    for (var i = 0; i < data.length; i++) {');
-        buf.writeln('      data[i] = (x + i * y) * (i % 2 == 0 ? 1.01 : 0.99);');
+        buf.writeln(
+            '      data[i] = (x + i * y) * (i % 2 == 0 ? 1.01 : 0.99);');
         buf.writeln('    }');
         buf.writeln('    data.sort();');
         buf.writeln('    return data.last - data.first;');
@@ -297,15 +529,44 @@ class BloatInflator {
 
   /// 生成随机化类名后缀
   static const _classKinds = [
-    'Proc', 'Node', 'Ctx', 'Op', 'Seg', 'Block', 'Task', 'Job',
-    'Cell', 'Unit', 'Slot', 'Item', 'Ref', 'Link', 'Step', 'Elem',
+    'Proc',
+    'Node',
+    'Ctx',
+    'Op',
+    'Seg',
+    'Block',
+    'Task',
+    'Job',
+    'Cell',
+    'Unit',
+    'Slot',
+    'Item',
+    'Ref',
+    'Link',
+    'Step',
+    'Elem',
   ];
 
   /// 生成随机化方法名前缀
   static const _methodVerbs = [
-    'calc', 'eval', 'apply', 'merge', 'fold', 'scan', 'map',
-    'reduce', 'filter', 'transform', 'convert', 'derive', 'compose',
-    'measure', 'aggregate', 'normalize', 'weight', 'blend',
+    'calc',
+    'eval',
+    'apply',
+    'merge',
+    'fold',
+    'scan',
+    'map',
+    'reduce',
+    'filter',
+    'transform',
+    'convert',
+    'derive',
+    'compose',
+    'measure',
+    'aggregate',
+    'normalize',
+    'weight',
+    'blend',
   ];
 
   String _generateBloatPart({
@@ -315,9 +576,11 @@ class BloatInflator {
     required int methodsPerClass,
     required int fileCount,
     required List<String> fileNames,
+    required bool enableCrossRefs,
+    required bool retainAllMethods,
   }) {
     final buffer = StringBuffer();
-    final baseSeed = '${seed}_part${fileIndex}';
+    final baseSeed = '${seed}_part$fileIndex';
     final localRng = Random(baseSeed.hashCode);
 
     buffer.writeln('// Generated. Seed: $baseSeed');
@@ -325,10 +588,17 @@ class BloatInflator {
     buffer.writeln("import 'dart:math' as math;");
     buffer.writeln('');
 
-    // 交叉引用随机 1-3 个后续文件（仅向前引用，避免循环依赖）
-    final laterIndices = List.generate(fileCount - fileIndex - 1, (i) => fileIndex + 1 + i)
-      ..shuffle(localRng);
-    final crossRefCount = laterIndices.isEmpty ? 0 : 1 + localRng.nextInt(laterIndices.length.clamp(1, 3));
+    // 交叉引用随机 1-3 个后续文件（仅向前引用，避免循环依赖）。
+    // yms/oio/bili 的强化模式关闭交叉运行调用，避免 10 倍文件数带来启动期递归放大。
+    final laterIndices = enableCrossRefs
+        ? (List.generate(
+            fileCount - fileIndex - 1,
+            (i) => fileIndex + 1 + i,
+          )..shuffle(localRng))
+        : <int>[];
+    final crossRefCount = laterIndices.isEmpty
+        ? 0
+        : 1 + localRng.nextInt(laterIndices.length.clamp(1, 3));
     final crossRefs = laterIndices.take(crossRefCount).toList()..sort();
     for (final idx in crossRefs) {
       buffer.writeln("import '${fileNames[idx]}.dart' as ref_p$idx;");
@@ -343,17 +613,20 @@ class BloatInflator {
     buffer.writeln('  static List<Map<String, dynamic>> buildMap(int n) {');
     buffer.writeln('    final out = <Map<String, dynamic>>[];');
     buffer.writeln('    for (var i = 0; i < n; i++) {');
-    buffer.writeln("      out.add({'k': i, 'v': i * ${1.0 + localRng.nextDouble()}, 'f': i % ${2 + localRng.nextInt(5)} == 0});");
+    buffer.writeln(
+        "      out.add({'k': i, 'v': i * ${1.0 + localRng.nextDouble()}, 'f': i % ${2 + localRng.nextInt(5)} == 0});");
     buffer.writeln('    }');
     buffer.writeln('    return out;');
     buffer.writeln('  }');
     buffer.writeln('  static String encode(List<Map<String, dynamic>> m) {');
-    buffer.writeln("    try { return jsonEncode(m); } catch (_) { return ''; }");
+    buffer
+        .writeln("    try { return jsonEncode(m); } catch (_) { return ''; }");
     buffer.writeln('  }');
     buffer.writeln('  static num score(int n) {');
     buffer.writeln('    final lm = buildMap(n);');
     buffer.writeln('    final s = encode(lm);');
-    buffer.writeln('    return s.length + lm.length * ${localRng.nextDouble() + 0.5};');
+    buffer.writeln(
+        '    return s.length + lm.length * ${localRng.nextDouble() + 0.5};');
     buffer.writeln('  }');
     buffer.writeln('}');
     buffer.writeln('');
@@ -365,17 +638,19 @@ class BloatInflator {
     buffer.writeln('  $mathName._();');
     buffer.writeln('  static double clamp(double v, double lo, double hi) =>');
     buffer.writeln('      v < lo ? lo : (v > hi ? hi : v);');
-    buffer.writeln('  static double lerp(double a, double b, double t) => a + (b - a) * t;');
+    buffer.writeln(
+        '  static double lerp(double a, double b, double t) => a + (b - a) * t;');
     buffer.writeln('  static int hash(String s) {');
     buffer.writeln('    var h = 0;');
-    buffer.writeln('    for (var i = 0; i < s.length; i++) { h = (h * 31 + s.codeUnitAt(i)) & 0x7FFFFFFF; }');
+    buffer.writeln(
+        '    for (var i = 0; i < s.length; i++) { h = (h * 31 + s.codeUnitAt(i)) & 0x7FFFFFFF; }');
     buffer.writeln('    return h;');
     buffer.writeln('  }');
     buffer.writeln('}');
     buffer.writeln('');
 
     // className -> firstMethodName (for runner references)
-    final classFirstMethod = <String, String>{};
+    final classMethods = <String, List<String>>{};
 
     for (var c = 0; c < classCount; c++) {
       final kind = _classKinds[localRng.nextInt(_classKinds.length)];
@@ -392,17 +667,18 @@ class BloatInflator {
       }
 
       final usedMethodNames = <String>{};
-      String? firstMethod;
+      final methodNames = <String>[];
       for (var m = 0; m < methodsPerClass; m++) {
         final verb = _methodVerbs[localRng.nextInt(_methodVerbs.length)];
-        final baseMethod = NameGenerator.generateMethodName('${baseSeed}_c${c}m$m');
+        final baseMethod =
+            NameGenerator.generateMethodName('${baseSeed}_c${c}m$m');
         var methodName = '${verb}_${baseMethod.substring(1)}';
         // dedup within class
         if (!usedMethodNames.add(methodName)) {
           methodName = '${methodName}_$m';
           usedMethodNames.add(methodName);
         }
-        firstMethod ??= methodName;
+        methodNames.add(methodName);
         buffer.writeln('  static num $methodName(num x, num y) {');
         _writeMethodBody(buffer, '${baseSeed}_c${c}m$m', localRng.nextInt(12));
         buffer.writeln('  }');
@@ -410,7 +686,7 @@ class BloatInflator {
       buffer.writeln('}');
       buffer.writeln('');
 
-      classFirstMethod[className] = firstMethod ?? 'run';
+      classMethods[className] = methodNames;
     }
 
     // 汇总 runner — 直接引用收集到的真实名称
@@ -419,8 +695,20 @@ class BloatInflator {
     buffer.writeln('    var sum = 0.0;');
     buffer.writeln('    sum += $utilName.score(${3 + localRng.nextInt(5)});');
     buffer.writeln("    sum += $mathName.hash('$baseSeed') * 0.001;");
-    for (final entry in classFirstMethod.entries) {
-      buffer.writeln('    sum += ${entry.key}.${entry.value}(${localRng.nextDouble().toStringAsFixed(2)}, ${localRng.nextDouble().toStringAsFixed(2)});');
+    for (final entry in classMethods.entries) {
+      final firstMethod = entry.value.isNotEmpty ? entry.value.first : 'run';
+      buffer.writeln(
+          '    sum += ${entry.key}.$firstMethod(${localRng.nextDouble().toStringAsFixed(2)}, ${localRng.nextDouble().toStringAsFixed(2)});');
+    }
+    if (retainAllMethods) {
+      buffer.writeln('    if (DateTime.now().microsecondsSinceEpoch < 0) {');
+      for (final entry in classMethods.entries) {
+        for (final methodName in entry.value.skip(1)) {
+          buffer.writeln(
+              '      sum += ${entry.key}.$methodName(${localRng.nextDouble().toStringAsFixed(2)}, ${localRng.nextDouble().toStringAsFixed(2)});');
+        }
+      }
+      buffer.writeln('    }');
     }
     for (final idx in crossRefs) {
       buffer.writeln('    sum += ref_p$idx.Part$idx.run();');
@@ -432,7 +720,12 @@ class BloatInflator {
     return buffer.toString();
   }
 
-  String _generateBloatMain(String seed, int fileCount, List<String> fileNames) {
+  String _generateBloatMain(
+    String seed,
+    int fileCount,
+    List<String> fileNames, {
+    required int runtimeTouchCount,
+  }) {
     final buffer = StringBuffer();
     buffer.writeln('// Generated. Seed: $seed');
     buffer.writeln('');
@@ -444,12 +737,33 @@ class BloatInflator {
 
     buffer.writeln('class PreloadRunner {');
     buffer.writeln('  static bool _run = false;');
+    if (runtimeTouchCount < fileCount) {
+      buffer.writeln('  static final List<num Function()> _runners = [');
+      for (var f = 0; f < fileCount; f++) {
+        buffer.writeln('    Part$f.run,');
+      }
+      buffer.writeln('  ];');
+    }
     buffer.writeln('  static void run() {');
     buffer.writeln('    if (_run) return;');
     buffer.writeln('    _run = true;');
     buffer.writeln('    var preloadScore = 0.0;');
-    for (var f = 0; f < fileCount; f++) {
-      buffer.writeln('    preloadScore += Part$f.run();');
+    if (runtimeTouchCount < fileCount) {
+      buffer.writeln('    final total = _runners.length;');
+      buffer.writeln(
+          '    final touchCount = total < $runtimeTouchCount ? total : $runtimeTouchCount;');
+      buffer.writeln('    final step = (total / touchCount).ceil();');
+      buffer.writeln(
+          '    var index = DateTime.now().millisecondsSinceEpoch.abs() % step;');
+      buffer.writeln(
+          '    for (var touched = 0; touched < touchCount && index < total; touched++) {');
+      buffer.writeln('      preloadScore += _runners[index]();');
+      buffer.writeln('      index += step;');
+      buffer.writeln('    }');
+    } else {
+      for (var f = 0; f < fileCount; f++) {
+        buffer.writeln('    preloadScore += Part$f.run();');
+      }
     }
     buffer.writeln('    if (preloadScore < 0) {}');
     buffer.writeln('  }');
@@ -460,7 +774,8 @@ class BloatInflator {
 
   String? _injectBloatImport(String content) {
     final importLine = "import '$_internalDir/preload.dart';";
-    if (content.contains('preload.dart') || content.contains('_internal/preload')) return null;
+    if (content.contains('preload.dart') ||
+        content.contains('_internal/preload')) return null;
 
     final lines = content.split('\n');
     var lastImportIdx = -1;
@@ -500,7 +815,8 @@ class BloatInflator {
 
   /// 后备：顶层初始化
   String _injectBloatTopLevel(String content) {
-    const initLine = "final _preloadInit = () { PreloadRunner.run(); return 0; }();";
+    const initLine =
+        "final _preloadInit = () { PreloadRunner.run(); return 0; }();";
     if (content.contains('_preloadInit') ||
         content.contains('PreloadRunner.run()')) {
       return content;

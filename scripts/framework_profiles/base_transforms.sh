@@ -90,6 +90,14 @@ bt_inject_classes() {
     local target_dir="$1"
     local namespace="$2"
     local count="${3:-5}"
+    if declare -f native_class_count >/dev/null 2>&1; then
+        count=$(native_class_count "$count")
+    fi
+
+    if declare -f generate_mutation_file_batch >/dev/null 2>&1; then
+        generate_mutation_file_batch "$namespace" "$count" "$target_dir"
+        return
+    fi
 
     for (( i=0; i<count; i++ )); do
         generate_mutation_file "$namespace" "$i" "$target_dir"
@@ -450,6 +458,12 @@ bt_inject_dead_branches() {
                 local unique_str="${branch_hash:8:16}"
                 local pattern=$(( 16#${branch_hash:24:2} % 12 ))
                 local branches_per=$(( (16#${branch_hash:26:2} % 4) + 3 ))
+                if declare -f native_dead_branch_multiplier >/dev/null 2>&1; then
+                    branches_per=$(( branches_per * $(native_dead_branch_multiplier) ))
+                fi
+                if [[ -n "${REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD:-}" && "$branches_per" -gt "$REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD" ]]; then
+                    branches_per="$REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD"
+                fi
 
                 for (( bi=0; bi<branches_per; bi++ )); do
                     local bh
@@ -556,6 +570,12 @@ bt_inject_swift_dead_branches() {
             local branch_hash
             branch_hash=$(hash_derive "${SEED}:swbranch:$(basename "$file"):${inject_count}")
             local branches_per=$(( (16#${branch_hash:24:2} % 4) + 3 ))
+            if declare -f native_dead_branch_multiplier >/dev/null 2>&1; then
+                branches_per=$(( branches_per * $(native_dead_branch_multiplier) ))
+            fi
+            if [[ -n "${REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD:-}" && "$branches_per" -gt "$REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD" ]]; then
+                branches_per="$REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD"
+            fi
 
             for (( bi=0; bi<branches_per; bi++ )); do
                 local bh

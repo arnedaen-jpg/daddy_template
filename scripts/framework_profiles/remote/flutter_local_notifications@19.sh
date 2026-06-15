@@ -1,23 +1,16 @@
 #!/bin/bash
-# =============================================
-#   Profile: audio_session (remote, renamed)
-#   Version: 0.x (ObjC)
-#
-#   Note: Do not rewrite AVAudioSession symbols. This profile only touches
-#   file-local static functions, method order, dead branches, and injected files.
-# =============================================
 
-PROFILE_NAME="audio_session"
-PROFILE_VERSION="0"
+PROFILE_NAME="flutter_local_notifications"
+PROFILE_VERSION="19"
 PROFILE_STATUS="draft"
 
 PROFILE_PROTECTED=(
-    "AudioSessionPlugin"
-    "TicketFilterPlugin"
-    "DarwinAudioSession"
-    "DarwinTicketFilter"
     "registerWithRegistrar"
     "handleMethodCall"
+    "registerPlugins"
+    "FlutterEngineManager"
+    "ActionEventSink"
+    "Converters"
 )
 
 profile_apply() {
@@ -25,11 +18,6 @@ profile_apply() {
     local level="$2"
 
     local source_dirs=("${_PROFILE_SRC_DIRS[@]}")
-    if [[ ${#source_dirs[@]} -eq 0 ]]; then
-        local src_dir
-        src_dir=$(bt_find_src_dir "$plugin_dir" "audio_session")
-        [[ -n "$src_dir" ]] && source_dirs=("$src_dir")
-    fi
     [[ ${#source_dirs[@]} -gt 0 ]] || return 1
 
     local src_dir
@@ -41,6 +29,9 @@ profile_apply() {
             while IFS= read -r f; do
                 [[ -f "$f" ]] && bt_rename_static_functions "$f" "${PROFILE_PROTECTED[@]}"
             done < <(find "$src_dir" -name "*.m" -type f ! -name "${INJECT_PREFIX}*" 2>/dev/null)
+            while IFS= read -r f; do
+                [[ -f "$f" ]] && bt_rename_swift_privates "$f" "${PROFILE_PROTECTED[@]}"
+            done < <(find "$src_dir" -name "*.swift" -type f ! -name "Package.swift" 2>/dev/null)
         fi
 
         if [[ "$level" == "L2" || "$level" == "L3" ]]; then
@@ -49,12 +40,18 @@ profile_apply() {
                 file_has_preprocessor_blocks "$f" && continue
                 bt_reorder_objc_methods "$f"
             done < <(find "$src_dir" -name "*.m" -type f ! -name "${INJECT_PREFIX}*" 2>/dev/null)
+            while IFS= read -r f; do
+                [[ -f "$f" ]] && bt_reorder_swift_methods "$f"
+            done < <(find "$src_dir" -name "*.swift" -type f ! -name "Package.swift" 2>/dev/null)
         fi
 
         if [[ "$level" == "L3" ]]; then
             while IFS= read -r f; do
-                [[ -f "$f" ]] && bt_inject_dead_branches "$f" 12
+                [[ -f "$f" ]] && bt_inject_dead_branches "$f"
             done < <(find "$src_dir" -name "*.m" -type f ! -name "${INJECT_PREFIX}*" 2>/dev/null)
+            while IFS= read -r f; do
+                [[ -f "$f" ]] && bt_inject_swift_dead_branches "$f"
+            done < <(find "$src_dir" -name "*.swift" -type f ! -name "Package.swift" 2>/dev/null)
         fi
     done
 }

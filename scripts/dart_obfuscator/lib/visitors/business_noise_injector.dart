@@ -34,7 +34,10 @@ class BusinessNoiseInjector {
     logger.step('业务噪音注入 (build/initState/getHomePage)...');
 
     final seedBase = config.seedBase;
-    _random = Random(seedBase != null ? seedBase.hashCode : (DateTime.now().millisecondsSinceEpoch + (config.projectName?.hashCode ?? 0)));
+    _random = Random(seedBase != null
+        ? seedBase.hashCode
+        : (DateTime.now().millisecondsSinceEpoch +
+            (config.projectName?.hashCode ?? 0)));
 
     if (config.targetDir.isEmpty) {
       logger.warning('目标目录为空，跳过');
@@ -48,7 +51,9 @@ class BusinessNoiseInjector {
     }
 
     final project = config.projectName ?? 'default';
-    final seed = seedBase != null ? '${project}_noise_$seedBase' : '${project}_noise_${DateTime.now().millisecondsSinceEpoch}';
+    final seed = seedBase != null
+        ? '${project}_noise_$seedBase'
+        : '${project}_noise_${DateTime.now().millisecondsSinceEpoch}';
 
     if (config.dryRun) {
       logger.info('[DRY-RUN] 将生成 Noise 并注入到目标方法');
@@ -82,9 +87,10 @@ class BusinessNoiseInjector {
 
         for (final m in visitor.methods) {
           if (_targetMethodNames.contains(m.name)) {
-            final rate =
-                _minInjectionRate + _random.nextDouble() * (_maxInjectionRate - _minInjectionRate);
-            if (NameGenerator.shouldInject('${seed}_${path.basename(file)}_${m.name}', rate)) {
+            final rate = _minInjectionRate +
+                _random.nextDouble() * (_maxInjectionRate - _minInjectionRate);
+            if (NameGenerator.shouldInject(
+                '${seed}_${path.basename(file)}_${m.name}', rate)) {
               toInject.add(_InjectionTarget(
                 filePath: file,
                 methodName: m.name,
@@ -125,7 +131,8 @@ class BusinessNoiseInjector {
       final importShift = content.length - originalLength;
 
       // 按 bodyOffset 倒序注入，避免偏移变化
-      final sorted = [...entry.value]..sort((a, b) => b.bodyOffset.compareTo(a.bodyOffset));
+      final sorted = [...entry.value]
+        ..sort((a, b) => b.bodyOffset.compareTo(a.bodyOffset));
 
       for (final t in sorted) {
         content = _injectRuntimeCall(
@@ -192,7 +199,8 @@ class RuntimeInit {
   }
 
   String _relativeImportToRuntime(String filePath) {
-    final runtimePath = path.absolute(path.join(config.targetDir, '_internal', 'part_runtime.dart'));
+    final runtimePath = path.absolute(
+        path.join(config.targetDir, '_internal', 'part_runtime.dart'));
     final fromDir = path.absolute(path.dirname(filePath));
     final rel = path.relative(runtimePath, from: fromDir).replaceAll('\\', '/');
     return "import '$rel';";
@@ -212,19 +220,24 @@ class RuntimeInit {
   bool _isLikelyClassBody(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return true;
     final c = content.codeUnitAt(i);
-    if (c == 0x3e) {  // '>'
-      return !(i > 0 && content.codeUnitAt(i - 1) == 0x3d);  // '=>' 不是类体
+    if (c == 0x3e) {
+      // '>'
+      return !(i > 0 && content.codeUnitAt(i - 1) == 0x3d); // '=>' 不是类体
     }
-    if (c == 0x2a) return false;  // '*' — async*/sync* 函数体
+    if (c == 0x2a) return false; // '*' — async*/sync* 函数体
     if ((c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || c == 0x5f) {
       final wordEnd = i + 1;
-      while (i >= 0 && ((content.codeUnitAt(i) >= 0x61 && content.codeUnitAt(i) <= 0x7a) ||
-                         (content.codeUnitAt(i) >= 0x41 && content.codeUnitAt(i) <= 0x5a) ||
-                         content.codeUnitAt(i) == 0x5f ||
-                         (content.codeUnitAt(i) >= 0x30 && content.codeUnitAt(i) <= 0x39))) {
+      while (i >= 0 &&
+          ((content.codeUnitAt(i) >= 0x61 && content.codeUnitAt(i) <= 0x7a) ||
+              (content.codeUnitAt(i) >= 0x41 &&
+                  content.codeUnitAt(i) <= 0x5a) ||
+              content.codeUnitAt(i) == 0x5f ||
+              (content.codeUnitAt(i) >= 0x30 &&
+                  content.codeUnitAt(i) <= 0x39))) {
         i--;
       }
       final word = content.substring(i + 1, wordEnd);
@@ -238,9 +251,10 @@ class RuntimeInit {
   bool _isCollectionLiteralBrace(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return false;
-    return content[i] == '=' || content[i] == ':';  // = { 或 : { (map entry)
+    return content[i] == '=' || content[i] == ':'; // = { 或 : { (map entry)
   }
 
   /// 排除 => { ... } 内部嵌套的 { }
@@ -253,8 +267,14 @@ class RuntimeInit {
       } else if (c == 0x7b) {
         if (depth == 0) {
           var j = i - 1;
-          while (j >= 0 && (content[j] == ' ' || content[j] == '\t' || content[j] == '\n' || content[j] == '\r')) j--;
-          return j >= 1 && content.codeUnitAt(j) == 0x3e && content.codeUnitAt(j - 1) == 0x3d;
+          while (j >= 0 &&
+              (content[j] == ' ' ||
+                  content[j] == '\t' ||
+                  content[j] == '\n' ||
+                  content[j] == '\r')) j--;
+          return j >= 1 &&
+              content.codeUnitAt(j) == 0x3e &&
+              content.codeUnitAt(j - 1) == 0x3d;
         }
         depth--;
       }
@@ -266,7 +286,11 @@ class RuntimeInit {
   bool _wouldInjectBeforeCaseOrDefault(String content, int pos) {
     if (pos < 0 || pos >= content.length) return false;
     var i = pos;
-    while (i < content.length && (content.codeUnitAt(i) == 0x20 || content.codeUnitAt(i) == 0x09 || content.codeUnitAt(i) == 0x0a || content.codeUnitAt(i) == 0x0d)) i++;
+    while (i < content.length &&
+        (content.codeUnitAt(i) == 0x20 ||
+            content.codeUnitAt(i) == 0x09 ||
+            content.codeUnitAt(i) == 0x0a ||
+            content.codeUnitAt(i) == 0x0d)) i++;
     if (i + 5 > content.length) return false;
     return content.startsWith('case ', i) || content.startsWith('default ', i);
   }
@@ -275,13 +299,18 @@ class RuntimeInit {
   bool _isSwitchBlockBrace(String content, int braceIdx) {
     if (braceIdx < 8) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content.codeUnitAt(i) == 0x20 || content.codeUnitAt(i) == 0x09 || content.codeUnitAt(i) == 0x0a || content.codeUnitAt(i) == 0x0d)) i--;
+    while (i >= 0 &&
+        (content.codeUnitAt(i) == 0x20 ||
+            content.codeUnitAt(i) == 0x09 ||
+            content.codeUnitAt(i) == 0x0a ||
+            content.codeUnitAt(i) == 0x0d)) i--;
     if (i < 0 || content.codeUnitAt(i) != 0x29) return false;
     i--;
     var depth = 1;
     while (i >= 6 && depth > 0) {
       final c = content.codeUnitAt(i);
-      if (c == 0x29) depth++;
+      if (c == 0x29)
+        depth++;
       else if (c == 0x28) depth--;
       i--;
     }
@@ -293,15 +322,19 @@ class RuntimeInit {
   bool _isNamedParamBrace(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return false;
     return content[i] == ',' || content[i] == '(';
   }
 
   /// AST 为主、正则兜底：优先 leftBracket，失效时向后扫描找 {
-  String _injectRuntimeCall(String content, int bodyOffset, String methodName, {int? bodyEnd}) {
+  String _injectRuntimeCall(String content, int bodyOffset, String methodName,
+      {int? bodyEnd}) {
     int braceIdx = -1;
-    if (bodyOffset >= 0 && bodyOffset < content.length && content[bodyOffset] == '{') {
+    if (bodyOffset >= 0 &&
+        bodyOffset < content.length &&
+        content[bodyOffset] == '{') {
       braceIdx = bodyOffset;
     } else {
       braceIdx = _scanForBrace(content, bodyOffset.clamp(0, content.length));
@@ -314,10 +347,12 @@ class RuntimeInit {
         !_isNamedParamBrace(content, braceIdx) &&
         !_wouldInjectBeforeCaseOrDefault(content, braceIdx + 1)) {
       final insertPos = _pickNoiseInsertPosition(
-        content, braceIdx + 1, bodyEnd ?? -1,
+        content,
+        braceIdx + 1,
+        bodyEnd ?? -1,
       );
       return content.substring(0, insertPos) +
-          'RuntimeInit.run(); ' +
+          'RuntimeInit.run();\n' +
           content.substring(insertPos);
     }
     final pattern = _methodDeclarationPattern(methodName);
@@ -330,7 +365,9 @@ class RuntimeInit {
     });
     final pos = nearest.end;
     if (_wouldInjectBeforeCaseOrDefault(content, pos)) return content;
-    return content.substring(0, pos) + 'RuntimeInit.run(); ' + content.substring(pos);
+    return content.substring(0, pos) +
+        'RuntimeInit.run();\n' +
+        content.substring(pos);
   }
 
   /// 插入点：目前仅方法开头，中间/结尾需解析避免插入到字符串等，暂不实现
@@ -353,11 +390,22 @@ class RuntimeInit {
         p = RegExp(prefix + r'\bvoid\s+' + esc + r'\s*\([\s\S]*?' + suffix);
         break;
       case 'getHomePage':
-        p = RegExp(prefix + r'\b(?:static\s+)?Widget\s+' + esc + r'\s*\([\s\S]*?' + suffix);
+        p = RegExp(prefix +
+            r'\b(?:static\s+)?Widget\s+' +
+            esc +
+            r'\s*\([\s\S]*?' +
+            suffix);
         break;
       default:
-        const typePattern = r'(?:void|dynamic|(?!switch\b|if\b|for\b|while\b|catch\b|else\b|do\b|try\b)[A-Za-z_][A-Za-z0-9_<>, \?]*)';
-        p = RegExp(prefix + r'\b' + typePattern + r'\s+' + esc + r'\s*\([\s\S]*?' + suffix);
+        const typePattern =
+            r'(?:void|dynamic|(?!switch\b|if\b|for\b|while\b|catch\b|else\b|do\b|try\b)[A-Za-z_][A-Za-z0-9_<>, \?]*)';
+        p = RegExp(prefix +
+            r'\b' +
+            typePattern +
+            r'\s+' +
+            esc +
+            r'\s*\([\s\S]*?' +
+            suffix);
     }
     return p;
   }

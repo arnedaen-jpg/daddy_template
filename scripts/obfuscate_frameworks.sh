@@ -24,6 +24,7 @@ SEMANTIC_WORDS_FILE="$SCRIPT_DIR/semantic_words.conf"
 # 变异相关路径与配置
 PROFILES_DIR="$SCRIPT_DIR/framework_profiles"
 MANIFESTS_DIR="$SCRIPT_DIR/project_manifests"
+CLOSURE_MANIFESTS_DIR="$SCRIPT_DIR/closure_rename_manifests"
 INJECT_PREFIX="_zt_mutate_"
 
 # 变异参数
@@ -31,10 +32,27 @@ SEED=""
 VERIFY_AFTER=false
 OVERRIDE_CLASSES=0    # 0 = auto
 OVERRIDE_STRINGS=0    # 0 = auto
+SEMANTIC_WORD_MULTIPLIER=5
+REVIEW_NATIVE_CLASS_MULTIPLIER=5
+REVIEW_NATIVE_DEAD_BRANCH_MULTIPLIER=5
+REVIEW_NATIVE_CALLSTACK_DEPTH=5
+REVIEW_NATIVE_MAX_CLASSES_PER_SOURCE=90
+REVIEW_NATIVE_GENERATED_JUNK_MULTIPLIER=1
+REVIEW_NATIVE_MAX_EXTRA_METHODS=16
+REVIEW_NATIVE_MAX_OPS=28
+REVIEW_NATIVE_MAX_INFO_ENTRIES=26
+REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD=10
+REVIEW_MUTATION_DETAIL_INJECT_LIMIT=8
+REVIEW_MUTATION_DETAIL_MODIFIED_LIMIT=12
 MANIFEST_FILE=""
+MANIFEST_FILE_EXPLICIT=false
 MANIFEST_LOADED=false
 MANIFEST_TMPFILE=""
+_REVERSE_MAP_FILE=""
+_FORWARD_MAP_FILE=""
 SKIP_DEP_STRINGS=false
+PUB_DEPS_CACHE_FILE=""
+PUB_DEPS_LAST_ERROR=""
 
 # 注入类名词表（大型，从 semantic_words.conf 加载后合并使用）
 # 小型 fallback 仅在 semantic_words.conf 不存在时使用
@@ -89,6 +107,7 @@ WORDS_LOADED=false
 DRY_RUN=false
 VERBOSE=false
 PUB_CACHE_DIR=""
+PUB_CACHE_GIT_DIR=""
 GENERATE_MAPPING=false
 CURRENT_PROJECT=""
 OBFUSCATE_RATIO=100
@@ -99,6 +118,12 @@ _IN_RUN_ALL=false
 # 报告文件
 REPORT_DIR="$SCRIPT_DIR/reports"
 REPORT_FILE=""
+REPORT_STARTED_AT=""
+REPORT_STARTED_EPOCH=""
+REPORT_COMMAND_LINE=""
+REPORT_COMMAND_NAME=""
+_REPORT_GENERATED=false
+_REPORT_TRAP_ENABLED=false
 
 # 运行时收集的报告数据（全局，跨 phase 累积）
 declare -a _REPORT_RENAME_ENTRIES   # "old_name → new_name"
@@ -113,6 +138,23 @@ declare -a _REPORT_POD_ENTRIES        # "PodName [level]: N .m + M .swift"
 _REPORT_POD_TOTAL=0
 _REPORT_POD_MUTATED=0
 _REPORT_POD_SKIPPED=0
+declare -a _REPORT_PHASE_TIMINGS      # "阶段: N 秒"
+declare -a _REPORT_WARNINGS           # 运行期重要 warning
+
+find_latest_framework_report() {
+    local project="$1"
+    local candidates=()
+    local file=""
+    while IFS= read -r file; do
+        [[ -n "$file" ]] && candidates+=("$file")
+    done < <(find "$REPORT_DIR" -maxdepth 1 -type f \( \
+        -name "obf_${project}_frameworks_*.txt" -o \
+        -name "${project}_*.txt" \
+    \) ! -name "*_dep_strings_*" -print 2>/dev/null)
+
+    [[ ${#candidates[@]} -eq 0 ]] && return 0
+    ls -1t "${candidates[@]}" 2>/dev/null | head -1
+}
 
 # 颜色
 RED='\033[0;31m'
@@ -124,9 +166,59 @@ NC='\033[0m'
 
 log_info()    { echo -e "${BLUE}[INFO]${NC} $1" >&2; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1" >&2; }
-log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1" >&2; }
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1" >&2
+    _REPORT_WARNINGS+=("$1")
+}
 log_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 log_step()    { echo -e "${CYAN}[STEP]${NC} $1" >&2; }
+
+timer_start() {
+    date +%s
+}
+
+record_phase_timing() {
+    local label="$1"
+    local start="$2"
+    local end
+    end=$(date +%s)
+    _REPORT_PHASE_TIMINGS+=("$label: $((end - start)) 秒")
+}
+
+cleanup_pub_deps_cache() {
+    [[ -n "$PUB_DEPS_CACHE_FILE" ]] && rm -f "$PUB_DEPS_CACHE_FILE" 2>/dev/null || true
+}
+
+invalidate_pub_deps_cache() {
+    cleanup_pub_deps_cache
+    PUB_DEPS_CACHE_FILE=""
+}
+
+get_pub_deps_cache_file() {
+    if [[ -n "$PUB_DEPS_CACHE_FILE" && -f "$PUB_DEPS_CACHE_FILE" ]]; then
+        echo "$PUB_DEPS_CACHE_FILE"
+        return 0
+    fi
+
+    local deps_tmp
+    local deps_err
+    deps_tmp=$(mktemp)
+    deps_err=$(mktemp)
+    PUB_DEPS_LAST_ERROR=""
+    if fvm flutter pub deps > "$deps_tmp" 2> "$deps_err"; then
+        PUB_DEPS_CACHE_FILE="$deps_tmp"
+        rm -f "$deps_err" 2>/dev/null || true
+        echo "$PUB_DEPS_CACHE_FILE"
+        return 0
+    fi
+
+    PUB_DEPS_LAST_ERROR=$(tail -20 "$deps_err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//')
+    rm -f "$deps_tmp" 2>/dev/null || true
+    rm -f "$deps_err" 2>/dev/null || true
+    return 1
+}
+
+trap cleanup_pub_deps_cache EXIT
 
 # =============================================
 # 通用工具函数
@@ -154,11 +246,114 @@ detect_current_project() {
 }
 
 # 检查项目是否使用 flutter_base
-# 注: dq 不使用 flutter_base —— 其 fijkplayer 等本地 fork 直接位于 plugins/，
-#     走 generate_mapping 的常规 plugins/ 收集与重命名链路（非 flutter_base Step 4）。
 project_uses_flutter_base() {
     local project="$1"
-    [[ "$project" == "md" || "$project" == "yms" ]]
+    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "txpjb" || "$project" == "xjpjb" ]]
+}
+
+# yms/oio/bili use the same flutter_base family. txpjb/xjpjb also have a
+# flutter_base directory, but it is a different implementation and must not
+# reuse this closure manifest.
+project_uses_flutter_base_closure_manifest() {
+    local project="$1"
+    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" ]]
+}
+
+reject_retired_project() {
+    local project="$1"
+    if [[ "$project" == "md" ]]; then
+        log_error "md 项目已下线，不再支持 Framework / Pod / 依赖字符串混淆"
+        exit 1
+    fi
+}
+
+# Shared deep framework/closure rules are opt-in to avoid changing existing
+# projects that already have stable obfuscation manifests.
+project_uses_shared_deep_obfuscation() {
+    local project="$1"
+    case "$project" in
+        91cg|91porn|91porn2|txpjb|xjpjb)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+project_uses_review_intensive_obfuscation() {
+    local project="$1"
+    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" ]]
+}
+
+native_class_multiplier() {
+    project_uses_review_intensive_obfuscation "$CURRENT_PROJECT" && echo "$REVIEW_NATIVE_CLASS_MULTIPLIER" || echo 1
+}
+
+native_generated_junk_multiplier() {
+    project_uses_review_intensive_obfuscation "$CURRENT_PROJECT" && echo "$REVIEW_NATIVE_GENERATED_JUNK_MULTIPLIER" || echo 1
+}
+
+native_dead_branch_multiplier() {
+    project_uses_review_intensive_obfuscation "$CURRENT_PROJECT" && echo "$REVIEW_NATIVE_DEAD_BRANCH_MULTIPLIER" || echo 1
+}
+
+native_callstack_depth() {
+    project_uses_review_intensive_obfuscation "$CURRENT_PROJECT" && echo "$REVIEW_NATIVE_CALLSTACK_DEPTH" || echo 0
+}
+
+scale_native_count() {
+    local value="$1"
+    local multiplier="$2"
+    local max_value="$3"
+    local scaled=$((value * multiplier))
+    [[ "$max_value" -gt 0 && "$scaled" -gt "$max_value" ]] && scaled="$max_value"
+    echo "$scaled"
+}
+
+native_class_count() {
+    local value="$1"
+    scale_native_count "$value" "$(native_class_multiplier)" "$REVIEW_NATIVE_MAX_CLASSES_PER_SOURCE"
+}
+
+native_generated_junk_count() {
+    local value="$1"
+    local max_value="$2"
+    scale_native_count "$value" "$(native_generated_junk_multiplier)" "$max_value"
+}
+
+native_mutation_jobs() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo 1
+    else
+        echo 4
+    fi
+}
+
+generate_mutation_file_batch() {
+    local plugin_name="$1"
+    local count="$2"
+    local target_dir="$3"
+    local jobs
+    jobs=$(native_mutation_jobs)
+
+    if [[ "$jobs" -le 1 || "$count" -le 1 ]]; then
+        local i
+        for (( i=0; i<count; i++ )); do
+            generate_mutation_file "$plugin_name" "$i" "$target_dir"
+        done
+        return 0
+    fi
+
+    local i running=0 rc=0
+    for (( i=0; i<count; i++ )); do
+        generate_mutation_file "$plugin_name" "$i" "$target_dir" &
+        running=$((running + 1))
+        if [[ "$running" -ge "$jobs" ]]; then
+            wait || rc=$?
+            running=0
+        fi
+    done
+    wait || rc=$?
+    return "$rc"
 }
 
 # 执行结束后修复 flutter_base 的 image_loader.dart（如存在）
@@ -277,7 +472,12 @@ hex_to_int() {
 
 # 检测 pub cache 目录
 detect_pub_cache() {
+    if [[ -z "$PUB_CACHE_GIT_DIR" && -d "$HOME/.pub-cache/git" ]]; then
+        PUB_CACHE_GIT_DIR="$HOME/.pub-cache/git"
+    fi
+
     if [[ -n "$PUB_CACHE_DIR" ]]; then
+        [[ "$VERBOSE" == "true" && -n "$PUB_CACHE_GIT_DIR" ]] && log_info "Pub git cache 目录: $PUB_CACHE_GIT_DIR" || true
         return
     fi
     
@@ -291,6 +491,55 @@ detect_pub_cache() {
     fi
     
     log_info "Pub cache 目录: $PUB_CACHE_DIR"
+    [[ "$VERBOSE" == "true" && -n "$PUB_CACHE_GIT_DIR" ]] && log_info "Pub git cache 目录: $PUB_CACHE_GIT_DIR" || true
+}
+
+expand_semantic_word_pool() {
+    local base=("$@")
+    local target=$(( ${#base[@]} * SEMANTIC_WORD_MULTIPLIER ))
+    local qualifiers=(
+        core native local remote data runtime adaptive dynamic
+        secure async cached shared modular private public
+    )
+
+    {
+        printf '%s\n' "${base[@]}"
+        local q w
+        for q in "${qualifiers[@]}"; do
+            for w in "${base[@]}"; do
+                printf '%s_%s\n' "$q" "$w"
+            done
+        done
+        for w in "${base[@]}"; do
+            for q in "${qualifiers[@]}"; do
+                printf '%s_%s\n' "$w" "$q"
+            done
+        done
+    } | awk -v limit="$target" '
+        /^[A-Za-z][A-Za-z0-9_]*$/ {
+            key = tolower($0)
+            if (seen[key]++) next
+            print $0
+            count++
+            if (count >= limit) exit
+        }
+    '
+}
+
+expand_loaded_semantic_words() {
+    local old_ifs="$IFS"
+    local expanded
+
+    expanded=$(expand_semantic_word_pool "${WORD_PREFIXES[@]}")
+    IFS=$'\n'
+    WORD_PREFIXES=($expanded)
+
+    expanded=$(expand_semantic_word_pool "${WORD_MIDDLES[@]}")
+    WORD_MIDDLES=($expanded)
+
+    expanded=$(expand_semantic_word_pool "${WORD_SUFFIXES[@]}")
+    WORD_SUFFIXES=($expanded)
+    IFS="$old_ifs"
 }
 
 # 从配置文件加载词库
@@ -309,6 +558,7 @@ load_semantic_words() {
     
     if [[ ! -f "$SEMANTIC_WORDS_FILE" ]]; then
         log_warning "词库文件不存在: $SEMANTIC_WORDS_FILE，使用默认词库"
+        expand_loaded_semantic_words
         WORDS_LOADED=true
         return
     fi
@@ -346,6 +596,8 @@ load_semantic_words() {
     [[ ${#file_prefixes[@]} -gt 0 ]] && WORD_PREFIXES=("${file_prefixes[@]}")
     [[ ${#file_middles[@]} -gt 0 ]] && WORD_MIDDLES=("${file_middles[@]}")
     [[ ${#file_suffixes[@]} -gt 0 ]] && WORD_SUFFIXES=("${file_suffixes[@]}")
+
+    expand_loaded_semantic_words
     
     WORDS_LOADED=true
     [[ "$VERBOSE" == "true" ]] && log_info "词库加载完成: ${#WORD_PREFIXES[@]} 前缀, ${#WORD_MIDDLES[@]} 中缀, ${#WORD_SUFFIXES[@]} 后缀" || true
@@ -461,12 +713,179 @@ get_locked_package_version() {
     ' "$lock_file"
 }
 
-# 查找 pub cache 中插件目录（优先使用 pubspec.lock 锁定版本）
+# 从 pubspec.lock 中读取任意来源包的锁定版本。
+# 仅用于闭包包二次 run 时从 renamed path 包反推原始 pub-cache 版本。
+get_locked_any_package_version() {
+    local package_name="$1"
+    local lock_file="$PROJECT_ROOT/pubspec.lock"
+    [[ -f "$lock_file" ]] || return 1
+
+    awk -v pkg="$package_name" '
+        BEGIN { in_pkg=0; version="" }
+        $0 ~ "^  " pkg ":" {
+            in_pkg=1
+            version=""
+            next
+        }
+        in_pkg && $0 ~ "^  [^[:space:]].*:$" {
+            in_pkg=0
+        }
+        in_pkg && $0 ~ "^    version: " {
+            line=$0
+            sub("^    version: \"?", "", line)
+            sub("\"$", "", line)
+            print line
+            exit
+        }
+    ' "$lock_file"
+}
+
+# 从 pubspec.lock 中读取 git 包缓存信息: url|resolved-ref|path
+get_locked_git_package_info() {
+    local package_name="$1"
+    local lock_file="$PROJECT_ROOT/pubspec.lock"
+    [[ -f "$lock_file" ]] || return 1
+
+    awk -v pkg="$package_name" '
+        BEGIN { in_pkg=0; source=""; url=""; ref=""; pkg_path=""; emitted=0 }
+        function strip_value(line) {
+            sub("^[[:space:]]*[A-Za-z-]+:[[:space:]]*", "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            return line
+        }
+        function emit_if_git() {
+            if (!emitted && in_pkg && source=="git" && url!="") {
+                print url "|" ref "|" pkg_path
+                emitted=1
+                exit
+            }
+        }
+        $0 ~ "^  " pkg ":" {
+            in_pkg=1
+            source=""
+            url=""
+            ref=""
+            pkg_path=""
+            next
+        }
+        in_pkg && $0 ~ "^  [^[:space:]].*:$" {
+            emit_if_git()
+            in_pkg=0
+        }
+        in_pkg && $0 ~ "^      url: " {
+            url=strip_value($0)
+        }
+        in_pkg && $0 ~ "^      resolved-ref: " {
+            ref=strip_value($0)
+        }
+        in_pkg && $0 ~ "^      path: " {
+            pkg_path=strip_value($0)
+        }
+        in_pkg && $0 ~ "^    source: " {
+            source=strip_value($0)
+        }
+        END {
+            emit_if_git()
+        }
+    ' "$lock_file"
+}
+
+# 查找 pub cache 中 git 依赖目录（优先 pubspec.lock 的 resolved-ref）
+find_git_cache_plugin_path() {
+    local package_name="$1"
+    [[ -n "$PUB_CACHE_GIT_DIR" && -d "$PUB_CACHE_GIT_DIR" ]] || return 0
+
+    local lock_info=""
+    lock_info=$(get_locked_git_package_info "$package_name" || true)
+    if [[ -n "$lock_info" ]]; then
+        local git_url resolved_ref package_path
+        IFS='|' read -r git_url resolved_ref package_path <<< "$lock_info"
+        package_path="${package_path:-.}"
+
+        local repo_name
+        repo_name="$(basename "$git_url")"
+        repo_name="${repo_name%.git}"
+
+        if [[ -n "$repo_name" && -n "$resolved_ref" ]]; then
+            local repo_cache="$PUB_CACHE_GIT_DIR/${repo_name}-${resolved_ref}"
+            local candidate="$repo_cache"
+            if [[ -n "$package_path" && "$package_path" != "." ]]; then
+                candidate="$repo_cache/$package_path"
+            fi
+            if [[ -d "$candidate" ]]; then
+                [[ "$VERBOSE" == "true" ]] && log_info "  使用 git lock 缓存: $package_name ($repo_name@$resolved_ref)" || true
+                echo "$candidate"
+                return 0
+            fi
+            [[ "$VERBOSE" == "true" ]] && log_warning "  git lock 缓存目录不存在，回退扫描: $package_name ($repo_name@$resolved_ref)" || true
+        fi
+    fi
+
+    local found=""
+    found=$(find "$PUB_CACHE_GIT_DIR" -maxdepth 4 -type f -name pubspec.yaml 2>/dev/null | while IFS= read -r pubspec; do
+        if grep -qE "^name:[[:space:]]*${package_name}([[:space:]]*#.*)?$" "$pubspec"; then
+            dirname "$pubspec"
+            break
+        fi
+    done)
+    [[ -n "$found" ]] && echo "$found"
+    return 0
+}
+
+find_hosted_cache_package_path() {
+    local package_name="$1"
+    local preferred_version="${2:-}"
+    local locked_version="${3:-}"
+    local hosted_root="$HOME/.pub-cache/hosted"
+    [[ -d "$hosted_root" ]] || return 0
+
+    local version candidate hosted_dir latest_path
+    for version in "$preferred_version" "$locked_version"; do
+        [[ -z "$version" ]] && continue
+        for hosted_dir in "$hosted_root"/*; do
+            [[ -d "$hosted_dir" ]] || continue
+            candidate="$hosted_dir/${package_name}-${version}"
+            if [[ -d "$candidate" ]]; then
+                [[ "$VERBOSE" == "true" ]] && log_info "  使用 hosted cache: $package_name ($version, $(basename "$hosted_dir"))" || true
+                echo "$candidate"
+                return 0
+            fi
+        done
+    done
+
+    if [[ -n "$preferred_version" || -n "$locked_version" ]]; then
+        return 0
+    fi
+
+    latest_path=$(find "$hosted_root" -mindepth 2 -maxdepth 2 -type d -name "${package_name}-*" 2>/dev/null | sort -V | tail -1)
+    [[ -n "$latest_path" ]] && echo "$latest_path"
+    return 0
+}
+
+# 查找 pub cache 中插件目录（优先 manifest 指定版本，其次 pubspec.lock 锁定版本）
 find_pub_cache_plugin_path() {
     local package_name="$1"
+    local preferred_version="${2:-}"
     local locked_version
     local locked_path
     local latest_path
+    local hosted_path
+
+    if [[ -n "$preferred_version" ]]; then
+        local preferred_path="$PUB_CACHE_DIR/${package_name}-${preferred_version}"
+        if [[ -d "$preferred_path" ]]; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  使用 manifest 版本: $package_name ($preferred_version)" || true
+            echo "$preferred_path"
+            return 0
+        fi
+        hosted_path=$(find_hosted_cache_package_path "$package_name" "$preferred_version" "")
+        if [[ -n "$hosted_path" ]]; then
+            echo "$hosted_path"
+            return 0
+        fi
+        [[ "$VERBOSE" == "true" ]] && log_warning "  manifest 版本目录不存在，回退 lock/latest: $package_name ($preferred_version)" || true
+    fi
 
     locked_version=$(get_locked_package_version "$package_name")
     if [[ -n "$locked_version" ]]; then
@@ -476,12 +895,85 @@ find_pub_cache_plugin_path() {
             echo "$locked_path"
             return 0
         fi
+        hosted_path=$(find_hosted_cache_package_path "$package_name" "" "$locked_version")
+        if [[ -n "$hosted_path" ]]; then
+            echo "$hosted_path"
+            return 0
+        fi
         [[ "$VERBOSE" == "true" ]] && log_warning "  lock 版本目录不存在，回退最新版本: $package_name ($locked_version)" || true
     fi
 
     latest_path=$(find "$PUB_CACHE_DIR" -maxdepth 1 -type d -name "${package_name}-*" 2>/dev/null | sort -V | tail -1)
     [[ -n "$latest_path" ]] && echo "$latest_path"
+    if [[ -z "$latest_path" ]]; then
+        hosted_path=$(find_hosted_cache_package_path "$package_name")
+        [[ -n "$hosted_path" ]] && echo "$hosted_path" && return 0
+        find_git_cache_plugin_path "$package_name"
+    fi
     return 0
+}
+
+get_project_manifest_file() {
+    local project="$CURRENT_PROJECT"
+    [[ -z "$project" ]] && project=$(read_ab_config "project")
+    [[ -n "$project" && -f "$MANIFESTS_DIR/${project}.conf" ]] && echo "$MANIFESTS_DIR/${project}.conf"
+}
+
+get_manifest_files() {
+    if [[ "$MANIFEST_FILE_EXPLICIT" == "true" ]]; then
+        [[ -n "$MANIFEST_FILE" && -f "$MANIFEST_FILE" ]] && echo "$MANIFEST_FILE"
+        return 0
+    fi
+
+    local project="$CURRENT_PROJECT"
+    [[ -z "$project" ]] && project=$(read_ab_config "project")
+
+    local shared_file="$MANIFESTS_DIR/_shared.conf"
+    if project_uses_shared_deep_obfuscation "$project" && [[ -f "$shared_file" ]]; then
+        echo "$shared_file"
+    fi
+
+    get_project_manifest_file
+}
+
+manifest_config_lines() {
+    local files=()
+    local file
+    while IFS= read -r file; do
+        [[ -f "$file" ]] && files+=("$file")
+    done < <(get_manifest_files)
+    [[ ${#files[@]} -gt 0 ]] || return 0
+
+    awk -F':' '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        $1 == "remote" || $1 == "local" || $1 == "pod" {
+            key = $1 ":" $2
+            if (!(key in seen)) {
+                order[++count] = key
+                seen[key] = 1
+            }
+            line[key] = $0
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                print line[order[i]]
+            }
+        }
+    ' "${files[@]}"
+}
+
+# 从项目 manifest 中读取声明版本，避免 pubspec.lock 不完整时回退到 pub cache 最新版。
+get_manifest_package_version() {
+    local package_name="$1"
+
+    manifest_config_lines | awk -F':' -v pkg="$package_name" '
+        $2 == pkg && $3 != "" {
+            version = $3
+        }
+        END {
+            if (version != "") print version
+        }
+    '
 }
 
 # 判断包的 pubspec 是否声明了 Apple 平台插件
@@ -652,7 +1144,7 @@ get_secondary_dependencies() {
 
 # 从 YAML 行中提取 path: 的值（兼容 macOS BSD sed）
 extract_path_value() {
-    echo "$1" | sed 's/.*path://' | tr -d "'" | tr -d '"' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+    echo "$1" | sed 's/.*path://' | sed 's/[[:space:]]*#.*$//' | tr -d "'" | tr -d '"' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
 }
 
 # 从 pubspec.yaml 获取本地 path 依赖的绝对路径
@@ -724,12 +1216,69 @@ detect_ios_platform_packages() {
 
     local path_pkgs=$(get_path_provided_packages)
 
-    local all_platform=$(fvm flutter pub deps 2>/dev/null | \
-        grep -E "├── |└── " | \
+    local plugins_file="$PROJECT_ROOT/.flutter-plugins-dependencies"
+    if [[ -f "$plugins_file" ]] && command -v python3 >/dev/null 2>&1; then
+        local plugin_entries=""
+        plugin_entries=$(python3 - "$plugins_file" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+for plugin in data.get("plugins", {}).get("ios", []):
+    name = plugin.get("name") or ""
+    path = plugin.get("path") or ""
+    if not name:
+        continue
+    version = ""
+    if path:
+        base = os.path.basename(os.path.normpath(path))
+        prefix = f"{name}-"
+        if base.startswith(prefix):
+            version = base[len(prefix):]
+    print(f"{name}|{version}|{path}")
+PY
+)
+
+        if [[ -n "$plugin_entries" ]]; then
+            while IFS='|' read -r pkg_name pkg_version plugin_path; do
+                [[ -z "$pkg_name" ]] && continue
+                if echo "$path_pkgs" | grep -qx "$pkg_name" 2>/dev/null; then
+                    [[ "$VERBOSE" == "true" ]] && log_info "  跳过 $pkg_name (已由本地 path 插件提供)" || true
+                    continue
+                fi
+
+                if [[ -z "$plugin_path" || ! -d "$plugin_path" ]]; then
+                    plugin_path=$(find_local_plugin_path "$pkg_name")
+                    [[ -z "$plugin_path" ]] && plugin_path=$(find_pub_cache_plugin_path "$pkg_name" "$(get_manifest_package_version "$pkg_name")")
+                fi
+                [[ -z "$plugin_path" ]] && continue
+
+                is_apple_native_plugin_dir "$plugin_path" || continue
+
+                if [[ -z "$pkg_version" || "$pkg_version" == "..." ]]; then
+                    pkg_version=$(get_plugin_version "$plugin_path")
+                fi
+                echo "$pkg_name $pkg_version"
+            done <<< "$plugin_entries"
+            return 0
+        fi
+    fi
+
+    local deps_file=""
+    if ! deps_file=$(get_pub_deps_cache_file); then
+        log_warning "无法读取 flutter pub deps，跳过自动检测 iOS 平台包: ${PUB_DEPS_LAST_ERROR:-未知原因}"
+        return 0
+    fi
+
+    local all_platform
+    all_platform=$(grep -E "├── |└── " "$deps_file" | \
         sed 's/.*[├└]── //' | \
         sed 's/\.\.\.$//' | \
         grep -v "^$" | \
-        sort -u)
+        sort -u || true)
 
     while IFS= read -r pkg_line; do
         [[ -z "$pkg_line" ]] && continue
@@ -742,7 +1291,7 @@ detect_ios_platform_packages() {
 
         local plugin_path=""
         plugin_path=$(find_local_plugin_path "$pkg_name")
-        [[ -z "$plugin_path" ]] && plugin_path=$(find_pub_cache_plugin_path "$pkg_name")
+        [[ -z "$plugin_path" ]] && plugin_path=$(find_pub_cache_plugin_path "$pkg_name" "$(get_manifest_package_version "$pkg_name")")
         [[ -z "$plugin_path" ]] && continue
 
         is_apple_native_plugin_dir "$plugin_path" || continue
@@ -757,12 +1306,15 @@ detect_ios_platform_packages() {
 # 获取传递依赖的版本
 get_transitive_package_version() {
     local package_name="$1"
-    
-    local version=$(fvm flutter pub deps 2>/dev/null | \
-        grep -E "[├└]── ${package_name} [0-9]" | \
+
+    local deps_file=""
+    deps_file=$(get_pub_deps_cache_file) || true
+    [[ -f "$deps_file" ]] || return 0
+
+    local version=$(grep -E "[├└]── ${package_name} [0-9]" "$deps_file" | \
         head -1 | \
         sed "s/.*${package_name} //" | \
-        awk '{print $1}')
+        awk '{print $1}' || true)
     
     echo "$version"
 }
@@ -776,6 +1328,15 @@ add_platform_package_to_pubspec() {
     if grep -q "^  ${package_name}:" "$pubspec" 2>/dev/null; then
         [[ "$VERBOSE" == "true" ]] && log_info "  $package_name 已存在于 pubspec.yaml" || true
         return 0
+    fi
+
+    if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT"; then
+        local closure_name
+        closure_name=$(get_closure_renamed_name "$package_name")
+        if [[ "$closure_name" != "$package_name" ]] && grep -q "^  ${closure_name}:" "$pubspec" 2>/dev/null; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  $package_name 已由闭包目标 $closure_name 覆盖，跳过添加" || true
+            return 0
+        fi
     fi
     
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -831,6 +1392,164 @@ select_by_ratio() {
 }
 
 # =============================================
+# Phase 1.2: 闭包重命名配置
+# =============================================
+
+get_closure_manifest_file() {
+    local project="$CURRENT_PROJECT"
+    [[ -z "$project" ]] && project=$(read_ab_config "project")
+    [[ -n "$project" ]] || return 0
+
+    local file="$CLOSURE_MANIFESTS_DIR/${project}.conf"
+    [[ -f "$file" ]] && echo "$file"
+    return 0
+}
+
+get_closure_manifest_files() {
+    local project="$CURRENT_PROJECT"
+    [[ -z "$project" ]] && project=$(read_ab_config "project")
+
+    if [[ -n "$project" && -f "$CLOSURE_MANIFESTS_DIR/${project}.conf" ]]; then
+        echo "$CLOSURE_MANIFESTS_DIR/${project}.conf"
+    fi
+
+    if project_uses_shared_deep_obfuscation "$project" && [[ -f "$CLOSURE_MANIFESTS_DIR/_shared.conf" ]]; then
+        echo "$CLOSURE_MANIFESTS_DIR/_shared.conf"
+    fi
+
+    if [[ -n "$project" ]] && project_uses_flutter_base_closure_manifest "$project" && [[ -f "$CLOSURE_MANIFESTS_DIR/flutter_base.conf" ]]; then
+        echo "$CLOSURE_MANIFESTS_DIR/flutter_base.conf"
+    fi
+
+    return 0
+}
+
+load_closure_rename_pairs() {
+    local files=()
+    local file
+    while IFS= read -r file; do
+        [[ -f "$file" ]] && files+=("$file")
+    done < <(get_closure_manifest_files)
+    [[ ${#files[@]} -gt 0 ]] || return 0
+
+    awk -F':' '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        $1 ~ /^phase[0-9]+$/ && $2 ~ /^[a-z_][a-z_0-9]*$/ && $3 ~ /^[a-z_][a-z_0-9]*$/ {
+            if (!seen[$2]++) print $2 "|" $3
+        }
+    ' "${files[@]}"
+}
+
+load_closure_support_packages() {
+    local files=()
+    local file
+    while IFS= read -r file; do
+        [[ -f "$file" ]] && files+=("$file")
+    done < <(get_closure_manifest_files)
+    [[ ${#files[@]} -gt 0 ]] || return 0
+
+    awk -F':' '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        $1 == "support" && $2 ~ /^[a-z_][a-z_0-9]*$/ {
+            if (!seen[$2]++) print $2
+        }
+    ' "${files[@]}"
+}
+
+closure_package_is_referenced() {
+    local package_name="$1"
+    [[ -n "$package_name" ]] || return 1
+
+    local pattern="(^|[^A-Za-z0-9_])${package_name}([^A-Za-z0-9_]|$)"
+    local file
+
+    for file in "$PROJECT_ROOT/pubspec.yaml" "$PROJECT_ROOT/pubspec.lock" "$FLUTTER_BASE_DIR/pubspec.yaml" "$FLUTTER_BASE_DIR/pubspec.lock"; do
+        [[ -f "$file" ]] || continue
+        if grep -Eq "^[[:space:]]{2}${package_name}:|package:${package_name}/|default_package:[[:space:]]*${package_name}\\b|implements:[[:space:]]*${package_name}\\b" "$file" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    if [[ -d "$PLUGINS_DIR" ]]; then
+        while IFS= read -r file; do
+            if grep -Eq "^[[:space:]]{2}${package_name}:|package:${package_name}/|default_package:[[:space:]]*${package_name}\\b|implements:[[:space:]]*${package_name}\\b" "$file" 2>/dev/null; then
+                return 0
+            fi
+        done < <(find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null)
+    fi
+
+    if [[ -f "$PROJECT_ROOT/pubspec.lock" ]] && grep -Eq "$pattern" "$PROJECT_ROOT/pubspec.lock" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+closure_pair_is_active() {
+    local old_name="$1"
+    local new_name="$2"
+
+    closure_package_is_referenced "$old_name" && return 0
+    closure_package_is_referenced "$new_name" && return 0
+    return 1
+}
+
+package_in_current_dependency_graph() {
+    local package_name="$1"
+    [[ -n "$package_name" ]] || return 1
+
+    if [[ -f "$PROJECT_ROOT/pubspec.lock" ]]; then
+        awk -v pkg="$package_name" '
+            $0 ~ "^  " pkg ":" { found=1; exit }
+            END { exit(found ? 0 : 1) }
+        ' "$PROJECT_ROOT/pubspec.lock" && return 0
+    fi
+
+    if [[ -f "$PROJECT_ROOT/.dart_tool/package_config.json" ]]; then
+        grep -q "\"name\"[[:space:]]*:[[:space:]]*\"${package_name}\"" "$PROJECT_ROOT/.dart_tool/package_config.json" 2>/dev/null && return 0
+    fi
+
+    return 1
+}
+
+write_existing_closure_rename_pairs() {
+    local output_file="$1"
+    : > "$output_file"
+
+    load_closure_rename_pairs | while IFS='|' read -r old_name new_name || [[ -n "$old_name" ]]; do
+        [[ -z "$old_name" || -z "$new_name" ]] && continue
+        closure_pair_is_active "$old_name" "$new_name" || continue
+        [[ -d "$PLUGINS_DIR/$new_name" ]] || continue
+        echo "$old_name|$new_name" >> "$output_file"
+    done
+}
+
+get_closure_renamed_name() {
+    local original_name="$1"
+    local renamed
+    renamed=$(load_closure_rename_pairs | awk -F'|' -v old="$original_name" '$1 == old { print $2; exit }')
+    [[ -n "$renamed" ]] && echo "$renamed" || echo "$original_name"
+}
+
+is_closure_rename_source() {
+    local original_name="$1"
+    [[ "$(get_closure_renamed_name "$original_name")" != "$original_name" ]]
+}
+
+is_closure_rename_target() {
+    local package_name="$1"
+    load_closure_rename_pairs | awk -F'|' -v current="$package_name" '$2 == current { found=1; exit } END { exit(found ? 0 : 1) }'
+}
+
+is_pub_cache_path() {
+    local source_path="$1"
+    [[ -n "$source_path" ]] || return 1
+    [[ -n "$PUB_CACHE_HOSTED_DIR" && "$source_path" == "$PUB_CACHE_HOSTED_DIR/"* ]] && return 0
+    [[ -n "$PUB_CACHE_GIT_DIR" && "$source_path" == "$PUB_CACHE_GIT_DIR/"* ]] && return 0
+    return 1
+}
+
+# =============================================
 # Phase 1: 重命名函数
 # =============================================
 
@@ -859,7 +1578,7 @@ list_plugins() {
         if [[ -n "$plugin_path" ]]; then
             source_type="local-path"
         else
-            plugin_path=$(find_pub_cache_plugin_path "$dep")
+            plugin_path=$(find_pub_cache_plugin_path "$dep" "$(get_manifest_package_version "$dep")")
             source_type="pub-cache"
         fi
         
@@ -943,7 +1662,9 @@ generate_mapping() {
     # Step 1: 检测 iOS 平台包并添加到 pubspec.yaml
     if [[ "$AUTO_DETECT_PLATFORM" == "true" ]]; then
         log_step "检测传递依赖中的 iOS 平台包..."
-        local platform_packages=$(detect_ios_platform_packages)
+        get_pub_deps_cache_file >/dev/null || true
+        local platform_packages
+        platform_packages=$(detect_ios_platform_packages)
         local platform_added=0
         
         while IFS= read -r pkg_line; do
@@ -961,6 +1682,7 @@ generate_mapping() {
             log_success "已添加 $platform_added 个 iOS 平台包到 pubspec.yaml"
             log_info "运行 fvm flutter pub get 更新依赖..."
             fvm flutter pub get 2>/dev/null || true
+            invalidate_pub_deps_cache
         fi
     fi
     
@@ -987,10 +1709,12 @@ HEADER
     local skipped_transitive=0
     local skipped_plugins_info=""
     
-    local cached_deps_file=$(mktemp)
-    fvm flutter pub deps > "$cached_deps_file" 2>/dev/null
+    local cached_deps_file=""
+    if ! cached_deps_file=$(get_pub_deps_cache_file); then
+        log_warning "无法读取 flutter pub deps，跳过重命名冲突风险检测: ${PUB_DEPS_LAST_ERROR:-未知原因}"
+    fi
     
-    # Step 2: 收集B面可混淆的插件（排除有传递依赖冲突的）
+    # Step 2: 收集B面可混淆的插件（排除有重命名冲突风险的重复依赖节点）
     log_step "分析B面可混淆的插件..."
     
     local deps=$(get_secondary_dependencies)
@@ -1001,24 +1725,37 @@ HEADER
     for dep in $deps; do
         # 查找插件路径：优先本地 path 依赖，否则 pub cache
         local plugin_path=$(find_local_plugin_path "$dep")
-        [[ -z "$plugin_path" ]] && plugin_path=$(find_pub_cache_plugin_path "$dep")
+        [[ -z "$plugin_path" ]] && plugin_path=$(find_pub_cache_plugin_path "$dep" "$(get_manifest_package_version "$dep")")
         
         if [[ -n "$plugin_path" ]] && is_apple_native_plugin_dir "$plugin_path"; then
-            # 检查传递依赖冲突（在生成阶段就过滤）
-            if check_transitive_dependency "$dep"; then
-                local dep_paths=$(grep -B100 "${dep}\.\.\." "$cached_deps_file" 2>/dev/null | \
-                    grep -E "^├── |^└── " | \
-                    tail -1 | \
-                    awk '{print $2}' | \
-                    grep -v "^${dep}$")
-                
+            if is_closure_rename_source "$dep" || is_closure_rename_target "$dep"; then
+                local closure_new
+                closure_new=$(get_closure_renamed_name "$dep")
+                [[ "$closure_new" == "$dep" ]] && closure_new="已闭包重命名"
+                [[ "$VERBOSE" == "true" ]] && log_info "  $dep 交给闭包重命名处理 -> $closure_new" || true
+                continue
+            fi
+
+            if [[ "$(get_plugin_level "$dep")" == "disabled" ]]; then
+                [[ "$VERBOSE" == "true" ]] && log_info "  跳过 $dep (manifest disabled)" || true
+                continue
+            fi
+
+            # 检查重复依赖节点（在生成阶段就过滤），避免父包仍按原名引用导致冲突。
+            if check_transitive_dependency_in_file "$cached_deps_file" "$dep"; then
+                local dep_paths
+                dep_paths=$(get_transitive_dependency_paths_from_file "$cached_deps_file" "$dep")
+
                 skipped_plugins_info+="# $dep"$'\n'
                 if [[ -n "$dep_paths" ]]; then
-                    skipped_plugins_info+="#   被依赖于: $dep_paths"$'\n'
+                    while IFS= read -r dep_parent; do
+                        [[ -z "$dep_parent" ]] && continue
+                        skipped_plugins_info+="#   被依赖于: $dep_parent"$'\n'
+                    done <<< "$dep_paths"
                 else
-                    skipped_plugins_info+="#   被依赖于: (多个包或直接依赖)"$'\n'
+                    skipped_plugins_info+="#   被依赖于: (依赖树中重复出现，未解析到父包)"$'\n'
                 fi
-                [[ "$VERBOSE" == "true" ]] && log_info "  跳过 $dep (被 ${dep_paths:-未知} 传递依赖)" || true
+                [[ "$VERBOSE" == "true" ]] && log_info "  跳过 $dep (被 ${dep_paths:-未知} 间接引用)" || true
                 skipped_transitive=$((skipped_transitive + 1))
                 continue
             fi
@@ -1032,7 +1769,7 @@ HEADER
     local total_selected=$(echo "$selected_plugins" | grep -v "^$" | wc -l | tr -d ' ')
     
     if [[ $skipped_transitive -gt 0 ]]; then
-        log_info "跳过 $skipped_transitive 个有传递依赖冲突的插件"
+        log_info "跳过 $skipped_transitive 个有重命名冲突风险的插件"
     fi
     log_info "可混淆插件: $total_eligible 个，选择: $total_selected 个 (${OBFUSCATE_RATIO}%)"
     
@@ -1080,12 +1817,12 @@ HEADER
     if [[ -n "$skipped_plugins_info" ]]; then
         echo "" >> "$output_file"
         echo "# =============================================" >> "$output_file"
-        echo "# 跳过的插件 (有传递依赖冲突，重命名会导致构建失败)" >> "$output_file"
+        echo "# 跳过的插件 (重命名冲突风险，父包仍按原名引用)" >> "$output_file"
         echo "# =============================================" >> "$output_file"
         echo "# " >> "$output_file"
-        echo "# 这些插件被其他包作为传递依赖引入，如果重命名会导致:" >> "$output_file"
-        echo "# 1. 同一个类有两个不同版本 (原版本 + 重命名版本)" >> "$output_file"
-        echo "# 2. 类型冲突导致编译失败" >> "$output_file"
+        echo "# 这些插件在依赖树中重复出现（常见于平台实现包或 flutter_base 子依赖），如果直接重命名会导致:" >> "$output_file"
+        echo "# 1. 父包仍按原包名引用平台实现或子包" >> "$output_file"
+        echo "# 2. 依赖解析/类型引用/Pod 集成冲突" >> "$output_file"
         echo "# " >> "$output_file"
         echo "# 优化建议:" >> "$output_file"
         echo "# - 如果父包可以被替换，考虑移除父包依赖" >> "$output_file"
@@ -1093,8 +1830,6 @@ HEADER
         echo "# " >> "$output_file"
         echo "$skipped_plugins_info" >> "$output_file"
     fi
-    
-    rm -f "$cached_deps_file" 2>/dev/null || true
     
     log_success "映射配置已生成: $output_file"
     echo ""
@@ -1104,7 +1839,7 @@ HEADER
         echo "  flutter_base: $base_count 个"
     fi
     if [[ $skipped_transitive -gt 0 ]]; then
-        echo "  跳过 (传递依赖冲突): $skipped_transitive 个"
+        echo "  跳过 (重命名冲突风险): $skipped_transitive 个"
     fi
     echo "  总计可混淆: $((pub_count + base_count)) 个"
     if [[ "$_IN_RUN_ALL" != "true" ]]; then
@@ -1161,7 +1896,7 @@ restore_pigeon_host_api_names() {
             should_restore=true
             break
         fi
-    done < <(find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.kt" -o -name "*.java" \) 2>/dev/null)
+    done < <(find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.mm" -o -name "*.kt" -o -name "*.java" \) 2>/dev/null)
 
     [[ "$should_restore" == "true" ]] || return 0
 
@@ -1169,39 +1904,433 @@ restore_pigeon_host_api_names() {
         sed -i '' "s|${new_class}FlutterApi|${old_class}FlutterApi|g" "$file" 2>/dev/null || true
         sed -i '' "s|${new_class}HostApi|${old_class}HostApi|g" "$file" 2>/dev/null || true
         sed -i '' "s|${new_class}Api|${old_class}Api|g" "$file" 2>/dev/null || true
-    done < <(find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.kt" -o -name "*.java" \) 2>/dev/null)
+    done < <(find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.mm" -o -name "*.kt" -o -name "*.java" \) 2>/dev/null)
 
     [[ "$VERBOSE" == "true" ]] && log_info "  恢复 Pigeon HostApi 名称: ${new_class}*Api -> ${old_class}*Api" || true
 }
 
-# 当旧包名转驼峰与 Apple 系统模块名完全相同时，全局 class 替换会误改 `import` / `@import`。
-# 例: app_tracking_transparency → AppTrackingTransparency（与 iOS 系统 AppTrackingTransparency 框架重名）
-restore_apple_system_module_imports_after_plugin_rename() {
+restore_apple_avfoundation_audio_session_symbols() {
     local target_path="$1"
-    local old_name="$2"
+    local old_class="$2"
     local new_class="$3"
 
-    local system_module=""
-    case "$old_name" in
-        app_tracking_transparency)
-            system_module="AppTrackingTransparency"
-            ;;
-    esac
-    [[ -z "$system_module" ]] && return 0
+    [[ -d "$target_path" ]] || return 0
+    [[ "$old_class" == "AudioSession" ]] || return 0
+    [[ "$old_class" != "$new_class" ]] || return 0
 
-    while IFS= read -r -d '' f; do
-        sed -i '' -E "s/^import[[:space:]]+${new_class}[[:space:]]*$/import ${system_module}/" "$f" 2>/dev/null || true
-    done < <(find "$target_path" -type f -name "*.swift" -print0 2>/dev/null)
+    local restored=0
+    while IFS= read -r file; do
+        if grep -q "AV${new_class}" "$file" 2>/dev/null; then
+            sed -i '' "s|AV${new_class}|AV${old_class}|g" "$file" 2>/dev/null || true
+            restored=$((restored + 1))
+        fi
+    done < <(find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.mm" \) 2>/dev/null)
 
-    while IFS= read -r -d '' f; do
-        sed -i '' -E "s/@import[[:space:]]+${new_class}[[:space:]]*;/@import ${system_module};/" "$f" 2>/dev/null || true
-    done < <(find "$target_path" -type f \( -name "*.m" -o -name "*.mm" \) -print0 2>/dev/null)
+    [[ "$VERBOSE" == "true" && $restored -gt 0 ]] && log_info "  恢复 AVFoundation AudioSession 系统符号: AV${new_class}* -> AV${old_class}* ($restored 文件)" || true
+    return 0
 }
 
-# fijkplayer 重命名后修复：保留 Dart/ObjC 运行时 channel 名 befovy.com/fijkplayer/*
-# rename_plugin 会把 ObjC 源里的 ${old_name}/ 改成 ${new_name}/，导致
-# MethodChannel/EventChannel 名变成 befovy.com/${new_name}/，与 Dart 端 befovy.com/fijkplayer/ 不匹配，
-# 播放器随之失效。这里把被改写的 channel 名还原回 befovy.com/fijkplayer/*。
+# 裁掉第三方包中的非运行目录，避免根工程 flutter analyze 扫到插件自带
+# test/mocks/example/pigeons 后报与 App 编译无关的错误。
+prune_non_runtime_package_files() {
+    local package_dir="$1"
+    [[ -d "$package_dir" ]] || return 0
+
+    local removed=0
+    local dir_name
+    for dir_name in .git .dart_tool build example example_* examples example2 integration_test test test_driver pigeons tool tools scripts; do
+        if [[ -e "$package_dir/$dir_name" ]]; then
+            rm -rf "$package_dir/$dir_name" 2>/dev/null || true
+            removed=$((removed + 1))
+        fi
+    done
+
+    [[ "$VERBOSE" == "true" && $removed -gt 0 ]] && log_info "  清理非运行目录: $(basename "$package_dir") ($removed 个)" || true
+}
+
+prune_generated_dependency_non_runtime_files() {
+    [[ -d "$PLUGINS_DIR" ]] && while IFS= read -r pubspec; do
+        prune_non_runtime_package_files "$(dirname "$pubspec")"
+    done < <(find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null)
+
+    if project_uses_flutter_base "$CURRENT_PROJECT" && [[ -d "$FLUTTER_BASE_DIR" ]]; then
+        while IFS= read -r pubspec; do
+            prune_non_runtime_package_files "$(dirname "$pubspec")"
+        done < <(find "$FLUTTER_BASE_DIR" -mindepth 1 -maxdepth 3 -name pubspec.yaml -type f 2>/dev/null)
+    fi
+}
+
+patch_legacy_qr_code_scanner_web_stub() {
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    local patched=0
+    local pubspec package_dir web_file
+    while IFS= read -r pubspec; do
+        package_dir=$(dirname "$pubspec")
+        web_file="$package_dir/lib/src/web/flutter_qr_web.dart"
+        [[ -f "$web_file" ]] || continue
+
+        if ! grep -q "qr_code_scanner" "$pubspec" 2>/dev/null && \
+           ! grep -q "promiseToFuture(getUserMedia" "$web_file" 2>/dev/null; then
+            continue
+        fi
+
+        cat > "$web_file" <<'EOF'
+import 'package:flutter/material.dart';
+
+import '../types/camera.dart';
+
+Widget createWebQrView({
+  onPlatformViewCreated,
+  onPermissionSet,
+  CameraFacing? cameraFacing,
+}) =>
+    const SizedBox();
+EOF
+        patched=$((patched + 1))
+    done < <(find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null)
+
+    if [[ $patched -gt 0 ]]; then
+        log_info "已替换 legacy qr_code_scanner web 实现为 stub: $patched 个插件"
+    fi
+}
+
+ensure_project_dependency_override_path() {
+    local package_name="$1"
+    local package_path="$2"
+    local pubspec="$PROJECT_ROOT/pubspec.yaml"
+
+    [[ -f "$pubspec" ]] || return 0
+
+    python3 - "$pubspec" "$package_name" "$package_path" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+pubspec = Path(sys.argv[1])
+name = sys.argv[2]
+path_value = sys.argv[3]
+text = pubspec.read_text()
+lines = text.splitlines()
+
+start = None
+end = len(lines)
+for idx, line in enumerate(lines):
+    if line == "dependency_overrides:":
+        start = idx
+        continue
+    if start is not None and idx > start and line and not line.startswith(" "):
+        end = idx
+        break
+
+block = [f"  {name}:", f"    path: {path_value}"]
+
+if start is None:
+    insert_at = next((idx for idx, line in enumerate(lines) if line == "dev_dependencies:"), len(lines))
+    lines[insert_at:insert_at] = ["dependency_overrides:", *block]
+else:
+    dep_re = re.compile(rf"^  {re.escape(name)}:\s*(.*)$")
+    idx = start + 1
+    replaced = False
+    while idx < end:
+        if dep_re.match(lines[idx]):
+            block_end = idx + 1
+            while block_end < end:
+                current = lines[block_end]
+                if current and not current.startswith("    ") and current.startswith("  "):
+                    break
+                if current and not current.startswith(" "):
+                    break
+                block_end += 1
+            lines[idx:block_end] = block
+            replaced = True
+            break
+        idx += 1
+    if not replaced:
+        lines[end:end] = block
+
+updated = "\n".join(lines) + "\n"
+if updated != text:
+    pubspec.write_text(updated)
+PY
+}
+
+dedupe_pubspec_dependency_overrides() {
+    local pubspec="$PROJECT_ROOT/pubspec.yaml"
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -f "$pubspec" ]] || return 0
+
+    python3 - "$pubspec" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+pubspec = Path(sys.argv[1])
+text = pubspec.read_text()
+lines = text.splitlines()
+
+start = None
+end = len(lines)
+for idx, line in enumerate(lines):
+    if line == "dependency_overrides:":
+        start = idx
+        continue
+    if start is not None and idx > start and line and not line.startswith(" "):
+        end = idx
+        break
+
+if start is None:
+    sys.exit(0)
+
+section = lines[start:end]
+dep_re = re.compile(r"^  ([A-Za-z_][A-Za-z0-9_]*):")
+blocks = []
+i = 1
+while i < len(section):
+    match = dep_re.match(section[i])
+    if not match:
+        blocks.append((None, [section[i]]))
+        i += 1
+        continue
+
+    name = match.group(1)
+    block_end = i + 1
+    while block_end < len(section):
+        current = section[block_end]
+        if dep_re.match(current):
+            break
+        block_end += 1
+    blocks.append((name, section[i:block_end]))
+    i = block_end
+
+last_index = {}
+for idx, (name, _block) in enumerate(blocks):
+    if name is not None:
+        last_index[name] = idx
+
+deduped = [section[0]]
+changed = False
+for idx, (name, block) in enumerate(blocks):
+    if name is not None and last_index.get(name) != idx:
+        changed = True
+        continue
+    deduped.extend(block)
+
+if changed:
+    updated = lines[:start] + deduped + lines[end:]
+    pubspec.write_text("\n".join(updated) + "\n")
+PY
+}
+
+rewrite_package_pubspec_dependency_path() {
+    local pubspec="$1"
+    local old_name="$2"
+    local new_name="$3"
+    local rel_path="$4"
+
+    [[ -f "$pubspec" ]] || return 0
+
+    python3 - "$pubspec" "$old_name" "$new_name" "$rel_path" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+pubspec = Path(sys.argv[1])
+old_name = sys.argv[2]
+new_name = sys.argv[3]
+rel_path = sys.argv[4]
+text = pubspec.read_text()
+lines = text.splitlines()
+sections = {"dependencies", "dev_dependencies", "dependency_overrides"}
+
+current_section = None
+output = []
+i = 0
+changed = False
+inserted = False
+
+top_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):\s*$")
+dep_re = re.compile(r"^(\s{2,})([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$")
+
+while i < len(lines):
+    line = lines[i]
+    top = top_re.match(line)
+    if top:
+        current_section = top.group(1)
+
+    dep = dep_re.match(line)
+    if current_section in sections and dep and dep.group(2) in {old_name, new_name}:
+        indent = dep.group(1)
+        dep_name = dep.group(2)
+        end = i + 1
+        while end < len(lines):
+            current = lines[end]
+            if current and not current.startswith(indent + " "):
+                break
+            end += 1
+
+        if dep_name == old_name:
+            if not inserted:
+                output.extend([f"{indent}{new_name}:", f"{indent}  path: {rel_path}"])
+                inserted = True
+            changed = True
+            i = end
+            continue
+
+        if dep_name == new_name:
+            block = [f"{indent}{new_name}:", f"{indent}  path: {rel_path}"]
+            output.extend(block)
+            inserted = True
+            if lines[i:end] != block:
+                changed = True
+            i = end
+            continue
+
+    output.append(line)
+    i += 1
+
+if changed:
+    pubspec.write_text("\n".join(output) + "\n")
+PY
+}
+
+update_local_package_pubspecs() {
+    local old_name="$1"
+    local new_name="$2"
+    local target_plugin_dir="$PLUGINS_DIR/$new_name"
+    local updated=0
+
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    while IFS= read -r pubspec; do
+        [[ -f "$pubspec" ]] || continue
+        [[ "$pubspec" == "$target_plugin_dir/pubspec.yaml" ]] && continue
+
+        local before_hash after_hash rel_path
+        before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+        rel_path=$(python3 - "$pubspec" "$target_plugin_dir" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+pubspec = Path(sys.argv[1])
+target = Path(sys.argv[2])
+print(os.path.relpath(target, pubspec.parent).replace(os.sep, "/"))
+PY
+)
+        rewrite_package_pubspec_dependency_path "$pubspec" "$old_name" "$new_name" "$rel_path"
+        after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+        [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+    done < <(find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null)
+
+    if [[ $updated -gt 0 ]]; then
+        [[ "$VERBOSE" == "true" ]] && log_info "  更新本地包 pubspec 依赖: $old_name -> $new_name ($updated 个)" || true
+    fi
+}
+
+apply_photo_manager_rename_fixups() {
+    local new_name="$1"
+    local target_path="$2"
+
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -d "$target_path" ]] || return 0
+
+    python3 - "$target_path" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+plugin = Path(sys.argv[1])
+
+    for platform in ("ios", "macos"):
+        classes = plugin / platform / "Classes"
+        core = classes / "core"
+        if classes.exists() and core.exists():
+            for path in classes.glob("*.[hm]"):
+                text = path.read_text()
+                updated = text.replace(
+                    "com.fluttercandies/toggle_pile",
+                    "com.fluttercandies/photo_manager",
+                )
+                if updated != text:
+                    path.write_text(updated)
+
+    for podspec in (plugin / platform).glob("*.podspec"):
+        text = podspec.read_text()
+        updated = text
+        header_search = "$(inherited) ${PODS_TARGET_SRCROOT}/Classes/core"
+        if "HEADER_SEARCH_PATHS" not in updated and "s.pod_target_xcconfig" in updated:
+            updated = updated.replace(
+                "'DEFINES_MODULE' => 'YES'",
+                f"'DEFINES_MODULE' => 'YES', 'HEADER_SEARCH_PATHS' => '{header_search}'",
+                1,
+            )
+        if updated != text:
+            podspec.write_text(updated)
+PY
+
+    local shim_dir="$PLUGINS_DIR/photo_manager"
+    if [[ -d "$shim_dir" && "$shim_dir" != "$target_path" ]]; then
+        rm -rf "$shim_dir"
+    fi
+    mkdir -p "$shim_dir/lib/src/types" "$shim_dir/lib/src/internal"
+
+    cat > "$shim_dir/pubspec.yaml" <<EOF
+name: photo_manager
+description: Compatibility shim for a renamed photo manager package.
+version: 3.6.4
+publish_to: 'none'
+
+environment:
+  sdk: ">=2.13.0 <4.0.0"
+  flutter: ">=2.2.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  $new_name:
+    path: ../$new_name
+EOF
+
+    cat > "$shim_dir/lib/photo_manager.dart" <<EOF
+export 'package:$new_name/photo_manager.dart';
+EOF
+
+    cat > "$shim_dir/lib/platform_utils.dart" <<EOF
+export 'package:$new_name/platform_utils.dart';
+EOF
+
+    cat > "$shim_dir/lib/src/types/entity.dart" <<EOF
+export 'package:$new_name/src/types/entity.dart';
+EOF
+
+    cat > "$shim_dir/lib/src/types/thumbnail.dart" <<EOF
+export 'package:$new_name/src/types/thumbnail.dart';
+EOF
+
+    cat > "$shim_dir/lib/src/internal/enums.dart" <<EOF
+export 'package:$new_name/src/internal/enums.dart';
+EOF
+
+    ensure_project_dependency_override_path "photo_manager" "plugins/photo_manager"
+    [[ "$VERBOSE" == "true" ]] && log_info "  photo_manager 兼容壳已生成，原生实现指向 $new_name" || true
+}
+
+apply_plugin_specific_rename_fixups() {
+    local old_name="$1"
+    local new_name="$2"
+    local target_path="$3"
+
+    case "$old_name" in
+        fijkplayer)
+            restore_fijkplayer_runtime_channels "$new_name" "$target_path"
+            ;;
+        photo_manager)
+            apply_photo_manager_rename_fixups "$new_name" "$target_path"
+            ;;
+    esac
+}
+
 restore_fijkplayer_runtime_channels() {
     local new_name="$1"
     local target_path="$2"
@@ -1266,18 +2395,18 @@ rename_plugin() {
     fi
     
     cp -r "$source_path" "$target_path"
-    
-    rm -rf "$target_path/.git" 2>/dev/null || true
-    rm -rf "$target_path/.dart_tool" 2>/dev/null || true
-    rm -rf "$target_path/build" 2>/dev/null || true
-    rm -rf "$target_path/example" 2>/dev/null || true
+
+    prune_non_runtime_package_files "$target_path"
     
     local old_class=$(to_camel_case "$old_name")
     local new_class=$(to_camel_case "$new_name")
+    local old_kebab="${old_name//_/-}"
+    local new_kebab="${new_name//_/-}"
     
     # 更新 pubspec.yaml
     if [[ -f "$target_path/pubspec.yaml" ]]; then
         sed -i '' "s/^name: $old_name/name: $new_name/" "$target_path/pubspec.yaml"
+        sed -i '' "s|packages/${old_name}/|packages/${new_name}/|g" "$target_path/pubspec.yaml"
         
         local temp_pubspec=$(mktemp)
         local in_native_platform=false
@@ -1309,33 +2438,41 @@ rename_plugin() {
                 sed -i '' "s/s\.name\s*=.*/s.name             = '$new_name'/" "$new_podspec"
                 sed -i '' "s/s\.module_name\s*=.*/s.module_name      = '$new_name'/" "$new_podspec"
                 sed -i '' "s|${old_name}/|${new_name}/|g" "$new_podspec"
+                sed -i '' "s|${old_name}\.modulemap|${new_name}.modulemap|g" "$new_podspec"
+                sed -i '' "s|${old_name}-umbrella\.h|${new_name}-umbrella.h|g" "$new_podspec"
+                sed -i '' "/resource_bundles/s|${old_name}_|${new_name}_|g" "$new_podspec"
                 sed -i '' "s/'$old_name'/'$new_name'/g" "$new_podspec"
             fi
         done
     fi
     
-    # 更新 darwin podspec
-    if [[ -d "$target_path/darwin" ]]; then
-        for podspec in "$target_path/darwin"/*.podspec; do
+    # 更新 darwin/macOS podspec
+    for _podspec_platform in "darwin" "macos"; do
+        [[ -d "$target_path/$_podspec_platform" ]] || continue
+        for podspec in "$target_path/$_podspec_platform"/*.podspec; do
             if [[ -f "$podspec" ]]; then
-                local new_podspec="$target_path/darwin/$new_name.podspec"
+                local new_podspec="$target_path/$_podspec_platform/$new_name.podspec"
                 mv "$podspec" "$new_podspec" 2>/dev/null || true
                 sed -i '' "s/s\.name\s*=.*/s.name             = '$new_name'/" "$new_podspec"
                 sed -i '' "s/s\.module_name\s*=.*/s.module_name      = '$new_name'/" "$new_podspec"
                 sed -i '' "s|${old_name}/|${new_name}/|g" "$new_podspec"
+                sed -i '' "s|${old_name}\.modulemap|${new_name}.modulemap|g" "$new_podspec"
+                sed -i '' "s|${old_name}-umbrella\.h|${new_name}-umbrella.h|g" "$new_podspec"
+                sed -i '' "/resource_bundles/s|${old_name}_|${new_name}_|g" "$new_podspec"
                 sed -i '' "s/'$old_name'/'$new_name'/g" "$new_podspec"
             fi
         done
-    fi
+    done
     
     # 更新 Package.swift
     find "$target_path" -name "Package.swift" -type f 2>/dev/null | while read pkg_swift; do
         sed -i '' "s|\"${old_name}\"|\"${new_name}\"|g" "$pkg_swift" 2>/dev/null || true
+        sed -i '' "s|\"${old_kebab}\"|\"${new_kebab}\"|g" "$pkg_swift" 2>/dev/null || true
         sed -i '' "s|/${old_name}|/${new_name}|g" "$pkg_swift" 2>/dev/null || true
     done
     
     # 更新原生代码
-    find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" \) 2>/dev/null | while read file; do
+    find "$target_path" -type f \( -name "*.swift" -o -name "*.h" -o -name "*.m" -o -name "*.mm" \) 2>/dev/null | while read file; do
         sed -i '' -E "s/${old_class}([A-Z])/${new_class}\1/g" "$file" 2>/dev/null || true
         sed -i '' -E "s/${old_class}([^A-Za-z0-9])/${new_class}\1/g" "$file" 2>/dev/null || true
         sed -i '' -E "s/${old_class}\$/${new_class}/g" "$file" 2>/dev/null || true
@@ -1351,7 +2488,20 @@ rename_plugin() {
         fi
     done
 
-    restore_apple_system_module_imports_after_plugin_rename "$target_path" "$old_name" "$new_class"
+    # SwiftPM/CocoaPods modulemap layouts (for example file_picker 11.x)
+    # keep snake_case module names in filenames and umbrella declarations.
+    find "$target_path" -type f \( -name "*.modulemap" -o -name "*-umbrella.h" \) 2>/dev/null | while read file; do
+        sed -i '' "s|${old_name}|${new_name}|g" "$file" 2>/dev/null || true
+        sed -i '' -E "s/${old_class}([A-Z])/${new_class}\1/g" "$file" 2>/dev/null || true
+        sed -i '' -E "s/${old_class}([^A-Za-z0-9])/${new_class}\1/g" "$file" 2>/dev/null || true
+        sed -i '' -E "s/${old_class}\$/${new_class}/g" "$file" 2>/dev/null || true
+
+        local filename=$(basename "$file")
+        if [[ "$filename" == *"$old_name"* ]]; then
+            local newfilename="${filename//$old_name/$new_name}"
+            mv "$file" "$(dirname "$file")/$newfilename" 2>/dev/null || true
+        fi
+    done
     
     # 恢复 Firebase SDK 模块导入
     if [[ "$old_name" == firebase_* ]]; then
@@ -1379,23 +2529,14 @@ rename_plugin() {
             done
     done
 
+    restore_apple_avfoundation_audio_session_symbols "$target_path" "$old_class" "$new_class"
     restore_pigeon_host_api_names "$target_path" "$old_class" "$new_class"
     
     # 更新 Dart 代码
-    # 注：第二条原用 BSD sed 嵌套 {} 语法，在 macOS BSD sed 上整体失败（"extra characters at the end of } command"），
-    # 错误被 2>/dev/null 吞掉导致 Dart 字符串内 `/${old_name}/` 子串未被替换；典型受害者 fijkplayer
-    # 的 MethodChannel('befovy.com/fijkplayer/...') 与重命名后 native 端 channel `befovy.com/${new_name}/`
-    # 不一致 → 运行时 MissingPluginException。改用 perl，单语句完成"排除 import/export 行 + 全局替换"。
     find "$target_path" -type f -name "*.dart" 2>/dev/null | while read file; do
         sed -i '' "s|package:${old_name}/|package:${new_name}/|g" "$file" 2>/dev/null || true
-        perl -i -pe 'next if /^\s*(?:import|export)\s/; s{/\Q'"$old_name"'\E/}{/'"$new_name"'/}g' "$file" 2>/dev/null || true
+        sed -i '' "/^[[:space:]]*import /!{/^[[:space:]]*export /!{s|/${old_name}/|/${new_name}/|g;}}" "$file" 2>/dev/null || true
     done
-
-    # 插件专项修复：fijkplayer 重命名后保留运行时 channel 名（Dart/ObjC 均会被上面的
-    # ${old_name}/ → ${new_name}/ 改写，必须还原，否则 MethodChannel/EventChannel 不匹配导致播放器失效）
-    if [[ "$old_name" == "fijkplayer" ]]; then
-        restore_fijkplayer_runtime_channels "$new_name" "$target_path"
-    fi
     
     # 创建新的主入口文件
     local old_main="$target_path/lib/${old_name}.dart"
@@ -1407,11 +2548,14 @@ rename_plugin() {
         [[ "$VERBOSE" == "true" ]] && log_info "  创建主入口: $new_main" || true
     fi
     
-    # 若源为 plugins/ 内本地 path 插件，删除旧目录
-    if [[ "$source_path" == "$PLUGINS_DIR/"* ]] && [[ "$source_path" != "$target_path" ]] && [[ -d "$source_path" ]]; then
-        log_info "  删除旧版本（替换）: $(basename "$source_path")"
-        rm -rf "$source_path"
+    # 清理 plugins/ 中的旧同名目录，避免重复 run 后旧包名被 mutation 再次扫入。
+    local old_plugin_dir="$PLUGINS_DIR/$old_name"
+    if [[ -d "$old_plugin_dir" && "$old_plugin_dir" != "$target_path" ]]; then
+        log_info "  删除旧版本（替换）: $(basename "$old_plugin_dir")"
+        rm -rf "$old_plugin_dir"
     fi
+
+    apply_plugin_specific_rename_fixups "$old_name" "$new_name" "$target_path"
     
     [[ "$VERBOSE" == "true" ]] && log_info "  完成: $target_path" || true
 }
@@ -1532,10 +2676,22 @@ update_dart_imports() {
     fi
     
     local search_dirs=("$PROJECT_ROOT/lib")
+    for _root_pkg_pubspec in "$PROJECT_ROOT"/*/pubspec.yaml; do
+        [[ -f "$_root_pkg_pubspec" ]] || continue
+        local _root_pkg_dir
+        _root_pkg_dir=$(dirname "$_root_pkg_pubspec")
+        [[ -d "$_root_pkg_dir/lib" ]] && search_dirs+=("$_root_pkg_dir/lib")
+    done
+    for _generated_pkg_lib in "$PROJECT_ROOT"/third_party/generated_deps/*/lib; do
+        [[ -d "$_generated_pkg_lib" ]] && search_dirs+=("$_generated_pkg_lib")
+    done
+    for _third_party_pkg_lib in "$PROJECT_ROOT"/third_party/*/lib; do
+        [[ -d "$_third_party_pkg_lib" ]] && search_dirs+=("$_third_party_pkg_lib")
+    done
     if [[ -d "$FLUTTER_BASE_DIR/lib" ]]; then
         search_dirs+=("$FLUTTER_BASE_DIR/lib")
     fi
-    # flutter_base 子模块的 lib/ 目录（md 项目子包可能互相引用）
+    # flutter_base 子模块的 lib/ 目录（子包可能互相引用）
     if project_uses_flutter_base "$CURRENT_PROJECT" && [[ -d "$FLUTTER_BASE_DIR" ]]; then
         for _submod_lib in "$FLUTTER_BASE_DIR"/*/lib; do
             [[ -d "$_submod_lib" ]] && search_dirs+=("$_submod_lib")
@@ -1559,14 +2715,44 @@ update_dart_imports() {
 }
 
 # 检查插件是否被其他包传递依赖
+check_transitive_dependency_in_file() {
+    local deps_file="$1"
+    local plugin_name="$2"
+    [[ -f "$deps_file" ]] || return 1
+
+    perl -Mutf8 -CS - "$plugin_name" "$deps_file" <<'PERL'
+my ($target, $file) = @ARGV;
+open my $fh, "<:encoding(UTF-8)", $file or exit 1;
+
+while (my $line = <$fh>) {
+    next unless $line =~ /[├└]──\s+(\S+)/;
+
+    my $token = $1;
+    my $name = $token;
+    $name =~ s/\.\.\.$//;
+
+    my $prefix = $line;
+    $prefix =~ s/[├└]──.*$//;
+    my $depth = () = ($prefix =~ /(?:│   |    )/g);
+
+    # depth > 0 表示该包还被某个父依赖间接引用。此时如果把根依赖改名，
+    # 父依赖仍会按原名拉入 hosted 包，Flutter 的 plugin registrant 会同时
+    # 看到两个实现包，典型表现是 dartPluginClass 类名冲突。
+    exit 0 if $name eq $target && $depth > 0;
+}
+
+exit 1;
+PERL
+}
+
 check_transitive_dependency() {
     local plugin_name="$1"
-    
-    local transitive_count=$(fvm flutter pub deps 2>/dev/null | grep -c "${plugin_name}\.\.\.$" 2>/dev/null || echo "0")
-    transitive_count=$(echo "$transitive_count" | head -1 | tr -d '[:space:]')
-    
-    if [[ "$transitive_count" -gt 0 ]]; then
-        [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name 被 $transitive_count 个其他包传递依赖" || true
+
+    local deps_file
+    deps_file=$(get_pub_deps_cache_file) || true
+
+    if check_transitive_dependency_in_file "$deps_file" "$plugin_name"; then
+        [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name 在依赖树中重复出现，跳过重命名" || true
         return 0
     else
         return 1
@@ -1574,17 +2760,50 @@ check_transitive_dependency() {
 }
 
 # 获取插件的传递依赖路径
+get_transitive_dependency_paths_from_file() {
+    local deps_file="$1"
+    local plugin_name="$2"
+    [[ -f "$deps_file" ]] || return 0
+
+    perl -Mutf8 -CS - "$plugin_name" "$deps_file" <<'PERL'
+my ($target, $file) = @ARGV;
+open my $fh, "<:encoding(UTF-8)", $file or exit 0;
+my @stack;
+my %parents;
+
+while (my $line = <$fh>) {
+    chomp $line;
+    next unless $line =~ /[├└]──\s+(\S+)/;
+
+    my $token = $1;
+    my $name = $token;
+    $name =~ s/\.\.\.$//;
+
+    my $prefix = $line;
+    $prefix =~ s/[├└]──.*$//;
+    my $depth = () = ($prefix =~ /(?:│   |    )/g);
+
+    $stack[$depth] = $name;
+    $#stack = $depth;
+
+    next unless $name eq $target;
+    next unless $depth > 0;
+
+    my $parent = $stack[$depth - 1] // "";
+    $parents{$parent} = 1 if length($parent) && $parent ne $target;
+}
+
+print join("\n", sort keys %parents);
+print "\n" if keys %parents;
+PERL
+}
+
 get_transitive_dependency_paths() {
     local plugin_name="$1"
-    
-    fvm flutter pub deps 2>/dev/null | \
-        grep -B50 "${plugin_name}\.\.\." 2>/dev/null | \
-        grep -E "^[├└]── [a-z]" | \
-        tail -1 | \
-        sed 's/^[├└]── //' | \
-        awk '{print $1}' | \
-        grep -v "^${plugin_name}$" | \
-        sort -u
+
+    local deps_file
+    deps_file=$(get_pub_deps_cache_file) || true
+    get_transitive_dependency_paths_from_file "$deps_file" "$plugin_name"
 }
 
 # 应用映射配置
@@ -1651,7 +2870,7 @@ apply_mapping() {
         
         # 2. 检查 pub cache
         if [[ -z "$source_path" ]]; then
-            source_path=$(find_pub_cache_plugin_path "$old_name")
+            source_path=$(find_pub_cache_plugin_path "$old_name" "$(get_manifest_package_version "$old_name")")
         fi
         
         # 3. 检查 flutter_base
@@ -1676,13 +2895,17 @@ apply_mapping() {
             continue
         fi
         
-        # flutter_base 子模块跳过传递依赖检查（其 pubspec 会同步更新）
+        # flutter_base 子模块跳过重复依赖检查（其 pubspec 会同步更新）
         local _is_flutter_base_module=false
         if [[ "$source_path" == "$FLUTTER_BASE_DIR/"* ]]; then
             _is_flutter_base_module=true
         fi
         if [[ "$_is_flutter_base_module" == "false" ]] && check_transitive_dependency "$old_name"; then
-            log_warning "跳过: $old_name (被其他包传递依赖，重命名会导致冲突)"
+            local dep_paths
+            dep_paths=$(get_transitive_dependency_paths "$old_name")
+            local dep_summary
+            dep_summary=$(echo "$dep_paths" | paste -sd "," - 2>/dev/null)
+            log_warning "跳过: $old_name (依赖树中重复出现${dep_summary:+，被 $dep_summary 间接引用}，重命名会导致冲突)"
             skipped=$((skipped + 1))
             continue
         fi
@@ -1691,6 +2914,7 @@ apply_mapping() {
         update_project_pubspec "$old_name" "$new_name"
         update_flutter_base_pubspec "$old_name" "$new_name"
         update_dart_imports "$old_name" "$new_name"
+        update_local_package_pubspecs "$old_name" "$new_name"
         
         _REPORT_RENAME_ENTRIES+=("$old_name → $new_name")
         count=$((count + 1))
@@ -1719,53 +2943,824 @@ apply_mapping() {
 }
 
 # =============================================
-# Phase 1.5: 传递依赖本地化（仅复制，不重命名）
+# Phase 1.3: 闭包重命名（父包 + 平台实现包）
 # =============================================
 
-# 将因传递依赖冲突而跳过重命名的插件复制到 plugins/ 以便 L0 变异
-# 这些插件不能重命名（父包按原名引入），但可以注入唯一代码
-localize_skipped_plugins() {
-    if [[ ! -f "$MAPPING_FILE" ]]; then
-        return
+find_closure_package_source_path() {
+    local package_name="$1"
+    local preferred_version
+    preferred_version=$(get_manifest_package_version "$package_name")
+    if [[ -z "$preferred_version" ]]; then
+        preferred_version=$(get_locked_package_version "$package_name")
+    fi
+    if [[ -z "$preferred_version" ]]; then
+        local mapped_name
+        mapped_name=$(load_closure_rename_pairs | awk -F'|' -v pkg="$package_name" '$1 == pkg { print $2; exit }')
+        if [[ -n "$mapped_name" ]]; then
+            preferred_version=$(get_locked_any_package_version "$mapped_name")
+        fi
+    fi
+
+    if [[ -d "$PLUGINS_DIR/$package_name" ]]; then
+        echo "$PLUGINS_DIR/$package_name"
+        return 0
+    fi
+
+    local source_path
+    source_path=$(find_local_plugin_path "$package_name")
+    if [[ -n "$source_path" ]]; then
+        echo "$source_path"
+        return 0
+    fi
+
+    if [[ -d "$FLUTTER_BASE_DIR/$package_name" ]]; then
+        echo "$FLUTTER_BASE_DIR/$package_name"
+        return 0
+    fi
+
+    local nested_pubspec
+    if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT" && [[ -d "$PLUGINS_DIR" ]]; then
+        while IFS= read -r nested_pubspec; do
+            if grep -Eq "^name:[[:space:]]*${package_name}[[:space:]]*$" "$nested_pubspec" 2>/dev/null; then
+                dirname "$nested_pubspec"
+                return 0
+            fi
+        done < <(find "$PLUGINS_DIR" -mindepth 3 -maxdepth 4 -name pubspec.yaml -type f 2>/dev/null)
+    fi
+
+    source_path=$(find_pub_cache_plugin_path "$package_name" "$preferred_version")
+    [[ -n "$source_path" ]] && echo "$source_path"
+    return 0
+}
+
+rewrite_pubspec_closure_refs() {
+    local pubspec="$1"
+    local pairs_file="$2"
+    [[ -f "$pubspec" && -s "$pairs_file" ]] || return 0
+
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    perl -MFile::Spec -MFile::Basename - "$pubspec" "$pairs_file" "$PLUGINS_DIR" > "$tmp_file" <<'PERL'
+use strict;
+use warnings;
+use File::Spec;
+use File::Basename qw(dirname);
+
+my ($pubspec, $pairs_file, $plugins_dir) = @ARGV;
+
+open my $pfh, '<', $pairs_file or die "open pairs: $!";
+my %map;
+while (my $line = <$pfh>) {
+    chomp $line;
+    next unless $line =~ /^([a-z_][a-z_0-9]*)\|([a-z_][a-z_0-9]*)$/;
+    $map{$1} = $2;
+}
+close $pfh;
+
+open my $fh, '<', $pubspec or die "open pubspec: $!";
+my @lines = <$fh>;
+close $fh;
+
+my $from_dir = File::Spec->rel2abs(dirname($pubspec));
+
+sub plugin_rel_path {
+    my ($new_name) = @_;
+    my $target = File::Spec->rel2abs(File::Spec->catdir($plugins_dir, $new_name));
+    return File::Spec->abs2rel($target, $from_dir);
+}
+
+for (my $i = 0; $i < @lines; ) {
+    my $line = $lines[$i];
+
+    if ($line =~ /^([ \t]{2,})([a-z_][a-z_0-9]*):([ \t]*)(.*)$/ && exists $map{$2}) {
+        my ($indent, $old_name) = ($1, $2);
+        my $new_name = $map{$old_name};
+        my $rel_path = plugin_rel_path($new_name);
+
+        print "${indent}${new_name}:\n";
+        print "${indent}  path: ${rel_path}\n";
+
+        $i++;
+        while ($i < @lines) {
+            my $next = $lines[$i];
+            last unless $next =~ /^\Q$indent\E[ \t]+/;
+            $i++;
+        }
+        next;
+    }
+
+    for my $old_name (keys %map) {
+        my $new_name = $map{$old_name};
+        $line =~ s/(\bdefault_package:[ \t]*)\Q$old_name\E\b/${1}${new_name}/g;
+        $line =~ s/(\bimplements:[ \t]*)\Q$old_name\E\b/${1}${new_name}/g;
+        $line =~ s/(package:)\Q$old_name\E\//$1$new_name\//g;
+    }
+
+    print $line;
+    $i++;
+}
+PERL
+
+    if cmp -s "$pubspec" "$tmp_file"; then
+        rm -f "$tmp_file" 2>/dev/null || true
+    else
+        mv "$tmp_file" "$pubspec"
+        [[ "$VERBOSE" == "true" ]] && log_info "  重写 pubspec 闭包引用: $pubspec" || true
+    fi
+}
+
+rewrite_workspace_pubspec_closure_refs() {
+    local pairs_file="$1"
+    [[ -s "$pairs_file" ]] || return 0
+
+    local pubspecs_file
+    pubspecs_file=$(mktemp)
+
+    [[ -f "$PROJECT_ROOT/pubspec.yaml" ]] && echo "$PROJECT_ROOT/pubspec.yaml" >> "$pubspecs_file"
+
+    if [[ -d "$PLUGINS_DIR" ]]; then
+        find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    fi
+
+    if [[ -d "$FLUTTER_BASE_DIR" ]]; then
+        find "$FLUTTER_BASE_DIR" -mindepth 1 -maxdepth 3 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    fi
+
+    for _root_pkg_pubspec in "$PROJECT_ROOT"/*/pubspec.yaml; do
+        [[ -f "$_root_pkg_pubspec" ]] && echo "$_root_pkg_pubspec" >> "$pubspecs_file"
+    done
+
+    if [[ -d "$PROJECT_ROOT/third_party" ]]; then
+        find "$PROJECT_ROOT/third_party" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    fi
+
+    if [[ -d "$PROJECT_ROOT/third_party/generated_deps" ]]; then
+        find "$PROJECT_ROOT/third_party/generated_deps" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    fi
+
+    sort -u "$pubspecs_file" | while IFS= read -r pubspec; do
+        rewrite_pubspec_closure_refs "$pubspec" "$pairs_file"
+    done
+
+    rm -f "$pubspecs_file" 2>/dev/null || true
+}
+
+normalize_flutter_inappwebview_closure_paths() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    local parent_name
+    parent_name=$(get_closure_renamed_name "flutter_inappwebview")
+    local parent_dir="$PLUGINS_DIR/$parent_name"
+    local interface_dir="$parent_dir/flutter_inappwebview_platform_interface"
+    [[ -d "$parent_dir" && -d "$interface_dir" ]] || return 0
+
+    local updated=0
+    local impl_old impl_name impl_dir pubspec before_hash after_hash rel_path
+    for impl_old in flutter_inappwebview_ios flutter_inappwebview_macos; do
+        impl_name=$(get_closure_renamed_name "$impl_old")
+
+        if [[ -d "$PLUGINS_DIR/$impl_name" && -f "$PLUGINS_DIR/$impl_name/pubspec.yaml" ]]; then
+            pubspec="$PLUGINS_DIR/$impl_name/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rel_path=$(python3 - "$pubspec" "$interface_dir" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+pubspec = Path(sys.argv[1])
+target = Path(sys.argv[2])
+print(os.path.relpath(target, pubspec.parent).replace(os.sep, "/"))
+PY
+)
+            rewrite_package_pubspec_dependency_path "$pubspec" "flutter_inappwebview_platform_interface" "flutter_inappwebview_platform_interface" "$rel_path"
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+
+        if [[ "$impl_name" != "$impl_old" && -f "$parent_dir/pubspec.yaml" && -d "$PLUGINS_DIR/$impl_name" ]]; then
+            pubspec="$parent_dir/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rel_path=$(python3 - "$pubspec" "$PLUGINS_DIR/$impl_name" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+pubspec = Path(sys.argv[1])
+target = Path(sys.argv[2])
+print(os.path.relpath(target, pubspec.parent).replace(os.sep, "/"))
+PY
+)
+            rewrite_package_pubspec_dependency_path "$pubspec" "$impl_old" "$impl_name" "$rel_path"
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+
+        impl_dir="$parent_dir/$impl_old"
+        if [[ -d "$impl_dir" && -f "$impl_dir/pubspec.yaml" ]]; then
+            pubspec="$impl_dir/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rewrite_package_pubspec_dependency_path "$pubspec" "flutter_inappwebview_platform_interface" "flutter_inappwebview_platform_interface" "../flutter_inappwebview_platform_interface"
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+    done
+
+    [[ "$VERBOSE" == "true" && $updated -gt 0 ]] && log_info "  flutter_inappwebview 闭包 path 已归一化 ($updated 处)" || true
+    return 0
+}
+
+normalize_video_player_closure_paths() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    local parent_name
+    parent_name=$(get_closure_renamed_name "video_player")
+    local parent_dir="$PLUGINS_DIR/$parent_name"
+    local interface_dir="$parent_dir/video_player_platform_interface"
+    [[ -d "$parent_dir" && -d "$interface_dir" ]] || return 0
+
+    local updated=0
+    local impl_old impl_name impl_dir pubspec before_hash after_hash rel_path
+    for impl_old in video_player_avfoundation; do
+        impl_name=$(get_closure_renamed_name "$impl_old")
+
+        if [[ -d "$PLUGINS_DIR/$impl_name" && -f "$PLUGINS_DIR/$impl_name/pubspec.yaml" ]]; then
+            pubspec="$PLUGINS_DIR/$impl_name/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rel_path=$(python3 - "$pubspec" "$interface_dir" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+pubspec = Path(sys.argv[1])
+target = Path(sys.argv[2])
+print(os.path.relpath(target, pubspec.parent).replace(os.sep, "/"))
+PY
+)
+            rewrite_package_pubspec_dependency_path "$pubspec" "video_player_platform_interface" "video_player_platform_interface" "$rel_path"
+            if [[ -f "$PLUGINS_DIR/$impl_name/darwin/$impl_name/Sources/$impl_name/include/$impl_name/FVPMediaCompassPlugin.h" ]]; then
+                sed -i '' "s/pluginClass: FVPVideoPlayerPlugin/pluginClass: FVPMediaCompassPlugin/g" "$pubspec" 2>/dev/null || true
+            fi
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+
+        if [[ "$impl_name" != "$impl_old" && -f "$parent_dir/pubspec.yaml" && -d "$PLUGINS_DIR/$impl_name" ]]; then
+            pubspec="$parent_dir/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rel_path=$(python3 - "$pubspec" "$PLUGINS_DIR/$impl_name" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+pubspec = Path(sys.argv[1])
+target = Path(sys.argv[2])
+print(os.path.relpath(target, pubspec.parent).replace(os.sep, "/"))
+PY
+)
+            rewrite_package_pubspec_dependency_path "$pubspec" "$impl_old" "$impl_name" "$rel_path"
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+
+        impl_dir="$parent_dir/$impl_old"
+        if [[ -d "$impl_dir" && -f "$impl_dir/pubspec.yaml" ]]; then
+            pubspec="$impl_dir/pubspec.yaml"
+            before_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            rewrite_package_pubspec_dependency_path "$pubspec" "video_player_platform_interface" "video_player_platform_interface" "../video_player_platform_interface"
+            after_hash=$(cksum "$pubspec" 2>/dev/null | awk '{print $1":"$2}')
+            [[ "$before_hash" != "$after_hash" ]] && updated=$((updated + 1))
+        fi
+    done
+
+    [[ "$VERBOSE" == "true" && $updated -gt 0 ]] && log_info "  video_player 闭包 path 已归一化 ($updated 处)" || true
+    return 0
+}
+
+ensure_renamed_platform_compat_shims() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    if [[ -d "$PLUGINS_DIR/anchor_foundation" ]]; then
+        local shim_dir="$PLUGINS_DIR/path_provider_foundation"
+        mkdir -p "$shim_dir/lib"
+        cat > "$shim_dir/pubspec.yaml" <<'EOF'
+name: path_provider_foundation
+description: Compatibility shim for renamed path_provider_foundation.
+version: 2.5.1
+publish_to: 'none'
+
+environment:
+  sdk: ">=2.17.0 <4.0.0"
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  anchor_foundation:
+    path: ../anchor_foundation
+
+flutter:
+  plugin:
+    implements: path_provider
+    platforms:
+      ios:
+        dartPluginClass: PathProviderFoundationShim
+      macos:
+        dartPluginClass: PathProviderFoundationShim
+EOF
+        cat > "$shim_dir/lib/path_provider_foundation.dart" <<'EOF'
+import 'package:anchor_foundation/path_provider_foundation.dart' as anchor_foundation;
+
+class PathProviderFoundationShim {
+  static void registerWith() {
+    anchor_foundation.PathProviderFoundation.registerWith();
+  }
+}
+EOF
+        ensure_project_dependency_override_path "path_provider_foundation" "plugins/path_provider_foundation"
+    fi
+
+    if [[ -d "$PLUGINS_DIR/browser_foundation" ]]; then
+        local shim_dir="$PLUGINS_DIR/webview_flutter_wkwebview"
+        mkdir -p "$shim_dir/lib/src"
+        cat > "$shim_dir/pubspec.yaml" <<'EOF'
+name: webview_flutter_wkwebview
+description: Compatibility shim for renamed webview_flutter_wkwebview.
+version: 3.25.0
+publish_to: 'none'
+
+environment:
+  sdk: ">=2.17.0 <4.0.0"
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  browser_foundation:
+    path: ../browser_foundation
+
+flutter:
+  plugin:
+    implements: webview_flutter
+    platforms:
+      ios:
+        dartPluginClass: WebKitWebViewPlatformShim
+      macos:
+        dartPluginClass: WebKitWebViewPlatformShim
+EOF
+        cat > "$shim_dir/lib/webview_flutter_wkwebview.dart" <<'EOF'
+import 'package:browser_foundation/webview_flutter_wkwebview.dart' as browser_foundation;
+
+class WebKitWebViewPlatformShim {
+  static void registerWith() {
+    browser_foundation.WebKitWebViewPlatform.registerWith();
+  }
+}
+EOF
+        cat > "$shim_dir/lib/src/webkit_proxy.dart" <<'EOF'
+export 'package:browser_foundation/src/webkit_proxy.dart';
+EOF
+        cat > "$shim_dir/lib/src/webkit_webview_controller.dart" <<'EOF'
+export 'package:browser_foundation/src/webkit_webview_controller.dart';
+EOF
+        cat > "$shim_dir/lib/src/webkit_webview_cookie_manager.dart" <<'EOF'
+export 'package:browser_foundation/src/webkit_webview_cookie_manager.dart';
+EOF
+        cat > "$shim_dir/lib/src/webkit_webview_platform.dart" <<'EOF'
+export 'package:browser_foundation/src/webkit_webview_platform.dart';
+EOF
+        cat > "$shim_dir/lib/src/webview_flutter_wkwebview_legacy.dart" <<'EOF'
+export 'package:browser_foundation/src/webview_flutter_wkwebview_legacy.dart';
+EOF
+        ensure_project_dependency_override_path "webview_flutter_wkwebview" "plugins/webview_flutter_wkwebview"
+    fi
+
+    if [[ -d "$PLUGINS_DIR/velvet_anchor" ]]; then
+        local velvet_version
+        velvet_version=$(get_plugin_version "$PLUGINS_DIR/velvet_anchor")
+        if [[ "$velvet_version" == "2.5.6" || ( "$CURRENT_PROJECT" == "91cg" && "$velvet_version" == "2.5.4" ) ]]; then
+            local shim_dir="$PLUGINS_DIR/shared_preferences_foundation"
+            mkdir -p "$shim_dir/lib"
+            cat > "$shim_dir/pubspec.yaml" <<EOF
+name: shared_preferences_foundation
+description: Compatibility shim for renamed shared_preferences_foundation.
+version: ${velvet_version}
+publish_to: 'none'
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  velvet_anchor:
+    path: ../velvet_anchor
+
+flutter:
+  plugin:
+    implements: shared_preferences
+    platforms:
+      ios:
+        dartPluginClass: SharedPreferencesFoundationShim
+      macos:
+        dartPluginClass: SharedPreferencesFoundationShim
+EOF
+            cat > "$shim_dir/lib/shared_preferences_foundation.dart" <<'EOF'
+import 'package:velvet_anchor/velvet_anchor.dart' as velvet_anchor;
+
+class SharedPreferencesFoundationShim {
+  static void registerWith() {
+    velvet_anchor.SharedPreferencesFoundation.registerWith();
+  }
+}
+EOF
+            ensure_project_dependency_override_path "shared_preferences_foundation" "plugins/shared_preferences_foundation"
+        else
+            log_warning "velvet_anchor 版本 ${velvet_version:-未知} 未配置 shared_preferences_foundation shim，跳过"
+        fi
+    fi
+
+    return 0
+}
+
+prune_unreferenced_plugins() {
+    [[ -d "$PLUGINS_DIR" ]] || return 0
+
+    local keep_file
+    keep_file=$(mktemp)
+
+    local pubspecs_file
+    pubspecs_file=$(mktemp)
+    [[ -f "$PROJECT_ROOT/pubspec.yaml" ]] && echo "$PROJECT_ROOT/pubspec.yaml" >> "$pubspecs_file"
+    [[ -d "$PLUGINS_DIR" ]] && find "$PLUGINS_DIR" -mindepth 2 -maxdepth 2 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    [[ -d "$FLUTTER_BASE_DIR" ]] && find "$FLUTTER_BASE_DIR" -mindepth 1 -maxdepth 3 -name pubspec.yaml -type f 2>/dev/null >> "$pubspecs_file"
+    for _root_pkg_pubspec in "$PROJECT_ROOT"/*/pubspec.yaml; do
+        [[ -f "$_root_pkg_pubspec" ]] && echo "$_root_pkg_pubspec" >> "$pubspecs_file"
+    done
+
+    sort -u "$pubspecs_file" | while IFS= read -r pubspec; do
+        local base_dir
+        base_dir=$(dirname "$pubspec")
+        awk '
+            /^[[:space:]]+path:[[:space:]]*/ {
+                line=$0
+                sub(/.*path:[[:space:]]*/, "", line)
+                gsub(/["'\'']/, "", line)
+                print line
+            }
+        ' "$pubspec" | while IFS= read -r dep_path; do
+            [[ -z "$dep_path" ]] && continue
+            local abs_path
+            abs_path=$(cd "$base_dir" 2>/dev/null && cd "$dep_path" 2>/dev/null && pwd || true)
+            if [[ -n "$abs_path" && "$abs_path" == "$PLUGINS_DIR/"* ]]; then
+                basename "$abs_path" >> "$keep_file"
+            fi
+        done
+    done
+
+    parse_mapping | while IFS= read -r line; do
+        echo "$line" | sed 's/\s*->\s*/|/' | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    done >> "$keep_file"
+    load_closure_rename_pairs | while IFS='|' read -r old_name new_name; do
+        [[ -z "$old_name" || -z "$new_name" ]] && continue
+        if closure_pair_is_active "$old_name" "$new_name"; then
+            echo "$new_name"
+        fi
+    done >> "$keep_file"
+
+    local removed=0
+    local keep_sorted
+    keep_sorted=$(mktemp)
+    sort -u "$keep_file" > "$keep_sorted"
+
+    for plugin_dir in "$PLUGINS_DIR"/*; do
+        [[ -d "$plugin_dir" ]] || continue
+        local name
+        name=$(basename "$plugin_dir")
+        if ! grep -qx "$name" "$keep_sorted" 2>/dev/null; then
+            rm -rf "$plugin_dir"
+            removed=$((removed + 1))
+        fi
+    done
+
+    rm -f "$keep_file" "$keep_sorted" "$pubspecs_file" 2>/dev/null || true
+    if [[ $removed -gt 0 ]]; then
+        log_info "已清理 $removed 个未被当前 pubspec 引用的旧 plugins 目录"
+    fi
+    return 0
+}
+
+ensure_root_dependency_override_path() {
+    local package_name="$1"
+    local dep_path="$2"
+    local pubspec="$PROJECT_ROOT/pubspec.yaml"
+    [[ -f "$pubspec" ]] || return 0
+
+    if ! grep -q "^dependency_overrides:" "$pubspec" 2>/dev/null; then
+        echo "" >> "$pubspec"
+        echo "dependency_overrides:" >> "$pubspec"
+    fi
+
+    local temp_file
+    temp_file=$(mktemp)
+    local in_overrides=false
+    local in_target=false
+    local wrote=false
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "dependency_overrides:" ]]; then
+            in_overrides=true
+            echo "$line" >> "$temp_file"
+            continue
+        fi
+
+        if [[ "$in_overrides" == "true" && "$line" =~ ^[^[:space:]] ]]; then
+            if [[ "$wrote" == "false" ]]; then
+                echo "  ${package_name}:" >> "$temp_file"
+                echo "    path: ${dep_path}" >> "$temp_file"
+                wrote=true
+            fi
+            in_overrides=false
+            in_target=false
+        fi
+
+        if [[ "$in_overrides" == "true" && "$line" =~ ^[[:space:]]+${package_name}: ]]; then
+            echo "  ${package_name}:" >> "$temp_file"
+            echo "    path: ${dep_path}" >> "$temp_file"
+            in_target=true
+            wrote=true
+            continue
+        fi
+
+        if [[ "$in_target" == "true" ]]; then
+            if [[ "$line" =~ ^[[:space:]]{4,} ]]; then
+                continue
+            fi
+            in_target=false
+        fi
+
+        echo "$line" >> "$temp_file"
+    done < "$pubspec"
+
+    if [[ "$wrote" == "false" ]]; then
+        echo "  ${package_name}:" >> "$temp_file"
+        echo "    path: ${dep_path}" >> "$temp_file"
+    fi
+
+    mv "$temp_file" "$pubspec"
+}
+
+localize_closure_support_packages() {
+    local packages_file
+    packages_file=$(mktemp)
+    load_closure_support_packages > "$packages_file"
+
+    if [[ ! -s "$packages_file" ]]; then
+        rm -f "$packages_file" 2>/dev/null || true
+        return 0
+    fi
+
+    local pairs_file
+    pairs_file=$(mktemp)
+    load_closure_rename_pairs > "$pairs_file"
+
+    local count=0
+    while IFS= read -r package_name || [[ -n "$package_name" ]]; do
+        [[ -z "$package_name" ]] && continue
+
+        if ! closure_package_is_referenced "$package_name"; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  闭包支撑包未被当前项目引用，跳过: $package_name" || true
+            continue
+        fi
+
+        local target_path="$PLUGINS_DIR/$package_name"
+        local source_path
+        source_path=$(find_closure_package_source_path "$package_name")
+
+        if [[ -z "$source_path" && ! -d "$target_path" ]]; then
+            log_warning "闭包支撑包跳过: $package_name (未找到源)"
+            continue
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY-RUN] 本地化闭包支撑包: $package_name"
+            count=$((count + 1))
+            continue
+        fi
+
+        if [[ -n "$source_path" && "$source_path" != "$target_path" ]]; then
+            rm -rf "$target_path"
+            mkdir -p "$PLUGINS_DIR"
+            cp -R "$source_path" "$target_path"
+            prune_non_runtime_package_files "$target_path"
+        fi
+
+        rewrite_pubspec_closure_refs "$target_path/pubspec.yaml" "$pairs_file"
+        ensure_root_dependency_override_path "$package_name" "plugins/${package_name}"
+        count=$((count + 1))
+    done < "$packages_file"
+
+    rm -f "$packages_file" "$pairs_file" 2>/dev/null || true
+    if [[ $count -gt 0 ]]; then
+        log_info "已本地化 $count 个闭包支撑包"
+    fi
+    return 0
+}
+
+apply_closure_renames() {
+    local pairs_file
+    pairs_file=$(mktemp)
+    load_closure_rename_pairs > "$pairs_file"
+
+    if [[ ! -s "$pairs_file" ]]; then
+        rm -f "$pairs_file" 2>/dev/null || true
+        log_info "未配置闭包重命名，跳过"
+        return 0
     fi
 
     detect_pub_cache
 
-    # 从映射文件中提取被跳过的插件名
-    # 格式: "# image_picker_ios" 在跳过区域内
-    local in_skip_section=false
-    local skipped_names=()
+    local applied=0
+    local skipped=0
+    local applied_pairs_file
+    applied_pairs_file=$(mktemp)
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" == "# 跳过的插件 (有传递依赖冲突"* ]]; then
-            in_skip_section=true
+    echo ""
+    echo "=== 开始闭包重命名 ==="
+    echo ""
+
+    while IFS='|' read -r old_name new_name || [[ -n "$old_name" ]]; do
+        [[ -z "$old_name" || -z "$new_name" ]] && continue
+
+        if ! closure_pair_is_active "$old_name" "$new_name"; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  闭包包未被当前项目引用，跳过: $old_name -> $new_name" || true
             continue
         fi
-        if [[ "$in_skip_section" == "true" ]]; then
-            if [[ "$line" =~ ^#\ ([a-z_][a-z_0-9]*)$ ]]; then
-                skipped_names+=("${BASH_REMATCH[1]}")
-            fi
-        fi
-    done < "$MAPPING_FILE"
 
-    if [[ ${#skipped_names[@]} -eq 0 ]]; then
-        log_info "无需本地化的传递依赖插件"
-        return
+        local target_path="$PLUGINS_DIR/$new_name"
+        local source_path=""
+
+        source_path=$(find_closure_package_source_path "$old_name")
+        if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT" && [[ -d "$target_path" ]] && is_pub_cache_path "$source_path" && ! package_in_current_dependency_graph "$old_name"; then
+            source_path=""
+        fi
+        if [[ -n "$source_path" && "$source_path" != "$target_path" ]]; then
+            rename_plugin "$source_path" "$old_name" "$new_name"
+        elif [[ -d "$target_path" ]]; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  $new_name 已存在，复用并重写闭包引用" || true
+        else
+            log_warning "闭包重命名跳过: $old_name -> $new_name (未找到源)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if [[ "$DRY_RUN" == "false" && -d "$target_path" ]]; then
+            rewrite_pubspec_closure_refs "$target_path/pubspec.yaml" "$pairs_file"
+        fi
+
+        echo "$old_name|$new_name" >> "$applied_pairs_file"
+        _REPORT_RENAME_ENTRIES+=("$old_name → $new_name")
+        applied=$((applied + 1))
+    done < "$pairs_file"
+
+    if [[ "$DRY_RUN" == "false" && -s "$applied_pairs_file" ]]; then
+        rewrite_workspace_pubspec_closure_refs "$applied_pairs_file"
+        if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT"; then
+            normalize_flutter_inappwebview_closure_paths
+            normalize_video_player_closure_paths
+            ensure_renamed_platform_compat_shims
+        fi
+
+        while IFS='|' read -r old_name new_name || [[ -n "$old_name" ]]; do
+            [[ -z "$old_name" || -z "$new_name" ]] && continue
+            update_dart_imports "$old_name" "$new_name"
+        done < "$applied_pairs_file"
+    fi
+
+    _REPORT_RENAME_COUNT=$((_REPORT_RENAME_COUNT + applied))
+    _REPORT_RENAME_SKIPPED=$((_REPORT_RENAME_SKIPPED + skipped))
+
+    rm -f "$pairs_file" "$applied_pairs_file" 2>/dev/null || true
+
+    log_success "闭包重命名完成: $applied 个, 跳过 $skipped 个"
+}
+
+# =============================================
+# Phase 1.5: 传递依赖本地化（仅复制，不重命名）
+# =============================================
+
+# 将不能/不宜重命名的 iOS 插件复制到 plugins/，用 dependency_overrides
+# 固定到本地源码后再做原生变异。
+localize_skipped_plugins() {
+    detect_pub_cache
+    load_manifest || true
+    build_rename_maps
+
+    # 从映射文件中提取被跳过的插件名。
+    # 格式: "# image_picker_ios" 在跳过区域内
+    local in_skip_section=false
+    local names_file
+    names_file=$(mktemp)
+
+    if [[ -f "$MAPPING_FILE" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "# 跳过的插件 "* ]]; then
+                in_skip_section=true
+                continue
+            fi
+            if [[ "$in_skip_section" == "true" ]]; then
+                if [[ "$line" =~ ^#\ ([a-z_][a-z_0-9]*)$ ]]; then
+                    echo "${BASH_REMATCH[1]}" >> "$names_file"
+                fi
+            fi
+        done < "$MAPPING_FILE"
+    fi
+
+    # 进一步把 manifest 中未被重命名的 remote iOS 插件也本地化。
+    # 这覆盖了 oio 这类项目的大量平台实现包（audio_session、webview 等），
+    # 让它们不只参与 Pod 集成，也能进入 Native Mutation 与 dep-strings。
+    if [[ "$MANIFEST_LOADED" == "true" ]]; then
+        while IFS= read -r mline || [[ -n "$mline" ]]; do
+            local type name version level
+            IFS=':' read -r type name version level <<< "$mline"
+            [[ "$type" == "remote" ]] || continue
+            [[ -n "$name" ]] || continue
+            [[ "$level" == "disabled" ]] && continue
+            if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT" && ! package_in_current_dependency_graph "$name"; then
+                [[ "$VERBOSE" == "true" ]] && log_info "  manifest 共享依赖未在当前依赖图中，跳过本地化: $name" || true
+                continue
+            fi
+
+            local renamed
+            renamed=$(get_renamed_plugin_name "$name")
+            if [[ "$renamed" != "$name" && -d "$PLUGINS_DIR/$renamed" ]]; then
+                continue
+            fi
+
+            local source_path
+            source_path=$(find_local_plugin_path "$name")
+            [[ -z "$source_path" ]] && source_path=$(find_pub_cache_plugin_path "$name" "$version")
+            [[ -n "$source_path" ]] || continue
+            is_apple_native_plugin_dir "$source_path" || continue
+
+            echo "$name" >> "$names_file"
+        done < <(manifest_config_lines)
     fi
 
     local localized=0
 
-    for plugin_name in "${skipped_names[@]}"; do
-        # 已存在于 plugins/ 且有文件则跳过；空目录（复制失败残留）则清除重来
+    local unique_names_file
+    unique_names_file=$(mktemp)
+    sort -u "$names_file" > "$unique_names_file"
+    rm -f "$names_file" 2>/dev/null || true
+
+    if [[ ! -s "$unique_names_file" ]]; then
+        rm -f "$unique_names_file" 2>/dev/null || true
+        log_info "无需本地化的传递/未重命名依赖插件"
+        return
+    fi
+
+    while IFS= read -r plugin_name || [[ -n "$plugin_name" ]]; do
+        [[ -z "$plugin_name" ]] && continue
+
+        local preferred_version
+        preferred_version=$(get_manifest_package_version "$plugin_name")
+
+        local renamed
+        renamed=$(get_renamed_plugin_name "$plugin_name")
+        if [[ "$renamed" != "$plugin_name" && -d "$PLUGINS_DIR/$renamed" ]]; then
+            [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name 已重命名为 $renamed，跳过本地化" || true
+            continue
+        fi
+
+        # 已存在于 plugins/ 且版本符合 manifest 则跳过；空目录或版本不符则清除重来
         if [[ -d "$PLUGINS_DIR/$plugin_name" ]]; then
             local has_any_file
             has_any_file=$(find "$PLUGINS_DIR/$plugin_name" -type f -print -quit 2>/dev/null)
             if [[ -n "$has_any_file" ]]; then
-                [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name 已在 plugins/，跳过" || true
-                continue
+                local existing_version
+                existing_version=$(get_plugin_version "$PLUGINS_DIR/$plugin_name")
+                if [[ -n "$preferred_version" && "$existing_version" != "$preferred_version" ]]; then
+                    log_info "  $plugin_name 已在 plugins/，但版本为 ${existing_version:-未知}，manifest 需要 $preferred_version，重新复制..."
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        localized=$((localized + 1))
+                        continue
+                    fi
+                    rm -rf "$PLUGINS_DIR/$plugin_name"
+                else
+                    prune_non_runtime_package_files "$PLUGINS_DIR/$plugin_name"
+                    ensure_project_dependency_override_path "$plugin_name" "plugins/$plugin_name"
+                    [[ "$VERBOSE" == "true" ]] && log_info "  $plugin_name 已在 plugins/，跳过" || true
+                    continue
+                fi
+            else
+                log_info "  $plugin_name 目录存在但无文件，重新复制..."
+                rm -rf "$PLUGINS_DIR/$plugin_name"
             fi
-            log_info "  $plugin_name 目录存在但无文件，重新复制..."
-            rm -rf "$PLUGINS_DIR/$plugin_name"
         fi
 
         local source_path
@@ -1775,7 +3770,7 @@ localize_skipped_plugins() {
             source_path="$FLUTTER_BASE_DIR/$plugin_name"
         fi
         if [[ -z "$source_path" ]]; then
-            source_path=$(find_pub_cache_plugin_path "$plugin_name")
+            source_path=$(find_pub_cache_plugin_path "$plugin_name" "$preferred_version")
         fi
 
         if [[ -z "$source_path" ]]; then
@@ -1798,10 +3793,7 @@ localize_skipped_plugins() {
         mkdir -p "$PLUGINS_DIR"
         cp -R "$source_path" "$PLUGINS_DIR/$plugin_name"
 
-        rm -rf "$PLUGINS_DIR/$plugin_name/.git" 2>/dev/null || true
-        rm -rf "$PLUGINS_DIR/$plugin_name/.dart_tool" 2>/dev/null || true
-        rm -rf "$PLUGINS_DIR/$plugin_name/build" 2>/dev/null || true
-        rm -rf "$PLUGINS_DIR/$plugin_name/example" 2>/dev/null || true
+        prune_non_runtime_package_files "$PLUGINS_DIR/$plugin_name"
 
         # 验证复制是否成功
         local copied_files
@@ -1810,48 +3802,22 @@ localize_skipped_plugins() {
             log_warning "  $plugin_name: cp 复制后无文件，尝试 rsync..."
             rm -rf "$PLUGINS_DIR/$plugin_name"
             rsync -a "$source_path/" "$PLUGINS_DIR/$plugin_name/"
-            rm -rf "$PLUGINS_DIR/$plugin_name/.git" "$PLUGINS_DIR/$plugin_name/.dart_tool" \
-                   "$PLUGINS_DIR/$plugin_name/build" "$PLUGINS_DIR/$plugin_name/example" 2>/dev/null || true
+            prune_non_runtime_package_files "$PLUGINS_DIR/$plugin_name"
         fi
 
         # 通过 dependency_overrides 强制使用本地路径
         # 不能改 dependencies（父包要求 hosted 源，path 源会冲突）
-        local pubspec="$PROJECT_ROOT/pubspec.yaml"
-
-        if ! grep -q "^dependency_overrides:" "$pubspec" 2>/dev/null; then
-            echo "" >> "$pubspec"
-            echo "dependency_overrides:" >> "$pubspec"
-        fi
-
-        # 检查是否已在 dependency_overrides 中
-        local already_overridden=false
-        local in_overrides=false
-        while IFS= read -r pline; do
-            if [[ "$pline" == "dependency_overrides:" ]]; then in_overrides=true; continue; fi
-            if [[ "$in_overrides" == "true" ]]; then
-                [[ "$pline" =~ ^[a-z] ]] && break
-                [[ "$pline" =~ ^[[:space:]]+${plugin_name}: ]] && already_overridden=true && break
-            fi
-        done < "$pubspec"
-
-        if [[ "$already_overridden" == "false" ]]; then
-            local override_line
-            override_line=$(grep -n "^dependency_overrides:" "$pubspec" | head -1 | cut -d: -f1)
-            if [[ -n "$override_line" ]]; then
-                sed -i '' "${override_line}a\\
-  ${plugin_name}:\\
-    path: plugins/${plugin_name}
-" "$pubspec"
-            fi
-        fi
+        ensure_project_dependency_override_path "$plugin_name" "plugins/$plugin_name"
 
         localized=$((localized + 1))
-    done
+    done < "$unique_names_file"
+
+    rm -f "$unique_names_file" 2>/dev/null || true
 
     if [[ $localized -gt 0 ]]; then
         local dry_prefix=""
         [[ "$DRY_RUN" == "true" ]] && dry_prefix="[DRY-RUN] "
-        log_success "${dry_prefix}本地化 $localized 个传递依赖插件（不重命名，仅用于 L0 变异注入）"
+        log_success "${dry_prefix}本地化 $localized 个传递/未重命名依赖插件（不改包名，参与原生变异与字符串混淆）"
     fi
 }
 
@@ -1892,66 +3858,199 @@ derive_seed() {
     log_info "建议将 seed 记录到 ab_config.yaml 或通过 --seed 参数传入"
 }
 
+# 构建重命名映射缓存：同时支持当前 mapping 文件与最近一次报告兜底。
+build_rename_maps() {
+    if [[ -n "$_FORWARD_MAP_FILE" && -f "$_FORWARD_MAP_FILE" && -n "$_REVERSE_MAP_FILE" && -f "$_REVERSE_MAP_FILE" ]]; then
+        return
+    fi
+
+    _FORWARD_MAP_FILE=$(mktemp)
+    _REVERSE_MAP_FILE=$(mktemp)
+
+    local pairs_file
+    pairs_file=$(mktemp)
+
+    if [[ -f "$MAPPING_FILE" ]]; then
+        grep -v "^#" "$MAPPING_FILE" 2>/dev/null | grep -- "->" | \
+            awk -F'->' '
+                {
+                    orig=$1
+                    renamed=$2
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", orig)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", renamed)
+                    if (orig != "" && renamed != "") {
+                        print orig "|" renamed
+                    }
+                }' >> "$pairs_file"
+    fi
+
+    if [[ -n "$CURRENT_PROJECT" ]]; then
+        local report_file
+        while IFS= read -r report_file; do
+            [[ -f "$report_file" ]] || continue
+            awk -F'→' '
+                /^[[:space:]]*[[:alnum:]_.+-]+[[:space:]]+→[[:space:]]+[[:alnum:]_.+-]+[[:space:]]*$/ {
+                    orig=$1
+                    renamed=$2
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", orig)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", renamed)
+                    if (orig != "" && renamed != "") {
+                        print orig "|" renamed
+                    }
+                }' "$report_file" >> "$pairs_file"
+        done < <(find_latest_framework_report "$CURRENT_PROJECT" || true)
+    fi
+
+    load_closure_rename_pairs >> "$pairs_file"
+
+    perl - "$pairs_file" > "$pairs_file.chain" <<'PERL'
+use strict;
+use warnings;
+
+my ($pairs_file) = @ARGV;
+open my $fh, '<', $pairs_file or exit 0;
+
+my %direct;
+my @orig_order;
+while (my $line = <$fh>) {
+    chomp $line;
+    next unless $line =~ /^([A-Za-z0-9_.+-]+)\|([A-Za-z0-9_.+-]+)$/;
+    my ($orig, $renamed) = ($1, $2);
+    next if $orig eq '' || $renamed eq '' || $orig eq $renamed;
+    if (!exists $direct{$orig}) {
+        $direct{$orig} = $renamed;
+        push @orig_order, $orig;
+    }
+}
+close $fh;
+
+sub final_name {
+    my ($name) = @_;
+    my %seen;
+    while (exists $direct{$name} && !$seen{$name}++) {
+        $name = $direct{$name};
+    }
+    return $name;
+}
+
+sub root_name {
+    my ($name) = @_;
+    my %seen;
+    my $changed = 1;
+    while ($changed && !$seen{$name}++) {
+        $changed = 0;
+        for my $candidate (@orig_order) {
+            if (($direct{$candidate} // '') eq $name) {
+                $name = $candidate;
+                $changed = 1;
+                last;
+            }
+        }
+    }
+    return $name;
+}
+
+my %forward_seen;
+my %reverse_seen;
+for my $orig (@orig_order) {
+    my $final = final_name($orig);
+    next if $orig eq $final;
+    if (!$forward_seen{$orig}++) {
+        print "F|$orig|$final\n";
+    }
+
+    my $root = root_name($orig);
+    if (!$reverse_seen{$final}++) {
+        print "R|$final|$root\n";
+    }
+}
+PERL
+
+    while IFS='|' read -r kind orig renamed; do
+        [[ -z "$kind" || -z "$orig" || -z "$renamed" ]] && continue
+        if [[ "$kind" == "F" ]]; then
+            echo "${orig}:${renamed}" >> "$_FORWARD_MAP_FILE"
+        elif [[ "$kind" == "R" ]]; then
+            echo "${orig}:${renamed}" >> "$_REVERSE_MAP_FILE"
+        fi
+    done < "$pairs_file.chain"
+
+    rm -f "$pairs_file" "$pairs_file.chain" 2>/dev/null || true
+}
+
 # 加载项目清单
 load_manifest() {
     if [[ "$MANIFEST_LOADED" == "true" ]]; then
         return
     fi
 
-    if [[ -z "$MANIFEST_FILE" ]]; then
-        local project="$CURRENT_PROJECT"
-        if [[ -z "$project" ]]; then
-            local config_file="$PROJECT_ROOT/ab_config.yaml"
-            if [[ -f "$config_file" ]]; then
-                project=$(grep "^project:" "$config_file" | head -1 | sed 's/^project: *//' | tr -d '\r\n"')
-            fi
-        fi
-        if [[ -n "$project" && -f "$MANIFESTS_DIR/${project}.conf" ]]; then
-            MANIFEST_FILE="$MANIFESTS_DIR/${project}.conf"
-        fi
-    fi
+    local manifest_files=()
+    local manifest_file
+    while IFS= read -r manifest_file; do
+        [[ -f "$manifest_file" ]] && manifest_files+=("$manifest_file")
+    done < <(get_manifest_files)
 
-    if [[ -z "$MANIFEST_FILE" || ! -f "$MANIFEST_FILE" ]]; then
+    if [[ ${#manifest_files[@]} -eq 0 ]]; then
         [[ "$VERBOSE" == "true" ]] && log_info "无项目清单，所有插件使用 L0 (仅注入)" || true
         return
     fi
 
-    log_info "加载项目清单: $(basename "$MANIFEST_FILE")"
+    if [[ "$MANIFEST_FILE_EXPLICIT" != "true" ]]; then
+        local project_manifest
+        project_manifest=$(get_project_manifest_file)
+        if [[ -n "$project_manifest" ]]; then
+            MANIFEST_FILE="$project_manifest"
+        elif project_uses_shared_deep_obfuscation "$CURRENT_PROJECT" && [[ -f "$MANIFESTS_DIR/_shared.conf" ]]; then
+            MANIFEST_FILE="$MANIFESTS_DIR/_shared.conf"
+        fi
+    fi
+
+    log_info "加载 Framework 清单: $(printf '%s ' "${manifest_files[@]##*/}" | sed 's/[[:space:]]*$//')"
 
     MANIFEST_TMPFILE=$(mktemp)
-    local entry_count=0
+    local raw_manifest
+    raw_manifest=$(mktemp)
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]] && continue
+    manifest_config_lines > "$raw_manifest"
 
-        local type name version level
-        IFS=':' read -r type name version level <<< "$line"
-        [[ -z "$name" || -z "$level" ]] && continue
+    awk -F':' '
+        $2 != "" && $4 != "" {
+            name = $2
+            if (!(name in seen)) {
+                order[++count] = name
+                seen[name] = 1
+            }
+            level[name] = $4
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                name = order[i]
+                print name ":" level[name]
+            }
+        }
+    ' "$raw_manifest" > "$MANIFEST_TMPFILE"
 
-        echo "${name}:${level}" >> "$MANIFEST_TMPFILE"
-        entry_count=$((entry_count + 1))
-        [[ "$VERBOSE" == "true" ]] && log_info "  $name → $level" || true
-    done < "$MANIFEST_FILE"
+    if [[ "$VERBOSE" == "true" ]]; then
+        while IFS=':' read -r name level || [[ -n "$name" ]]; do
+            [[ -n "$name" && -n "$level" ]] && log_info "  $name → $level" || true
+        done < "$MANIFEST_TMPFILE"
+    fi
+    rm -f "$raw_manifest" 2>/dev/null || true
+
+    local entry_count
+    entry_count=$(wc -l < "$MANIFEST_TMPFILE" | tr -d ' ')
 
     MANIFEST_LOADED=true
     log_info "  清单条目: $entry_count 个"
 
     # 构建反向映射（new_name → original_name）用于清单/profile 查找
-    _REVERSE_MAP_FILE=$(mktemp)
-    if [[ -f "$MAPPING_FILE" ]]; then
-        grep -v "^#" "$MAPPING_FILE" | grep -- "->" | while IFS= read -r mline; do
-            local orig new
-            orig=$(echo "$mline" | sed 's/\s*->\s*/|/' | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            new=$(echo "$mline" | sed 's/\s*->\s*/|/' | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            [[ -n "$orig" && -n "$new" ]] && echo "${new}:${orig}" >> "$_REVERSE_MAP_FILE"
-        done
-    fi
+    build_rename_maps
 }
 
 # 获取重命名前的原始插件名（如果有映射的话）
 get_original_plugin_name() {
     local plugin_name="$1"
+    build_rename_maps
     if [[ -n "$_REVERSE_MAP_FILE" && -f "$_REVERSE_MAP_FILE" ]]; then
         local orig
         orig=$(grep "^${plugin_name}:" "$_REVERSE_MAP_FILE" 2>/dev/null | head -1 | cut -d: -f2)
@@ -1960,22 +4059,15 @@ get_original_plugin_name() {
     echo "$plugin_name"
 }
 
-# 获取重命名后的当前插件名（如果有映射的话）
-# 反向映射文件格式为 new:orig，按 orig 反查 new。
 get_renamed_plugin_name() {
     local original_name="$1"
-    if [[ -n "$_REVERSE_MAP_FILE" && -f "$_REVERSE_MAP_FILE" ]]; then
+    build_rename_maps
+    if [[ -n "$_FORWARD_MAP_FILE" && -f "$_FORWARD_MAP_FILE" ]]; then
         local renamed
-        renamed=$(grep -- ":${original_name}\$" "$_REVERSE_MAP_FILE" 2>/dev/null | head -1 | cut -d: -f1)
+        renamed=$(grep "^${original_name}:" "$_FORWARD_MAP_FILE" 2>/dev/null | head -1 | cut -d: -f2)
         [[ -n "$renamed" ]] && echo "$renamed" && return
     fi
     echo "$original_name"
-}
-
-# 判断文件是否含预处理分支（#if/#ifdef/...），用于 profile 跳过有条件编译的文件
-file_has_preprocessor_blocks() {
-    local file="$1"
-    grep -qE '^[[:space:]]*#(if|ifdef|ifndef|else|elif|endif)\b' "$file" 2>/dev/null
 }
 
 # 获取插件的混淆级别
@@ -2125,9 +4217,12 @@ generate_mutation_file() {
     fi
 
     local num_ops=$(( (16#${base_hash:26:2} % 14) + 10 ))
+    num_ops=$(native_generated_junk_count "$num_ops" "$REVIEW_NATIVE_MAX_OPS")
+    local trace_depth
+    trace_depth=$(native_callstack_depth)
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        [[ "$VERBOSE" == "true" ]] && log_info "  [DRY-RUN] 生成 $filename (class: $full_class, ${num_strings} strings, ${num_ops} ops)" || true
+        [[ "$VERBOSE" == "true" ]] && log_info "  [DRY-RUN] 生成 $filename (class: $full_class, ${num_strings} strings, ${num_ops} ops, trace_depth=${trace_depth})" || true
         return
     fi
 
@@ -2143,6 +4238,7 @@ generate_mutation_file() {
 
     local info_entries=""
     local info_count=$(( (16#${base_hash:20:2} % 12) + 10 ))
+    info_count=$(native_generated_junk_count "$info_count" "$REVIEW_NATIVE_MAX_INFO_ENTRIES")
     for (( k=0; k<info_count; k++ )); do
         local k_hash
         k_hash=$(hash_derive "${SEED}:${plugin_name}:${file_index}:k:${k}")
@@ -2224,8 +4320,38 @@ generate_mutation_file() {
     local sel_name
     sel_name=$(hex_to_identifier "$sel_hash")
 
+    local trace_methods=""
+    local trace_decls=""
+    local trace_load_entry=""
+    if [[ "$trace_depth" -gt 0 ]]; then
+        local prev_call="[self _zt_compute_${sel_name}:input]"
+        local last_trace_name=""
+        for (( td=1; td<=trace_depth; td++ )); do
+            local td_hash
+            td_hash=$(hash_derive "${SEED}:${plugin_name}:${file_index}:trace:${td}")
+            local td_name
+            td_name=$(hex_to_identifier "$td_hash")
+            local td_val
+            td_val=$(hex_to_int "$td_hash" 8)
+            trace_decls="${trace_decls}+ (NSUInteger)_zt_trace_${td_name}:(NSUInteger)input;
+"
+            trace_methods="${trace_methods}
++ (NSUInteger)_zt_trace_${td_name}:(NSUInteger)input {
+    NSUInteger value = ${prev_call};
+    value = (value ^ ${td_val}UL) + (input << $(( (td % 7) + 1 )));
+    return value;
+}
+"
+            prev_call="[self _zt_trace_${td_name}:input]"
+            last_trace_name="$td_name"
+        done
+        trace_load_entry="        info[@\"_zt_trace\"] = @([self _zt_trace_${last_trace_name}:info.count + ${trace_depth}UL]);
+"
+    fi
+
     local extra_methods=""
     local num_extra=$(( (16#${base_hash:28:2} % 8) + 6 ))
+    num_extra=$(native_generated_junk_count "$num_extra" "$REVIEW_NATIVE_MAX_EXTRA_METHODS")
     for (( e=0; e<num_extra; e++ )); do
         local em_hash
         em_hash=$(hash_derive "${SEED}:${plugin_name}:${file_index}:em:${e}")
@@ -2360,7 +4486,7 @@ ${switch_body}        default: r = r ^ ${em_int2}UL; break;
 #import <objc/runtime.h>
 
 @interface ${full_class} : NSObject
-${prop_decls}@end
+${prop_decls}${trace_decls}@end
 
 @implementation ${full_class}
 
@@ -2371,6 +4497,7 @@ ${info_entries}
         info[@"_zt_os"] = [[NSProcessInfo processInfo] operatingSystemVersionString];
         info[@"_zt_id"] = [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
         info[@"_zt_ts"] = @([[NSDate date] timeIntervalSince1970]);
+${trace_load_entry}
 
         objc_setAssociatedObject(
             [${full_class} class],
@@ -2414,6 +4541,7 @@ ${compute_body}    return result;
         @"sample": [self _zt_variant_${sel_name}:0] ?: @"",
     };
 }
+${trace_methods}
 ${extra_methods}
 @end
 OBJC_EOF
@@ -2479,12 +4607,97 @@ find_all_ios_source_dirs() {
             dirs+=("$dir")
         fi
     done < <(find "$plugin_path" -type f \( -name "*.m" -o -name "*.swift" \) -not -name "${INJECT_PREFIX}*" \
+             -not -path "*/example/*" -not -path "*/examples/*" \
+             -not -path "*/test/*" -not -path "*/tests/*" \
+             -not -path "*/RunnerTests/*" -not -path "*/Tests/*" \
+             -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
              \( -path "*/ios/*" -o -path "*/darwin/*" \) 2>/dev/null | \
              while read -r f; do dirname "$f"; done | sort -u)
 
     for dir in "${dirs[@]}"; do
         echo "$dir"
     done
+}
+
+is_generated_native_file() {
+    local file="$1"
+    local fname
+    fname=$(basename "$file")
+
+    case "$fname" in
+        Package.swift|*.g.m|*.g.mm|*.g.h|*.g.swift|*.generated.*|GeneratedPluginRegistrant.*)
+            return 0
+            ;;
+    esac
+
+    if grep -qE 'Generated file|generated file|DO NOT EDIT|Do not edit' "$file" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+file_has_preprocessor_blocks() {
+    local file="$1"
+    grep -qE '^[[:space:]]*#(if|ifdef|ifndef|else|elif|endif)\b' "$file" 2>/dev/null
+}
+
+# 无专属 profile 时使用的通用变换。只处理文件内部符号和方法体噪音，
+# 不碰公开 pluginClass / channel / Pigeon 生成 API。
+apply_generic_native_transforms() {
+    local plugin_path="$1"
+    local plugin_name="$2"
+    local level="$3"
+    shift 3
+    local source_dirs=("$@")
+
+    [[ "$level" == "L1" || "$level" == "L2" || "$level" == "L3" ]] || return 0
+
+    local objc_files=()
+    local swift_files=()
+
+    for src_dir in "${source_dirs[@]}"; do
+        [[ -d "$src_dir" ]] || continue
+        while IFS= read -r f; do
+            [[ -f "$f" ]] || continue
+            is_generated_native_file "$f" && continue
+            objc_files+=("$f")
+        done < <(find "$src_dir" -maxdepth 2 -type f \( -name "*.m" -o -name "*.mm" \) ! -name "${INJECT_PREFIX}*" 2>/dev/null)
+
+        while IFS= read -r f; do
+            [[ -f "$f" ]] || continue
+            is_generated_native_file "$f" && continue
+            swift_files+=("$f")
+        done < <(find "$src_dir" -maxdepth 2 -type f -name "*.swift" ! -name "Package.swift" 2>/dev/null)
+    done
+
+    if [[ "$level" == "L1" || "$level" == "L2" || "$level" == "L3" ]]; then
+        for f in "${objc_files[@]}"; do
+            bt_rename_static_functions "$f"
+        done
+        for f in "${swift_files[@]}"; do
+            bt_rename_swift_privates "$f"
+        done
+    fi
+
+    if [[ "$level" == "L2" || "$level" == "L3" ]]; then
+        for f in "${objc_files[@]}"; do
+            file_has_preprocessor_blocks "$f" && continue
+            bt_reorder_objc_methods "$f"
+        done
+        # Swift 通用重排对 extension/attribute 更敏感，保留给专属 profile。
+    fi
+
+    if [[ "$level" == "L3" ]]; then
+        for f in "${objc_files[@]}"; do
+            bt_inject_dead_branches "$f"
+        done
+        for f in "${swift_files[@]}"; do
+            bt_inject_swift_dead_branches "$f"
+        done
+    fi
+
+    [[ "$VERBOSE" == "true" ]] && log_info "    [generic-$level] $plugin_name: ObjC=${#objc_files[@]} Swift=${#swift_files[@]}" || true
 }
 
 # 清理插件中之前注入的文件，结果存入 _CLEAN_COUNT
@@ -2538,15 +4751,15 @@ mutate_plugin() {
     fi
 
     local has_profile=false
+    local use_generic_profile=false
     if [[ "$level" != "L0" ]]; then
         local profile_result=0
         load_profile "$plugin_name" || profile_result=$?
         if [[ $profile_result -eq 0 ]]; then
             has_profile=true
         else
-            log_warning "  $plugin_name: 级别 $level 但无 profile，降级为 L0"
-            level="L0"
-            _PLUGIN_LEVEL="L0"
+            log_warning "  $plugin_name: 级别 $level 但无 profile，使用通用原生变换"
+            use_generic_profile=true
         fi
     fi
 
@@ -2567,14 +4780,13 @@ mutate_plugin() {
         local num_classes=$OVERRIDE_CLASSES
         if [[ $num_classes -eq 0 ]]; then
             num_classes=$(( (16#${plugin_hash:0:2} % 8) + 10 ))
+            num_classes=$(native_class_count "$num_classes")
         fi
 
         local target_dir="${source_dirs[0]}"
 
-        for (( i=0; i<num_classes; i++ )); do
-            generate_mutation_file "$plugin_name" "$i" "$target_dir"
-            _PLUGIN_FILES=$((_PLUGIN_FILES + 1))
-        done
+        generate_mutation_file_batch "$plugin_name" "$num_classes" "$target_dir"
+        _PLUGIN_FILES=$((_PLUGIN_FILES + num_classes))
 
         if [[ ${#source_dirs[@]} -gt 1 ]]; then
             for (( d=1; d<${#source_dirs[@]}; d++ )); do
@@ -2584,17 +4796,24 @@ mutate_plugin() {
                 local sub_hash
                 sub_hash=$(hash_derive "${SEED}:${plugin_name}:sub:${sub_name}")
                 local sub_classes=$(( (16#${sub_hash:0:2} % 6) + 6 ))
+                sub_classes=$(native_class_count "$sub_classes")
 
-                for (( i=0; i<sub_classes; i++ )); do
-                    generate_mutation_file "${plugin_name}_${sub_name}" "$i" "$sub_dir"
-                    _PLUGIN_FILES=$((_PLUGIN_FILES + 1))
-                done
+                generate_mutation_file_batch "${plugin_name}_${sub_name}" "$sub_classes" "$sub_dir"
+                _PLUGIN_FILES=$((_PLUGIN_FILES + sub_classes))
             done
+        fi
+
+        if [[ "$use_generic_profile" == "true" ]]; then
+            apply_generic_native_transforms "$plugin_path" "$plugin_name" "$level" "${source_dirs[@]}"
         fi
 
         local dry_prefix=""
         [[ "$DRY_RUN" == "true" ]] && dry_prefix="[DRY-RUN] "
-        log_info "  ${dry_prefix}$plugin_name [L0]: 注入 $_PLUGIN_FILES 个变异文件"
+        if [[ "$use_generic_profile" == "true" ]]; then
+            log_info "  ${dry_prefix}$plugin_name [$level,generic]: 注入 $_PLUGIN_FILES 个变异文件 + 通用原生变换"
+        else
+            log_info "  ${dry_prefix}$plugin_name [L0]: 注入 $_PLUGIN_FILES 个变异文件"
+        fi
     fi
 
     if [[ "$VERIFY_AFTER" == "true" && "$DRY_RUN" != "true" ]]; then
@@ -2679,7 +4898,15 @@ _collect_plugin_detail() {
     inject_files=$(find "$plugin_dir" -name "${INJECT_PREFIX}*.m" -type f 2>/dev/null | sort)
     if [[ -n "$inject_files" ]]; then
         _REPORT_DETAIL_ENTRIES+=("    新增文件:")
+        local inject_total=0
+        local inject_shown=0
+        local inject_limit="$REVIEW_MUTATION_DETAIL_INJECT_LIMIT"
         while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            inject_total=$((inject_total + 1))
+            if [[ "$inject_shown" -ge "$inject_limit" ]]; then
+                continue
+            fi
             local fname
             fname=$(basename "$f")
             local lines
@@ -2689,7 +4916,11 @@ _collect_plugin_detail() {
             local methods
             methods=$(grep -cE '^[[:space:]]*[-+][[:space:]]*\(' "$f" 2>/dev/null || true)
             _REPORT_DETAIL_ENTRIES+=("      + $fname  (${lines} 行, ${classes} 类, ${methods} 方法)")
+            inject_shown=$((inject_shown + 1))
         done <<< "$inject_files"
+        if [[ "$inject_total" -gt "$inject_shown" ]]; then
+            _REPORT_DETAIL_ENTRIES+=("      ... 省略 $((inject_total - inject_shown)) 个注入文件（完整数量见 JSON counts.injected_files）")
+        fi
     fi
 
     # 被修改的原有文件（检测 _zt 前缀符号 / 死分支注入）
@@ -2698,8 +4929,15 @@ _collect_plugin_detail() {
         local all_src_files
         all_src_files=$(find "$plugin_dir" -type f \( -name "*.m" -o -name "*.swift" -o -name "*.h" \) \
                         -not -name "${INJECT_PREFIX}*" \
+                        -not -path "*/example/*" -not -path "*/examples/*" \
+                        -not -path "*/test/*" -not -path "*/tests/*" \
+                        -not -path "*/RunnerTests/*" -not -path "*/Tests/*" \
+                        -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
                         \( -path "*/ios/*" -o -path "*/darwin/*" \) 2>/dev/null)
 
+        local modified_total=0
+        local modified_shown=0
+        local modified_limit="$REVIEW_MUTATION_DETAIL_MODIFIED_LIMIT"
         while IFS= read -r f; do
             [[ -z "$f" ]] && continue
             local fname
@@ -2708,7 +4946,7 @@ _collect_plugin_detail() {
 
             # 检查符号重命名
             local renamed
-            renamed=$(grep -c '_zt[0-9a-f]\{4\}_' "$f" 2>/dev/null || true)
+            renamed=$(grep -cE '_zt[0-9a-f]{4,}_' "$f" 2>/dev/null || true)
             [[ $renamed -gt 0 ]] && changes+=("重命名符号×${renamed}")
 
             # 检查死分支注入
@@ -2721,13 +4959,22 @@ _collect_plugin_detail() {
             [[ $deadbranch -gt 0 ]] && changes+=("死分支×${deadbranch}")
 
             if [[ ${#changes[@]} -gt 0 ]]; then
+                modified_total=$((modified_total + 1))
+                if [[ "$modified_shown" -ge "$modified_limit" ]]; then
+                    continue
+                fi
                 local change_str
                 change_str=$(printf '%s, ' "${changes[@]}")
                 change_str="${change_str%, }"
                 _REPORT_DETAIL_ENTRIES+=("    修改文件:")
                 _REPORT_DETAIL_ENTRIES+=("      ~ $fname  ($change_str)")
+                modified_shown=$((modified_shown + 1))
             fi
         done <<< "$all_src_files"
+        if [[ "$modified_total" -gt "$modified_shown" ]]; then
+            _REPORT_DETAIL_ENTRIES+=("    修改文件:")
+            _REPORT_DETAIL_ENTRIES+=("      ... 省略 $((modified_total - modified_shown)) 个已修改源码文件")
+        fi
     fi
 
     # podspec 修补
@@ -2753,6 +5000,10 @@ run_mutate() {
     load_base_transforms
     load_manifest
     _build_class_words_pool
+
+    if project_uses_review_intensive_obfuscation "$CURRENT_PROJECT"; then
+        log_info "审核强化项目: $CURRENT_PROJECT (native files ×${REVIEW_NATIVE_CLASS_MULTIPLIER}, generated junk carried by file count, dead branches ×${REVIEW_NATIVE_DEAD_BRANCH_MULTIPLIER} cap ${REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD}, callstack depth ${REVIEW_NATIVE_CALLSTACK_DEPTH})"
+    fi
 
     local _has_flutter_base=false
     project_uses_flutter_base "$CURRENT_PROJECT" && [[ -d "$FLUTTER_BASE_DIR" ]] && _has_flutter_base=true
@@ -3087,7 +5338,7 @@ run_mutate_pods() {
     load_base_transforms
     load_manifest
 
-    if [[ "$MANIFEST_LOADED" != "true" || -z "$MANIFEST_FILE" || ! -f "$MANIFEST_FILE" ]]; then
+    if [[ "$MANIFEST_LOADED" != "true" || ! -s "$MANIFEST_TMPFILE" ]]; then
         log_info "无项目清单或清单中无 pod 条目，跳过 Pod 变异"
         return
     fi
@@ -3097,15 +5348,13 @@ run_mutate_pods() {
 
     # 检查是否有 pod: 条目
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]] && continue
         local type name version plevel
         IFS=':' read -r type name version plevel <<< "$line"
         if [[ "$type" == "pod" && -n "$name" ]]; then
             has_pod_entries=true
             break
         fi
-    done < "$MANIFEST_FILE"
+    done < <(manifest_config_lines)
 
     if [[ "$has_pod_entries" != "true" ]]; then
         log_info "清单中无 pod: 条目，跳过 Pod 变异"
@@ -3116,9 +5365,6 @@ run_mutate_pods() {
     echo ""
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]] && continue
-
         local type name version plevel
         IFS=':' read -r type name version plevel <<< "$line"
         [[ "$type" == "pod" ]] || continue
@@ -3126,7 +5372,7 @@ run_mutate_pods() {
 
         pod_count=$((pod_count + 1))
         mutate_pod "$name"
-    done < "$MANIFEST_FILE"
+    done < <(manifest_config_lines)
 
     _REPORT_POD_TOTAL=$pod_count
 
@@ -3196,14 +5442,60 @@ _report_third_party_pods() {
     echo ""
 }
 
+get_mapping_conflict_skip_count() {
+    [[ -f "$MAPPING_FILE" ]] || { echo 0; return 0; }
+
+    awk '
+        /^# 跳过的插件/ { in_skip=1; next }
+        in_skip && /^# [a-z_][a-z_0-9]*$/ { c++ }
+        END { print c + 0 }
+    ' "$MAPPING_FILE"
+}
+
+get_report_rename_skipped_count() {
+    local applied_skip="${_REPORT_RENAME_SKIPPED:-0}"
+    local conflict_skip
+    conflict_skip=$(get_mapping_conflict_skip_count)
+    if [[ "$conflict_skip" -gt "$applied_skip" ]]; then
+        echo "$conflict_skip"
+    else
+        echo "$applied_skip"
+    fi
+}
+
 generate_report() {
+    local report_status="${1:-success}"
+    local report_exit_code="${2:-0}"
     [[ "$DRY_RUN" == "true" ]] && return
 
     mkdir -p "$REPORT_DIR"
     local timestamp
     timestamp=$(date +"%Y%m%d_%H%M%S")
     local project_tag="${CURRENT_PROJECT:-unknown}"
-    REPORT_FILE="$REPORT_DIR/${project_tag}_${timestamp}.txt"
+    if [[ -z "$REPORT_FILE" ]]; then
+        REPORT_STARTED_AT="${REPORT_STARTED_AT:-$(date +"%Y-%m-%dT%H:%M:%S%z")}"
+        REPORT_STARTED_EPOCH="${REPORT_STARTED_EPOCH:-$(date +%s)}"
+        REPORT_FILE="$REPORT_DIR/obf_${project_tag}_frameworks_${timestamp}.txt"
+    fi
+
+    local _skip_section=""
+    if [[ -f "$MAPPING_FILE" ]]; then
+        local _in_skip=false
+        local _line
+        while IFS= read -r _line; do
+            if [[ "$_line" == "# 跳过的插件"* ]]; then _in_skip=true; fi
+            if [[ "$_in_skip" == "true" ]]; then _skip_section+="$_line"$'\n'; fi
+        done < "$MAPPING_FILE"
+    fi
+
+    local _rename_skipped_display=$_REPORT_RENAME_SKIPPED
+    if [[ -n "$_skip_section" ]]; then
+        local _skip_count
+        _skip_count=$(printf '%s\n' "$_skip_section" | awk '/^# [a-z_][a-z_0-9]*$/ { c++ } END { print c + 0 }')
+        if [[ "$_skip_count" -gt "$_rename_skipped_display" ]]; then
+            _rename_skipped_display=$_skip_count
+        fi
+    fi
 
     {
         echo "========================================"
@@ -3211,16 +5503,32 @@ generate_report() {
         echo "========================================"
         echo ""
         echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "状态: $report_status"
+        echo "退出码: $report_exit_code"
         echo "项目: $project_tag"
         echo "工程: $PROJECT_ROOT"
         echo "Seed: ${_REPORT_MUTATE_SEED:-N/A}"
         echo "Manifest: ${MANIFEST_FILE:-未使用}"
+        if [[ ${#_REPORT_PHASE_TIMINGS[@]} -gt 0 ]]; then
+            echo ""
+            echo "--- 阶段耗时 (Timing) ---"
+            for timing in "${_REPORT_PHASE_TIMINGS[@]}"; do
+                echo "  $timing"
+            done
+        fi
+        if [[ ${#_REPORT_WARNINGS[@]} -gt 0 ]]; then
+            echo ""
+            echo "--- 运行警告 (Warnings) ---"
+            for warning in "${_REPORT_WARNINGS[@]}"; do
+                echo "  [WARNING] $warning"
+            done
+        fi
         echo ""
 
         # ---- 重命名映射 ----
         echo "--- 重命名映射 (Rename Mapping) ---"
         echo "成功: $_REPORT_RENAME_COUNT 个"
-        echo "跳过: $_REPORT_RENAME_SKIPPED 个"
+        echo "跳过: $_rename_skipped_display 个"
         echo ""
         if [[ ${#_REPORT_RENAME_ENTRIES[@]} -gt 0 ]]; then
             for entry in "${_REPORT_RENAME_ENTRIES[@]}"; do
@@ -3231,19 +5539,23 @@ generate_report() {
         fi
         echo ""
         # 跳过的插件（从映射文件读取）
-        if [[ -f "$MAPPING_FILE" ]]; then
-            local _skip_section=""
-            local _in_skip=false
-            while IFS= read -r _line; do
-                if [[ "$_line" == "# 跳过的插件"* ]]; then _in_skip=true; fi
-                if [[ "$_in_skip" == "true" ]]; then _skip_section+="$_line"$'\n'; fi
-            done < "$MAPPING_FILE"
-            if [[ -n "$_skip_section" ]]; then
-                echo "跳过的插件 (传递依赖冲突):"
-                echo "$_skip_section" | grep "^# [a-z]" | sed 's/^# /  /' || true
-                echo "$_skip_section" | grep "^#   被依赖于" | sed 's/^# /  /' || true
-                echo ""
-            fi
+        if [[ -n "$_skip_section" ]]; then
+            echo "跳过的插件 (重命名冲突风险):"
+            echo "$_skip_section" | awk '
+                /^# [a-z_][a-z_0-9]*$/ {
+                    print "  " substr($0, 3)
+                    next
+                }
+                /^#   被依赖于:/ {
+                    print "    " substr($0, 5)
+                    next
+                }
+                /^#   原因:/ {
+                    print "    " substr($0, 5)
+                    next
+                }
+            ' || true
+            echo ""
         fi
 
         # ---- 变异 ----
@@ -3300,6 +5612,10 @@ generate_report() {
                 local src_count
                 src_count=$(find "$d" -type f \( -name "*.m" -o -name "*.swift" \) \
                            -not -name "${INJECT_PREFIX}*" \
+                           -not -path "*/example/*" -not -path "*/examples/*" \
+                           -not -path "*/test/*" -not -path "*/tests/*" \
+                           -not -path "*/RunnerTests/*" -not -path "*/Tests/*" \
+                           -not -path "*/integration_test/*" -not -path "*/test_driver/*" \
                            \( -path "*/ios/*" -o -path "*/darwin/*" \) 2>/dev/null | wc -l | tr -d ' ')
                 local podspec_patched=""
                 if grep -rq 'zt_objc_injection' "$d" 2>/dev/null; then
@@ -3317,6 +5633,8 @@ generate_report() {
         rm -f "$MAPPING_FILE"
         [[ "$VERBOSE" == "true" ]] && log_info "映射文件已合并到报告，已删除: $MAPPING_FILE" || true
     fi
+
+    _REPORT_GENERATED=true
 
     log_info "报告已保存: $REPORT_FILE"
 }
@@ -3341,9 +5659,6 @@ run_dep_strings() {
     bash "$dep_strings_script" "${args[@]}"
 }
 
-# 混淆完成后校验 fijkplayer 的 Dart/ObjC 运行时 channel 是否一致。
-# 重命名/字符串混淆若把 befovy.com/fijkplayer/* 改写成被混淆后的名字，会导致
-# MethodChannel/EventChannel 两端不匹配，播放器静默失效。此处做最终防线校验。
 verify_fijkplayer_runtime_channels_after_obfuscation() {
     local renamed
     renamed=$(get_renamed_plugin_name "fijkplayer")
@@ -3445,7 +5760,7 @@ def decode_objc_escaped(value: str) -> str:
         i += 1
     return "".join(out)
 
-def dart_channels(path: Path) -> set:
+def dart_channels(path: Path) -> set[str]:
     text = path.read_text(errors="replace")
     channels = set()
     for nums in re.findall(r"String\.fromCharCodes\(\s*\[([0-9,\s]+)\]\s*\)", text):
@@ -3467,7 +5782,7 @@ def dart_channels(path: Path) -> set:
                 channels.add(prefix)
     return channels
 
-def objc_channels(path: Path) -> set:
+def objc_channels(path: Path) -> set[str]:
     text = path.read_text(errors="replace")
     channels = set()
     for body in re.findall(r'@"((?:\\.|[^"\\])*)"', text):
@@ -3523,12 +5838,12 @@ run_all() {
     local start_time=$(date +%s)
     _IN_RUN_ALL=true
     
-    local total_steps=7
-    [[ "$SKIP_DEP_STRINGS" == "true" ]] && total_steps=6
+    local total_steps=8
+    [[ "$SKIP_DEP_STRINGS" == "true" ]] && total_steps=7
 
     echo ""
     echo "============================================"
-    echo "  Framework 混淆 (generate → apply → localize → mutate → build → pod mutate$(
+    echo "  Framework 混淆 (generate → apply → closure → localize → mutate → build → pod mutate$(
         [[ "$SKIP_DEP_STRINGS" != "true" ]] && echo " → dep-strings"
     ))"
     echo "============================================"
@@ -3537,7 +5852,10 @@ run_all() {
     # Step 1: 生成映射配置
     log_step "[1/$total_steps] 生成映射配置..."
     echo ""
+    local _phase_start
+    _phase_start=$(timer_start)
     generate_mapping
+    record_phase_timing "1. 生成映射配置" "$_phase_start"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         echo ""
@@ -3550,27 +5868,70 @@ run_all() {
     echo "--------------------------------------------"
     log_step "[2/$total_steps] 应用映射配置..."
     echo ""
+    _phase_start=$(timer_start)
     apply_mapping
+    record_phase_timing "2. 应用映射配置" "$_phase_start"
+
+    # Step 2.2: 闭包重命名
+    echo ""
+    echo "--------------------------------------------"
+    log_step "[2.2/$total_steps] 闭包重命名（父包 + 平台实现包）..."
+    echo ""
+    _phase_start=$(timer_start)
+    apply_closure_renames
+    prune_unreferenced_plugins
+    record_phase_timing "2.2 闭包重命名" "$_phase_start"
     
     # Step 2.5: 传递依赖本地化
     echo ""
     echo "--------------------------------------------"
     log_step "[2.5/$total_steps] 传递依赖本地化（不重命名，仅用于变异注入）..."
     echo ""
+    _phase_start=$(timer_start)
     localize_skipped_plugins
+    localize_closure_support_packages
+    local _closure_pairs_for_rewrite
+    _closure_pairs_for_rewrite=$(mktemp)
+    if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT"; then
+        write_existing_closure_rename_pairs "$_closure_pairs_for_rewrite"
+    else
+        load_closure_rename_pairs > "$_closure_pairs_for_rewrite"
+    fi
+    if [[ -s "$_closure_pairs_for_rewrite" ]]; then
+        rewrite_workspace_pubspec_closure_refs "$_closure_pairs_for_rewrite"
+        if project_uses_shared_deep_obfuscation "$CURRENT_PROJECT"; then
+            normalize_flutter_inappwebview_closure_paths
+            normalize_video_player_closure_paths
+            ensure_renamed_platform_compat_shims
+        fi
+        while IFS='|' read -r _closure_old _closure_new || [[ -n "$_closure_old" ]]; do
+            [[ -z "$_closure_old" || -z "$_closure_new" ]] && continue
+            update_dart_imports "$_closure_old" "$_closure_new"
+        done < "$_closure_pairs_for_rewrite"
+    fi
+    rm -f "$_closure_pairs_for_rewrite" 2>/dev/null || true
+
+    # Framework 混淆会把第三方插件源码复制到根工程，裁掉测试/示例/Pigeon
+    # 输入文件，避免后续 flutter analyze 扫到非 App 运行时代码。
+    prune_generated_dependency_non_runtime_files
+    dedupe_pubspec_dependency_overrides
+    record_phase_timing "2.5 传递依赖本地化" "$_phase_start"
     
     # Step 3: 原生代码变异
     echo ""
     echo "--------------------------------------------"
     log_step "[3/$total_steps] 原生代码变异 (Native Mutation)..."
     echo ""
+    _phase_start=$(timer_start)
     run_mutate
+    record_phase_timing "3. 原生代码变异" "$_phase_start"
     
     # Step 4: flutter pub get
     echo ""
     echo "--------------------------------------------"
     log_step "[4/$total_steps] 运行 fvm flutter pub get..."
     echo ""
+    _phase_start=$(timer_start)
     
     if project_uses_flutter_base "$CURRENT_PROJECT" && [[ -d "$FLUTTER_BASE_DIR" ]] && [[ -f "$FLUTTER_BASE_DIR/pubspec.yaml" ]]; then
         log_info "flutter_base 优先: cd flutter_base && fvm flutter pub get"
@@ -3588,12 +5949,14 @@ run_all() {
         exit 1
     fi
     log_success "主工程 pub get 完成"
+    record_phase_timing "4. fvm flutter pub get" "$_phase_start"
     
     # Step 5: pod install
     echo ""
     echo "--------------------------------------------"
     log_step "[5/$total_steps] 运行 pod install..."
     echo ""
+    _phase_start=$(timer_start)
     
     cd "$PROJECT_ROOT/ios" || { log_error "无法进入 ios 目录"; exit 1; }
 
@@ -3628,6 +5991,9 @@ run_all() {
     local _pod_rc=0
     pod install > "$_pod_log" 2>&1 || _pod_rc=$?
     grep -v '^Ignoring ' "$_pod_log" || true
+    while IFS= read -r _pod_warning || [[ -n "$_pod_warning" ]]; do
+        [[ -n "$_pod_warning" ]] && _REPORT_WARNINGS+=("pod install: $_pod_warning")
+    done < <(grep -E '^\[!\]' "$_pod_log" 2>/dev/null || true)
     rm -f "$_pod_log"
     if [[ $_pod_rc -ne 0 ]]; then
         log_error "pod install 失败"
@@ -3639,13 +6005,16 @@ run_all() {
     
     cd "$PROJECT_ROOT"
     log_success "pod install 完成"
+    record_phase_timing "5. pod install" "$_phase_start"
     
     # Step 6: 第三方 Pod 原地变异（必须在 pod install 之后）
     echo ""
     echo "--------------------------------------------"
     log_step "[6/$total_steps] 第三方 Pod 原地变异 (CocoaPods Mutation)..."
     echo ""
+    _phase_start=$(timer_start)
     run_mutate_pods
+    record_phase_timing "6. 第三方 Pod 变异" "$_phase_start"
     
     # Step 7: 依赖字符串混淆（可选）
     if [[ "$SKIP_DEP_STRINGS" != "true" ]]; then
@@ -3653,18 +6022,22 @@ run_all() {
         echo "--------------------------------------------"
         log_step "[7/$total_steps] 依赖字符串混淆 (Dep String Obfuscation)..."
         echo ""
+        _phase_start=$(timer_start)
         run_dep_strings || log_warning "依赖字符串混淆失败，但不影响其他流程"
+        record_phase_timing "7. 依赖字符串混淆" "$_phase_start"
     fi
+    patch_legacy_qr_code_scanner_web_stub
 
-    # fijkplayer runtime channel 校验（仅当工程使用 fijkplayer 时生效，否则静默通过）
     echo ""
     echo "--------------------------------------------"
-    log_step "fijkplayer runtime channel 校验..."
+    log_step "[$total_steps/$total_steps] fijkplayer runtime channel 校验..."
     echo ""
+    _phase_start=$(timer_start)
     if ! verify_fijkplayer_runtime_channels_after_obfuscation; then
-        log_error "fijkplayer runtime channel 校验失败（Dart/ObjC channel 不一致，播放器会失效）"
+        log_error "fijkplayer runtime channel 校验失败"
         exit 1
     fi
+    record_phase_timing "$total_steps. fijkplayer channel 校验" "$_phase_start"
 
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
@@ -3714,7 +6087,7 @@ Framework 混淆脚本 — 统一的 framework 混淆方案
   -h, --help             显示帮助
 
 子命令:
-  run          一键全流程 (generate → apply → mutate → build → pod mutate → dep-strings)
+  run          一键全流程 (generate → apply → closure → localize → mutate → build → pod mutate → dep-strings)
                默认包含依赖字符串混淆，可用 --no-dep-strings 跳过
   list         列出可混淆的B面 iOS 原生插件
   apply        仅应用重命名映射
@@ -3734,9 +6107,17 @@ Framework 混淆脚本 — 统一的 framework 混淆方案
   - 自动检测传递依赖中的 iOS 平台包
   - 变异注入为所有 plugins/ 下含 iOS 原生代码的插件生成唯一类
   - 支持 profile + manifest 分层混淆 (L0-L3)
+  - 原生注入内部固定并发执行，无需额外配置
 
 示例:
   $0 run                               # 一键完成（含字符串混淆，推荐）
+  $0 run -p bili                       # 对 bili 项目执行一键混淆
+  $0 run -p 91porn                     # 对 91porn 项目执行一键混淆
+  $0 run -p 91porn2                    # 对 91porn2 项目执行一键混淆
+  $0 run -p txpjb                      # 对 txpjb 项目执行一键混淆
+  $0 run -p xjpjb                      # 对 xjpjb 项目执行一键混淆
+  $0 run -p hlbdy                      # 对 hlbdy 项目执行一键混淆
+  $0 run -p nnrj                       # 对 nnrj 项目执行一键混淆
   $0 run --no-dep-strings              # 一键完成，跳过字符串混淆
   $0 run -r 80                         # 一键完成，只混淆 80% 的插件
   $0 run -d                            # 模拟运行全流程（不实际修改）
@@ -3756,6 +6137,11 @@ EOF
 }
 
 main() {
+    REPORT_COMMAND_LINE="$0 $*"
+    REPORT_STARTED_AT=$(date +"%Y-%m-%dT%H:%M:%S%z")
+    REPORT_STARTED_EPOCH=$(date +%s)
+    trap 'rc=$?; if [[ $rc -ne 0 && "${_REPORT_TRAP_ENABLED:-false}" == "true" && "${_REPORT_GENERATED:-false}" != "true" && "$DRY_RUN" != "true" ]]; then generate_report "failed" "$rc" >/dev/null 2>&1 || true; fi' EXIT
+
     echo ""
     echo "=========================================="
     echo "      Framework 混淆工具 (Rename + Mutate)"
@@ -3797,6 +6183,7 @@ main() {
                 ;;
             --manifest)
                 MANIFEST_FILE="$2"
+                MANIFEST_FILE_EXPLICIT=true
                 shift 2
                 ;;
             --classes)
@@ -3855,6 +6242,15 @@ main() {
             log_info "提示: 使用 -p 参数指定项目"
         fi
     fi
+
+    reject_retired_project "$CURRENT_PROJECT"
+
+    REPORT_COMMAND_NAME="${command:-${GENERATE_MAPPING:+generate}}"
+    [[ -z "$REPORT_COMMAND_NAME" && "$CLEAN_ONLY" == "true" ]] && REPORT_COMMAND_NAME="clean"
+    [[ -z "$REPORT_COMMAND_NAME" ]] && REPORT_COMMAND_NAME="unknown"
+    case "$command" in
+        run|mutate|mutate-pods) _REPORT_TRAP_ENABLED=true ;;
+    esac
     
     # 执行命令
     if [[ "$command" == "run" ]]; then
@@ -3880,8 +6276,10 @@ main() {
         usage
     fi
 
-    # 最后兜底：若 flutter_base/lib/image/image_loader.dart 存在，则用模板覆盖
-    patch_flutter_base_image_loader
+    # 最后兜底：仅 flutter_base 专项项目用模板覆盖 image_loader.dart
+    if project_uses_flutter_base "$CURRENT_PROJECT"; then
+        patch_flutter_base_image_loader
+    fi
 }
 
 main "$@"

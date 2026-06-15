@@ -46,7 +46,7 @@ class ASTMutationObfuscator {
             return 'if (1 > 2) { }';
         }
       case 4:
-        return 'if (1 > 2) { }';  // 原 switch 易与嵌套注入冲突破坏 case 结构
+        return 'if (1 > 2) { }'; // 原 switch 易与嵌套注入冲突破坏 case 结构
       case 5:
         return 'assert(true);';
       case 6:
@@ -63,7 +63,10 @@ class ASTMutationObfuscator {
     logger.step('AST 变异 (插入 dummy 代码)...');
 
     final seedBase = config.seedBase;
-    _random = Random(seedBase != null ? seedBase.hashCode : (DateTime.now().millisecondsSinceEpoch + (config.projectName?.hashCode ?? 0)));
+    _random = Random(seedBase != null
+        ? seedBase.hashCode
+        : (DateTime.now().millisecondsSinceEpoch +
+            (config.projectName?.hashCode ?? 0)));
 
     if (config.dryRun) {
       logger.info('[DRY-RUN] 将在方法体中插入 dummy 代码');
@@ -87,8 +90,7 @@ class ASTMutationObfuscator {
 
         if (visitor.methods.isEmpty) continue;
 
-        final rate =
-            _minRate + _random.nextDouble() * (_maxRate - _minRate);
+        final rate = _minRate + _random.nextDouble() * (_maxRate - _minRate);
         final toMutate = visitor.methods.where((m) {
           return NameGenerator.shouldInject(
             '${config.projectName ?? "x"}_${seedBase ?? ""}_mut_${path.basename(file)}_${m.name}',
@@ -106,10 +108,13 @@ class ASTMutationObfuscator {
         for (final m in toMutate) {
           int insertPos = -1;
           int braceIdx = -1;
-          if (m.bodyOffset >= 0 && m.bodyOffset < content.length && content[m.bodyOffset] == '{') {
+          if (m.bodyOffset >= 0 &&
+              m.bodyOffset < content.length &&
+              content[m.bodyOffset] == '{') {
             braceIdx = m.bodyOffset;
           } else {
-            braceIdx = _scanForBrace(content, m.bodyOffset.clamp(0, content.length));
+            braceIdx =
+                _scanForBrace(content, m.bodyOffset.clamp(0, content.length));
           }
           if (braceIdx >= 0 &&
               !_isLikelyClassBody(content, braceIdx) &&
@@ -134,7 +139,10 @@ class ASTMutationObfuscator {
           }
           if (insertPos < 0) continue;
           final actualPos = _pickMutationInsertPosition(
-            content, insertPos, m.bodyEnd, m.firstStatementEnd,
+            content,
+            insertPos,
+            m.bodyEnd,
+            m.firstStatementEnd,
           );
           if (_wouldInjectBeforeCaseOrDefault(content, actualPos)) continue;
           final snippet = _randomDummySnippet();
@@ -144,7 +152,9 @@ class ASTMutationObfuscator {
         // 按插入位置倒序，确保从后往前插入不改变未处理段的偏移
         toApply.sort((a, b) => b.pos.compareTo(a.pos));
         for (final e in toApply) {
-          content = content.substring(0, e.pos) + '${e.snippet} ' + content.substring(e.pos);
+          content = content.substring(0, e.pos) +
+              '${e.snippet}\n' +
+              content.substring(e.pos);
           totalInjections++;
         }
 
@@ -171,21 +181,26 @@ class ASTMutationObfuscator {
   bool _isLikelyClassBody(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return true;
     final c = content.codeUnitAt(i);
-    if (c == 0x3e) {  // '>'
+    if (c == 0x3e) {
+      // '>'
       // '=>' 是箭头函数，{ 是 Set/Map 字面量，不是类体
       return !(i > 0 && content.codeUnitAt(i - 1) == 0x3d);
     }
-    if (c == 0x2a) return false;  // '*' — async*/sync* 函数体
+    if (c == 0x2a) return false; // '*' — async*/sync* 函数体
     if ((c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || c == 0x5f) {
       // 提取完整单词，排除 async/sync 关键字
       final wordEnd = i + 1;
-      while (i >= 0 && ((content.codeUnitAt(i) >= 0x61 && content.codeUnitAt(i) <= 0x7a) ||
-                         (content.codeUnitAt(i) >= 0x41 && content.codeUnitAt(i) <= 0x5a) ||
-                         content.codeUnitAt(i) == 0x5f ||
-                         (content.codeUnitAt(i) >= 0x30 && content.codeUnitAt(i) <= 0x39))) {
+      while (i >= 0 &&
+          ((content.codeUnitAt(i) >= 0x61 && content.codeUnitAt(i) <= 0x7a) ||
+              (content.codeUnitAt(i) >= 0x41 &&
+                  content.codeUnitAt(i) <= 0x5a) ||
+              content.codeUnitAt(i) == 0x5f ||
+              (content.codeUnitAt(i) >= 0x30 &&
+                  content.codeUnitAt(i) <= 0x39))) {
         i--;
       }
       final word = content.substring(i + 1, wordEnd);
@@ -198,7 +213,8 @@ class ASTMutationObfuscator {
   bool _isCollectionLiteralBrace(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return false;
     return content[i] == '=' || content[i] == ':';
   }
@@ -214,8 +230,14 @@ class ASTMutationObfuscator {
       } else if (c == 0x7b) {
         if (depth == 0) {
           var j = i - 1;
-          while (j >= 0 && (content[j] == ' ' || content[j] == '\t' || content[j] == '\n' || content[j] == '\r')) j--;
-          return j >= 1 && content.codeUnitAt(j) == 0x3e && content.codeUnitAt(j - 1) == 0x3d;
+          while (j >= 0 &&
+              (content[j] == ' ' ||
+                  content[j] == '\t' ||
+                  content[j] == '\n' ||
+                  content[j] == '\r')) j--;
+          return j >= 1 &&
+              content.codeUnitAt(j) == 0x3e &&
+              content.codeUnitAt(j - 1) == 0x3d;
         }
         depth--;
       }
@@ -227,7 +249,11 @@ class ASTMutationObfuscator {
   bool _wouldInjectBeforeCaseOrDefault(String content, int pos) {
     if (pos < 0 || pos >= content.length) return false;
     var i = pos;
-    while (i < content.length && (content.codeUnitAt(i) == 0x20 || content.codeUnitAt(i) == 0x09 || content.codeUnitAt(i) == 0x0a || content.codeUnitAt(i) == 0x0d)) i++;
+    while (i < content.length &&
+        (content.codeUnitAt(i) == 0x20 ||
+            content.codeUnitAt(i) == 0x09 ||
+            content.codeUnitAt(i) == 0x0a ||
+            content.codeUnitAt(i) == 0x0d)) i++;
     if (i + 5 > content.length) return false;
     return content.startsWith('case ', i) || content.startsWith('default ', i);
   }
@@ -236,7 +262,8 @@ class ASTMutationObfuscator {
   bool _isNamedParamBrace(String content, int braceIdx) {
     if (braceIdx <= 0) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
+    while (i >= 0 &&
+        (content[i] == ' ' || content[i] == '\t' || content[i] == '\n')) i--;
     if (i < 0) return false;
     return content[i] == ',' || content[i] == '(';
   }
@@ -245,13 +272,18 @@ class ASTMutationObfuscator {
   bool _isSwitchBlockBrace(String content, int braceIdx) {
     if (braceIdx < 8) return false;
     var i = braceIdx - 1;
-    while (i >= 0 && (content.codeUnitAt(i) == 0x20 || content.codeUnitAt(i) == 0x09 || content.codeUnitAt(i) == 0x0a || content.codeUnitAt(i) == 0x0d)) i--;
+    while (i >= 0 &&
+        (content.codeUnitAt(i) == 0x20 ||
+            content.codeUnitAt(i) == 0x09 ||
+            content.codeUnitAt(i) == 0x0a ||
+            content.codeUnitAt(i) == 0x0d)) i--;
     if (i < 0 || content.codeUnitAt(i) != 0x29) return false;
     i--;
     var depth = 1;
     while (i >= 6 && depth > 0) {
       final c = content.codeUnitAt(i);
-      if (c == 0x29) depth++;
+      if (c == 0x29)
+        depth++;
       else if (c == 0x28) depth--;
       i--;
     }
@@ -261,7 +293,8 @@ class ASTMutationObfuscator {
 
   /// 随机插入位置：开始 60%、中间 20%、结束 20%
   /// 使用 AST 的 firstStatementEnd 作为中间插入点，避免 for 循环、无括号 if-else 的语法错误
-  int _pickMutationInsertPosition(String content, int bodyStart, int bodyEnd, int firstStatementEnd) {
+  int _pickMutationInsertPosition(
+      String content, int bodyStart, int bodyEnd, int firstStatementEnd) {
     if (bodyEnd <= bodyStart || bodyEnd > content.length) return bodyStart;
     final len = bodyEnd - bodyStart;
     if (len < 30) return bodyStart;
@@ -273,9 +306,12 @@ class ASTMutationObfuscator {
       // 中间：插入到第一个「顶层语句」之后，由 AST 提供，避免误入 for/if-else 内部
       if (firstStatementEnd > bodyStart && firstStatementEnd < bodyEnd - 2) {
         var pos = firstStatementEnd;
-        while (pos < content.length && pos < bodyEnd &&
-            (content[pos] == ' ' || content[pos] == '\t' ||
-                content[pos] == '\n' || content[pos] == '\r')) {
+        while (pos < content.length &&
+            pos < bodyEnd &&
+            (content[pos] == ' ' ||
+                content[pos] == '\t' ||
+                content[pos] == '\n' ||
+                content[pos] == '\r')) {
           pos++;
         }
         if (pos < bodyEnd) return pos;
@@ -302,8 +338,15 @@ class ASTMutationObfuscator {
     final esc = RegExp.escape(name);
     const prefix = r'(?:^|\n|[;}]\s*)(?:@override\s*)?\s*';
     const suffix = r'\)\s*\{';
-    const typePattern = r'(?:void|dynamic|(?!switch\b|if\b|for\b|while\b|catch\b|else\b|do\b|try\b)[A-Za-z_][A-Za-z0-9_<>, \?]*)';
-    return RegExp(prefix + r'\b' + typePattern + r'\s+' + esc + r'\s*\([\s\S]*?' + suffix);
+    const typePattern =
+        r'(?:void|dynamic|(?!switch\b|if\b|for\b|while\b|catch\b|else\b|do\b|try\b)[A-Za-z_][A-Za-z0-9_<>, \?]*)';
+    return RegExp(prefix +
+        r'\b' +
+        typePattern +
+        r'\s+' +
+        esc +
+        r'\s*\([\s\S]*?' +
+        suffix);
   }
 }
 
@@ -321,7 +364,8 @@ class _MutationMethodCollector extends RecursiveAstVisitor<void> {
     if (inner.isEmpty) return;
 
     final stmts = body.block.statements;
-    final firstEnd = stmts.isNotEmpty ? stmts.first.end : body.block.rightBracket.offset;
+    final firstEnd =
+        stmts.isNotEmpty ? stmts.first.end : body.block.rightBracket.offset;
     methods.add(_MutationMethodInfo(
       node.name.lexeme,
       body.block.leftBracket.offset,
@@ -339,7 +383,8 @@ class _MutationMethodCollector extends RecursiveAstVisitor<void> {
     if (body.block.statements.isEmpty) return;
 
     final stmts = body.block.statements;
-    final firstEnd = stmts.isNotEmpty ? stmts.first.end : body.block.rightBracket.offset;
+    final firstEnd =
+        stmts.isNotEmpty ? stmts.first.end : body.block.rightBracket.offset;
     methods.add(_MutationMethodInfo(
       node.name.lexeme,
       body.block.leftBracket.offset,
@@ -356,5 +401,6 @@ class _MutationMethodInfo {
   final int bodyEnd;
   final int firstStatementEnd;
 
-  _MutationMethodInfo(this.name, this.bodyOffset, this.bodyEnd, {required this.firstStatementEnd});
+  _MutationMethodInfo(this.name, this.bodyOffset, this.bodyEnd,
+      {required this.firstStatementEnd});
 }

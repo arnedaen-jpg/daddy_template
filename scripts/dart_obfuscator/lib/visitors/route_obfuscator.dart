@@ -32,8 +32,6 @@ class RouteObfuscator {
         return ['routes/routes.dart'];
       case 'hjsq':
         return ['router/paths.dart'];
-      case 'md':
-        return ['routes/routes.dart'];
       case '51pc':
         return ['routes/routes.dart'];
       case 'hlw':
@@ -42,10 +40,30 @@ class RouteObfuscator {
         return ['public/routes.dart'];
       case '91cg':
         return ['util/go_routers.dart'];
+      case '51cg':
+        return ['util/go_routers.dart'];
+      case 'mrds':
+        return ['util/go_routers.dart'];
       case 'yms':
         return ['common/local_router/router_map.dart'];
+      case 'oio':
+        return ['common/local_router/router_map.dart'];
+      case 'bili':
+        return ['common/local_router/router_map.dart'];
+      case '91porn':
+        return ['routers/router_map.dart'];
+      case '91porn2':
+        return ['public/routes.dart'];
+      case 'txpjb':
+        return ['route/route_config.dart'];
+      case 'xjpjb':
+        return ['route/route_config.dart'];
+      case 'hlbdy':
+        return ['util/go_routers.dart'];
       case 'acfun':
         return ['features/routes/app_routes.dart'];
+      case 'nnrj':
+        return ['routes/routes.dart'];
       case 'tx':
         return [
           'core/routers.dart',
@@ -60,6 +78,23 @@ class RouteObfuscator {
       case 'lgt':
         // 与 acfun 同：集中路由表
         return ['features/routes/app_routes.dart'];
+      case 'douyin':
+        return [
+          'router.dart',
+          'router/home.dart',
+          'router/library.dart',
+          'router/follow.dart',
+          'router/play.dart',
+          'router/mine.dart',
+          'router/profile.dart',
+          'router/pay.dart',
+          'router/webview.dart',
+          'router/chat.dart',
+          'router/search.dart',
+          'router/common.dart',
+          'router/movie.dart',
+          'router/post.dart',
+        ];
       default:
         return [
           'routes/routes.dart',
@@ -73,6 +108,11 @@ class RouteObfuscator {
       List<String> files, AnalysisContextCollection collection) async {
     final projectName = config.projectName ?? 'default';
     logger.step('路由/API路径常量混淆 (项目: $projectName)...');
+
+    if (_shouldSkipRouteObfuscation(projectName)) {
+      logger.warning('项目 $projectName 使用完整路径跳转，跳过路由 path 哈希混淆');
+      return;
+    }
 
     final patterns = _getRouteFilePatterns();
     final pathFiles = <String>[];
@@ -88,11 +128,22 @@ class RouteObfuscator {
           config.projectName == 'hlw' ||
           config.projectName == 'tiktok' ||
           config.projectName == '91cg' ||
+          config.projectName == '51cg' ||
+          config.projectName == 'mrds' ||
           config.projectName == 'yms' ||
+          config.projectName == 'oio' ||
+          config.projectName == 'bili' ||
+          config.projectName == '91porn' ||
+          config.projectName == '91porn2' ||
+          config.projectName == 'txpjb' ||
+          config.projectName == 'xjpjb' ||
+          config.projectName == 'hlbdy' ||
           config.projectName == 'acfun' ||
+          config.projectName == 'nnrj' ||
           config.projectName == 'tx' ||
           config.projectName == 'dq' ||
-          config.projectName == 'lgt') {
+          config.projectName == 'lgt' ||
+          config.projectName == 'douyin') {
         logger.warning('未找到路径常量文件: ${patterns.join(" 或 ")}');
       } else {
         logger.info('项目 $projectName 无路径混淆配置，跳过');
@@ -124,8 +175,8 @@ class RouteObfuscator {
       }
 
       if (collectedRoutes.isNotEmpty) {
-        logger
-            .info('  ${path.basename(pathFile)}: ${collectedRoutes.length} 个路径');
+        logger.info(
+            '  ${path.basename(pathFile)}: ${collectedRoutes.length} 个路径');
         allRoutes.addAll(collectedRoutes);
       }
     }
@@ -152,10 +203,12 @@ class RouteObfuscator {
           NameGenerator.generateRouteHash('${seed}_${routeParts.route}');
       final rewrite = _RouteRewrite(
         originalPattern: routeParts.route,
-        obfuscatedPattern:
-            routeParts.dynamicSuffix.isEmpty ? obfuscatedBase : '$obfuscatedBase${routeParts.dynamicSuffix}',
-        originalLocationPrefix:
-            routeParts.hasDynamicSegments ? '${routeParts.staticPrefix}/' : routeParts.route,
+        obfuscatedPattern: routeParts.dynamicSuffix.isEmpty
+            ? obfuscatedBase
+            : '$obfuscatedBase${routeParts.dynamicSuffix}',
+        originalLocationPrefix: routeParts.hasDynamicSegments
+            ? '${routeParts.staticPrefix}/'
+            : routeParts.route,
         obfuscatedLocationPrefix:
             routeParts.hasDynamicSegments ? '$obfuscatedBase/' : obfuscatedBase,
         hasDynamicSegments: routeParts.hasDynamicSegments,
@@ -179,7 +232,8 @@ class RouteObfuscator {
     if (config.dryRun) {
       logger.info('[DRY-RUN] 将混淆 ${routeRewrites.length} 个路径常量');
       for (final rewrite in routeRewrites.take(5)) {
-        logger.debug('  ${rewrite.originalPattern} -> ${rewrite.obfuscatedPattern}');
+        logger.debug(
+            '  ${rewrite.originalPattern} -> ${rewrite.obfuscatedPattern}');
       }
       if (routeRewrites.length > 5) {
         logger.debug('  ... 等 ${routeRewrites.length - 5} 个');
@@ -206,8 +260,8 @@ class RouteObfuscator {
 
     var replacedCount = 0;
     final pathFileSet = pathFiles.toSet();
-    final sortedRewrites = [...routeRewrites]
-      ..sort((a, b) => b.originalPattern.length.compareTo(a.originalPattern.length));
+    final sortedRewrites = [...routeRewrites]..sort(
+        (a, b) => b.originalPattern.length.compareTo(a.originalPattern.length));
 
     for (final file in routeAwareFiles) {
       final content = File(file).readAsStringSync();
@@ -436,7 +490,8 @@ class RouteObfuscator {
             (rewrite.hasDynamicSegments &&
                 (content.contains("'${rewrite.obfuscatedLocationPrefix}") ||
                     content.contains('"${rewrite.obfuscatedLocationPrefix}') ||
-                    content.contains('/* ${rewrite.obfuscatedLocationPrefix}')));
+                    content
+                        .contains('/* ${rewrite.obfuscatedLocationPrefix}')));
         if (leaked) {
           issues.add(
               '疑似路由哈希泄漏到 API/网络文件: $relPath -> ${rewrite.obfuscatedPattern}');
@@ -581,6 +636,13 @@ class RouteObfuscator {
   bool _looksObfuscatedRoute(String route) {
     return RegExp(r'^/[0-9a-f]{10}(?:/:[A-Za-z0-9_]+)*$').hasMatch(route);
   }
+
+  bool _shouldSkipRouteObfuscation(String projectName) {
+    // douyin 的 GoRoute 定义使用分段 path，但 Go.push 调用使用完整路径。
+    // 只改 GoRoute.path 会让注册路径和跳转路径不一致，例如:
+    // /home/movie/detailVSearchId -> /<hash>/<hash>/detailVSearchId。
+    return projectName == 'douyin';
+  }
 }
 
 class _RouteValidationResult {
@@ -650,8 +712,9 @@ class _RoutePatternParts {
       );
     }
 
-    final hasStaticAfterDynamic =
-        segments.skip(firstDynamicIndex).any((segment) => !_isDynamicSegment(segment));
+    final hasStaticAfterDynamic = segments
+        .skip(firstDynamicIndex)
+        .any((segment) => !_isDynamicSegment(segment));
     if (hasStaticAfterDynamic) {
       return _RoutePatternParts(
         route: route,
@@ -736,6 +799,31 @@ class _RouteCollector extends RecursiveAstVisitor<void> {
         routes.add(value);
       }
     }
+
+    if (constructorName == 'GoRoute') {
+      for (final argument in node.argumentList.arguments) {
+        if (argument is! NamedExpression ||
+            argument.name.label.name != 'path') {
+          continue;
+        }
+
+        final expression = argument.expression;
+        final literal = switch (expression) {
+          SimpleStringLiteral value => value,
+          StringLiteral value => value,
+          _ => null,
+        };
+
+        final value = literal?.stringValue;
+        if (value != null &&
+            value.startsWith('/') &&
+            !value.contains(r'$') &&
+            _containsLetter(value)) {
+          routes.add(value);
+        }
+      }
+    }
+
     super.visitInstanceCreationExpression(node);
   }
 }

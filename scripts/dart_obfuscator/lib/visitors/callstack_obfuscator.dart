@@ -123,29 +123,6 @@ class CallstackObfuscator {
           'app_global.dart',
           'crypto.dart',
         ];
-      case 'md':
-        return [
-          // 核心全局状态与登录
-          'store.dart', // GlobalStore - 所有登录、用户状态方法
-
-          // 网络层核心
-          'net_manager.dart', // NetManager - 网络初始化、token管理
-          'http_signature_interceptor.dart', // SignatureInterceptor - API签名
-          'http_header_interceptor.dart', // HttpHeaderInterceptor - 请求头
-          'http_resp_interceptor.dart', // HttpRespInterceptor - 响应拦截
-
-          // 域名选线与安全
-          'detect_line_manager.dart', // DetectLineManager - 域名检测、DNS解析
-
-          // 入口与初始化
-          'module_entry.dart', // ModuleEntry - 模块初始化入口
-
-          // 工具类
-          'app_util.dart', // 设备信息、权限、工具方法
-
-          // 本地存储
-          'localser_manager.dart', // 本地服务管理
-        ];
       case '51pc':
         return [
           // 核心网络与 API
@@ -336,6 +313,226 @@ class CallstackObfuscator {
           'encdecrypt.dart', // 加解密工具
           'module_entry.dart', // 模块入口
         ];
+      case '51cg':
+        return [
+          // 网络与 API
+          'network_http.dart',
+          'request_api.dart',
+
+          // 上报与路由观测
+          'report_timing_interceptor.dart',
+          'report_timing_observer.dart',
+          'report_popup_alert.dart',
+          'report_banner_swiper.dart',
+          'analytics_reporter.dart',
+          'report_gesture_detector.dart',
+          'page_name.dart',
+          'approute_observer.dart',
+
+          // 缓存与加解密
+          'cache_manager.dart',
+          'cache.dart',
+          'image_decrypt.dart',
+          'image_net_tool.dart',
+          'image_load_async.dart',
+          'encdecrypt.dart',
+
+          // 全局状态与基础页面
+          'base_store.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'basewidget.dart',
+          'update_sysalert.dart',
+          'custom_https_proxy.dart',
+          'parent_meta_scope.dart',
+
+          // 路由与工具
+          'go_routers.dart',
+          'utils.dart',
+          'shelf_proxy.dart',
+          'local_png.dart',
+          'style_theme.dart',
+          'platform_utils_native.dart',
+          'platform_utils_web.dart',
+          'eventbus_class.dart',
+          'pull_refresh.dart',
+          'load_status.dart',
+          'watermark_util.dart',
+          'watermark_util_io.dart',
+          'watermark_util_web.dart',
+
+          // mixin
+          'pageviewmixin.dart',
+          'nvideourl_minxin.dart',
+          'page_cache_mixin.dart',
+
+          // 主题与核心页面
+          'change_theme_skin.dart',
+          'home_page.dart',
+          'community_page.dart',
+          'keep_page.dart',
+          'mine_page.dart',
+          'welfare_page.dart',
+          'sign_in_page.dart',
+        ];
+      case 'mrds':
+        return [
+          // 网络与 API
+          'network_http.dart',
+          'request_api.dart',
+          'custom_https_proxy.dart',
+
+          // 上报与路由观测
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'report_utils.dart',
+          'page_request_tracker.dart',
+          'router_observer.dart',
+          'approute_observer.dart',
+          'video_analytics_tracker.dart',
+          'page_click_listener.dart',
+          'report_search_click.dart',
+
+          // 缓存与加解密
+          'cache_manager.dart',
+          'cache.dart',
+          'image_decrypt.dart',
+          'image_net_tool.dart',
+          'image_load_async.dart',
+          'encdecrypt.dart',
+
+          // 全局状态与基础页面
+          'base_store.dart',
+          'user_status.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'basewidget.dart',
+          'update_sysalert.dart',
+
+          // 路由与工具
+          'go_routers.dart',
+          'utils.dart',
+          'shelf_proxy.dart',
+          'local_png.dart',
+          'style_theme.dart',
+          'platform_utils_native.dart',
+          'platform_utils_web.dart',
+          'download_utils.dart',
+
+          // mixin
+          'pageviewmixin.dart',
+          'nvideourl_minxin.dart',
+          'page_cache_mixin.dart',
+          'pull_refresh.dart',
+
+          // 核心页面
+          'home_page.dart',
+          'home_content_page.dart',
+          'home_content_detail_page.dart',
+          'community_page.dart',
+          'community_post_page.dart',
+          'community_topic_detail_page.dart',
+          'match_page.dart',
+          'match_page_new.dart',
+          'match_detail_page.dart',
+          'mine_page.dart',
+          'mine_login_page.dart',
+          'ai_home_page.dart',
+          'ai_face_page.dart',
+          'ai_paint_page.dart',
+
+          // 入口
+          'module_entry.dart',
+          'main.dart',
+        ];
+      case 'hlbdy':
+        return [
+          // 网络、选线与 API
+          'network_http.dart',
+          'request_api.dart',
+          'shelf_proxy.dart',
+          'line_check.dart',
+          'secrets.dart',
+
+          // 上报与路由观测
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'page_request_tracker.dart',
+          'router_observer.dart',
+          'approute_observer.dart',
+          'video_analytics_tracker.dart',
+          'page_click_listener.dart',
+          'report_search_click.dart',
+          'report_banner.dart',
+          'report_feed_banner.dart',
+          'report_utils.dart',
+          'page_name.dart',
+
+          // 缓存、图片与加解密
+          'cache_manager.dart',
+          'cache.dart',
+          'cache.g.dart',
+          'image_decrypt.dart',
+          'image_net_tool.dart',
+          'image_load_async.dart',
+          'image_load_async_web.dart',
+          'encdecrypt.dart',
+          'security_guard.dart',
+
+          // 全局状态与基础页面
+          'base_store.dart',
+          'user_status.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'basewidget.dart',
+          'update_sysalert.dart',
+          'buoyant_ads_widget.dart',
+
+          // 路由、资源与工具
+          'go_routers.dart',
+          'utils.dart',
+          'local_png.dart',
+          'style_theme.dart',
+          'platform_utils_native.dart',
+          'platform_utils_web.dart',
+          'download_utils.dart',
+          'media_picker.dart',
+          'pull_refresh.dart',
+
+          // mixin 与播放器
+          'pageviewmixin.dart',
+          'nvideourl_minxin.dart',
+          'page_cache_mixin.dart',
+          'player_lifecycle.dart',
+          'short_mv_player.dart',
+          'shortv_player.dart',
+
+          // 核心页面
+          'home_page.dart',
+          'home_content_page.dart',
+          'home_content_detail_page.dart',
+          'home_player_page.dart',
+          'home_search_page.dart',
+          'community_page.dart',
+          'community_main_page.dart',
+          'community_post_page.dart',
+          'community_post_detail_page.dart',
+          'wanted_page.dart',
+          'wanted_detail_page.dart',
+          'video_page.dart',
+          'video_detail_page.dart',
+          'mine_page.dart',
+          'mine_login_page.dart',
+          'ai_main_page.dart',
+          'ai_faceoff.dart',
+          'ai_paint_page.dart',
+          'ai_strip.dart',
+          'ai_voice_page.dart',
+
+          // 入口
+          'module_entry.dart',
+          'main.dart',
+        ];
       case 'yms':
         return [
           // 核心网络层
@@ -397,6 +594,477 @@ class CallstackObfuscator {
           'main.dart',
           'app.dart',
         ];
+      case 'oio':
+        return [
+          // 核心网络层
+          'client_api.dart',
+          'net_manager.dart',
+          'http_signature_interceptor.dart',
+          'http_header_interceptor.dart',
+          'http_resp_interceptor.dart',
+          'api_exception.dart',
+          'base_resp_bean.dart',
+          'code.dart',
+          'dio_slice_downloader.dart',
+
+          // 配置、域名与埋点
+          'address.dart',
+          'config.dart',
+          'share_key.dart',
+          'detect_line_manager.dart',
+          'analytics_sdk_initializer.dart',
+          'event_buried_manager.dart',
+          'device_service.dart',
+          'track_route.dart',
+          'track_session_manager.dart',
+          'track_uploader.dart',
+
+          // 全局状态
+          'store.dart',
+          'bottom_trans_model.dart',
+          'can_play_count_model.dart',
+          'new_msg_model.dart',
+          'rbtn_status_model.dart',
+          'main_player_ui_show_model.dart',
+          'second_player_ui_show_model.dart',
+
+          // 本地存储层
+          'm3u8_download_store.dart',
+          'novel_record_store.dart',
+          'episode_record_sotre.dart',
+          'movie_record_sotre.dart',
+          'cached_video_store.dart',
+          'post_record_store.dart',
+          'comics_record_store.dart',
+          'photo_record_store.dart',
+          'game_record_store.dart',
+          'local_ads_info_store.dart',
+
+          // 任务与工具
+          'video_upload_task.dart',
+          'video_upload_helper.dart',
+          'video_download_task.dart',
+          'video_download_helper.dart',
+          'app_util.dart',
+          'utils.dart',
+          'cache_util.dart',
+          'install_check.dart',
+          'video_play_manage.dart',
+          'video_preload_manager.dart',
+          'player_util.dart',
+          'dnsolve.dart',
+
+          // 资源与路由
+          'pubspec.dart',
+          'router_key.dart',
+          'router_map.dart',
+          'jump_router.dart',
+
+          // 入口
+          'module_entry.dart',
+          'main.dart',
+          'app.dart',
+        ];
+      case 'bili':
+        return [
+          // 核心网络层
+          'client_api.dart',
+          'net_manager.dart',
+          'http_signature_interceptor.dart',
+          'http_header_interceptor.dart',
+          'http_resp_interceptor.dart',
+          'safe_http_log_interceptor.dart',
+          'retry_interceptor.dart',
+          'circuit_breaker.dart',
+          'api_exception.dart',
+          'base_resp_bean.dart',
+          'code.dart',
+          'dio_slice_downloader.dart',
+
+          // 配置、域名、通知与埋点
+          'address.dart',
+          'config.dart',
+          'share_key.dart',
+          'detect_line_manager.dart',
+          'local_notification.dart',
+          'event_buried_manager.dart',
+          'device_service.dart',
+          'track_route.dart',
+          'track_session_manager.dart',
+          'track_uploader.dart',
+          'track_event_storage.dart',
+          'track_msg_reader.dart',
+          'track_msg_video.dart',
+
+          // 全局状态
+          'store.dart',
+          'vip_checker.dart',
+          'bottom_trans_model.dart',
+          'can_play_count_model.dart',
+          'new_msg_model.dart',
+          'rbtn_status_model.dart',
+
+          // 本地存储层
+          'm3u8_download_store.dart',
+          'novel_record_store.dart',
+          'novel_text_record_store.dart',
+          'episode_record_sotre.dart',
+          'movie_record_sotre.dart',
+          'cached_video_store.dart',
+          'post_record_store.dart',
+          'comics_record_store.dart',
+          'photo_record_store.dart',
+          'game_record_store.dart',
+          'local_ads_info_store.dart',
+
+          // 任务与工具
+          'video_upload_task.dart',
+          'video_upload_helper.dart',
+          'video_download_task.dart',
+          'video_download_helper.dart',
+          'image_upload_task.dart',
+          'image_upload_helper.dart',
+          'multi_image_upload_task.dart',
+          'multi_image_upload_helper.dart',
+          'app_util.dart',
+          'utils.dart',
+          'cache_util.dart',
+          'install_check.dart',
+          'video_play_manage.dart',
+          'player_util.dart',
+
+          // 资源与路由
+          'pubspec.dart',
+          'router_key.dart',
+          'router_map.dart',
+          'jump_router.dart',
+
+          // 入口
+          'module_entry.dart',
+          'main.dart',
+          'app.dart',
+        ];
+      case '91porn':
+        return [
+          // 入口与初始化
+          'module_entry.dart',
+          'main.dart',
+          'config.dart',
+          'address.dart',
+          'store.dart',
+          'local_ads_info_store.dart',
+
+          // 网络、域名与响应层
+          'http_manager.dart',
+          'net_manager.dart',
+          'http_response_interceptor.dart',
+          'api_exception.dart',
+          'base_resp_bean.dart',
+          'net_code.dart',
+          'detect_line_manager.dart',
+
+          // API 服务层
+          'vid_service.dart',
+          'mine_service.dart',
+          'common_service.dart',
+          'ai_service.dart',
+          'acg_service.dart',
+          'comment_service.dart',
+          'search_service.dart',
+          'tag_service.dart',
+          'actress_service.dart',
+          'collection_service.dart',
+          'group_service.dart',
+          'find_service.dart',
+          'pre_sale_service.dart',
+          'live_service.dart',
+
+          // 埋点与设备
+          'track_uploader.dart',
+          'track_session.dart',
+          'track_manager.dart',
+          'track_route.dart',
+          'device_service.dart',
+
+          // 下载、缓存与本地服务
+          'video_download_manager.dart',
+          'down_load_task.dart',
+          'm3u8_download_utils.dart',
+          'local_server.dart',
+          'local_server_guard.dart',
+          'video_cache_manager.dart',
+          'cache_util.dart',
+          'file_util.dart',
+          'free_play_count_manager.dart',
+
+          // 页面逻辑与路由
+          'splash_logic.dart',
+          'splash_page.dart',
+          'main_logic.dart',
+          'main_page.dart',
+          'home_main_logic.dart',
+          'home_main_page.dart',
+          'short_video_main_logic.dart',
+          'short_video_main_page.dart',
+          'community_main_logic.dart',
+          'community_main_page.dart',
+          'live_main_logic.dart',
+          'live_main_page.dart',
+          'router_map.dart',
+          'jump_router.dart',
+
+          // 工具
+          'install_util.dart',
+          'version_util.dart',
+          'crypto_utils.dart',
+          'player_util.dart',
+          'video_utils.dart',
+          'dnsolve.dart',
+        ];
+      case '91porn2':
+        return [
+          // 入口与初始化
+          'module_entry.dart',
+          'main.dart',
+
+          // 网络、域名与响应层
+          'http_config.dart',
+          'http_api.dart',
+          'base_request.dart',
+          'crypto_util.dart',
+          'm3u8_normalizer.dart',
+          'http.dart',
+          'dio_adapter.dart',
+          'res_adapter.dart',
+          'http_error.dart',
+          'state_mixin.dart',
+          'refresh_load_list_widget.dart',
+          'http_image.dart',
+
+          // 全局配置、启动与路由
+          'global.dart',
+          'line_detection_tool.dart',
+          'splash_screen_page.dart',
+          'splash_screen_mixin.dart',
+          'routes.dart',
+          'module_model_config.dart',
+          'module_model_user.dart',
+          'bridge_provider_tool.dart',
+          'stack_indexed_widget.dart',
+
+          // 埋点、设备与页面映射
+          'report_monitor_event.dart',
+          'report_ads_event.dart',
+          'report_nav_bar_tracking.dart',
+          'report_video_event.dart',
+          'router_page_key_name.dart',
+
+          // 播放器、下载、缓存与支付
+          'shelf_proxy.dart',
+          'player_video_mixin.dart',
+          'player_native_widget.dart',
+          'player_webpage_widget.dart',
+          'video_reporter.dart',
+          'history_record_tool.dart',
+          'download_video.dart',
+          'pm_payment_mixin.dart',
+          'online_timer_service.dart',
+
+          // 工具
+          'common.dart',
+          'event_bus.dart',
+          'web_util.dart',
+        ];
+      case 'txpjb':
+        return [
+          // 入口、路由与配置
+          'module_entry.dart',
+          'main.dart',
+          'route_config.dart',
+          'project_config.dart',
+
+          // 网络、域名与原生桥
+          'HostProvider.dart',
+          'HostComicProvider.dart',
+          'token_interceptor.dart',
+          'analytics_utils.dart',
+          'cdn_util.dart',
+          'cdn_line.dart',
+          'device_utils.dart',
+          'jh_version_utils.dart',
+          'file_utils.dart',
+          'route.dart',
+          'event_bus.dart',
+
+          // 启动与首页
+          'first_view.dart',
+          'splash_logic.dart',
+          'main_logic.dart',
+          'home_logic.dart',
+          'square_logic.dart',
+          'mine_logic.dart',
+          'setting_logic.dart',
+          'hot_list_logic.dart',
+          'questionnaire_logic.dart',
+          'change_logo_logic.dart',
+
+          // 视频、直播、动态与搜索
+          'movie_detail_logic.dart',
+          'play_video_logic.dart',
+          'short_video_logic.dart',
+          'short_video_list_logic.dart',
+          'short_video_filter_logic.dart',
+          'random_short_video_logic.dart',
+          'stream_logic.dart',
+          'stream_detail_logic.dart',
+          'stream_user_logic.dart',
+          'col_stream_logic.dart',
+          'dynamic_detail_logic.dart',
+          'release_dynamic_logic.dart',
+          'up_dynamic_logic.dart',
+          'up_dynamic_detail_logic.dart',
+          'search_logic.dart',
+          'search_result_logic.dart',
+
+          // 用户、支付、任务与分享
+          'user_center_logic.dart',
+          'buy_coin_logic.dart',
+          'become_vip_logic.dart',
+          'coin_history_logic.dart',
+          'vip_history_logic.dart',
+          'task_logic.dart',
+          'task_center_logic.dart',
+          'shop_logic.dart',
+          'shop_history_logic.dart',
+          'sign_in_logic.dart',
+          'share_logic.dart',
+          'share_history_logic.dart',
+          'bind_phone_logic.dart',
+          'bind_invite_code_logic.dart',
+          'check_phone_logic.dart',
+          'set_password_logic.dart',
+          'scan_q_r_code_logic.dart',
+          'recommend_user_list_logic.dart',
+          'comment_history_logic.dart',
+          'history_col_buy_like_logic.dart',
+
+          // AI、漫画、动漫、导航与活动
+          'ai_all_list_logic.dart',
+          'ai_detail_logic.dart',
+          'ai_grid_main_logic.dart',
+          'ai_list_logic.dart',
+          'ai_main_logic.dart',
+          'ai_pic_logic.dart',
+          'ai_pic_to_video_logic.dart',
+          'ai_pic_to_video_detail_logic.dart',
+          'ai_clear_logic.dart',
+          'ai_novel_logic.dart',
+          'ai_novel_detail_logic.dart',
+          'ai_girl_logic.dart',
+          'smear_logic.dart',
+          'ai_smear_detail_logic.dart',
+          'comic_detail_logic.dart',
+          'comic_chapter_detail_logic.dart',
+          'read_comic_logic.dart',
+          'cartoon_list_logic.dart',
+          'anima_logic.dart',
+          'anima_main_logic.dart',
+          'lottery_logic.dart',
+          'lottery_history_logic.dart',
+          'app_center_logic.dart',
+          'product_detail_logic.dart',
+          'nude_chat_logic.dart',
+          'nude_chat_detail_logic.dart',
+        ];
+      case 'xjpjb':
+        return [
+          // 入口、路由与配置
+          'module_entry.dart',
+          'main.dart',
+          'route_config.dart',
+          'project_config.dart',
+
+          // 网络、域名与原生桥
+          'HostProvider.dart',
+          'HostComicProvider.dart',
+          'token_interceptor.dart',
+          'analytics_utils.dart',
+          'cdn_util.dart',
+          'device_utils.dart',
+          'jh_version_utils.dart',
+          'file_utils.dart',
+          'route.dart',
+          'event_bus.dart',
+
+          // 启动与首页
+          'first_view.dart',
+          'splash_logic.dart',
+          'main_logic.dart',
+          'home_logic.dart',
+          'square_logic.dart',
+          'mine_logic.dart',
+          'setting_logic.dart',
+
+          // 视频、直播、动态与搜索
+          'movie_logic.dart',
+          'movie_detail_logic.dart',
+          'play_video_logic.dart',
+          'short_video_logic.dart',
+          'short_video_list_logic.dart',
+          'stream_logic.dart',
+          'stream_detail_logic.dart',
+          'stream_user_logic.dart',
+          'dynamic_detail_logic.dart',
+          'dynamic_category_detail_logic.dart',
+          'release_dynamic_logic.dart',
+          'up_dynamic_detail_logic.dart',
+          'search_logic.dart',
+          'search_result_logic.dart',
+
+          // 用户、支付、任务、商城与分享
+          'user_center_logic.dart',
+          'col_user_logic.dart',
+          'buy_coin_logic.dart',
+          'become_vip_logic.dart',
+          'coin_history_logic.dart',
+          'vip_history_logic.dart',
+          'pay_result_logic.dart',
+          'pay_tips_logic.dart',
+          'task_logic.dart',
+          'task_center_logic.dart',
+          'shop_logic.dart',
+          'shop_history_logic.dart',
+          'sign_logic.dart',
+          'share_logic.dart',
+          'share_history_logic.dart',
+          'bind_phone_logic.dart',
+          'bind_invite_code_logic.dart',
+          'change_logo_logic.dart',
+
+          // AI、漫画、动漫、导航与活动
+          'ai_main_logic.dart',
+          'ai_pic_logic.dart',
+          'ai_pic_to_video_logic.dart',
+          'ai_pic_to_video_detail_logic.dart',
+          'ai_clear_logic.dart',
+          'ai_detail_logic.dart',
+          'ai_all_list_logic.dart',
+          'ai_list_logic.dart',
+          'smear_logic.dart',
+          'ai_smear_detail_logic.dart',
+          'comic_detail_logic.dart',
+          'comic_chapter_detail_logic.dart',
+          'read_comic_logic.dart',
+          'anima_logic.dart',
+          'mall_detail_logic.dart',
+          'product_detail_logic.dart',
+          'nude_chat_logic.dart',
+          'nude_chat_detail_logic.dart',
+          'scan_q_r_code_logic.dart',
+          'app_center_logic.dart',
+          'product_logic.dart',
+          'store_logic.dart',
+        ];
       case 'acfun':
         return [
           // 入口与初始化
@@ -408,10 +1076,12 @@ class CallstackObfuscator {
           'app_service.dart',
           'user_service.dart',
           'storage_service.dart',
+          'im_service.dart',
+          'im_quota_service.dart',
 
           // HTTP 服务层
           'api_settings.dart',
-          'api_encrpt.dart',
+          'api_encrypt.dart',
           'api_crypto.dart',
           'api_code.dart',
 
@@ -439,6 +1109,9 @@ class CallstackObfuscator {
           'api_news.dart',
           'api_region.dart',
           'api_bookshelf.dart',
+          'api_im.dart',
+          'api_dynamic.dart',
+          'api_blogger.dart',
 
           // 路由 - 全量
           'app_pages.dart',
@@ -447,10 +1120,17 @@ class CallstackObfuscator {
           'route_model.dart',
           'route_stack_tracker.dart',
           'internal_jump_routes.dart',
+          'routes_pages_anime.dart',
+          'routes_pages_common.dart',
+          'routes_pages_community.dart',
+          'routes_pages_mine.dart',
+          'routes_pages_novel.dart',
+          'routes_pages_video.dart',
 
           // 配置
           'app_config.dart',
           'proxy_config.dart',
+          'app_build_config.dart',
 
           // 公共工具
           'payment_utils.dart',
@@ -459,6 +1139,99 @@ class CallstackObfuscator {
           'novel_text_decrypt.dart',
           'ad_jump.dart',
           'upload_utils.dart',
+        ];
+      case 'nnrj':
+        return [
+          // 入口与初始化
+          'module_entry.dart',
+          'main.dart',
+          'app.dart',
+          'app_prepare.dart',
+          'app_build_config.dart',
+          'asset_resolver.dart',
+
+          // 路由与启动
+          'routes.dart',
+          'pages.dart',
+          'page_jump.dart',
+          'launch_page.dart',
+          'launch_ad_page.dart',
+          'launch_code_page.dart',
+
+          // 环境、域名与全局服务
+          'environment_service.dart',
+          'domain_generator.dart',
+          'proxy.dart',
+          'check_domain_utils.dart',
+          'storage_service.dart',
+          'user_service.dart',
+          'app_service.dart',
+          'notice_service.dart',
+          'im_service.dart',
+          'im_storage_service.dart',
+
+          // HTTP 服务层
+          'http_service.dart',
+          'api_service.dart',
+          'api_const.dart',
+          'api_code.dart',
+          'api_request_interceptor.dart',
+          'api_response_interceptor.dart',
+          'api_error_interceptor.dart',
+          'api_exception_handler.dart',
+          'http_special_code_handler.dart',
+          'api_decrypt.dart',
+          'api_encrpt.dart',
+          'api_response_transformer.dart',
+
+          // API 接口
+          'api.dart',
+          'api_sys.dart',
+          'api_user.dart',
+          'api_video.dart',
+          'api_short_player.dart',
+          'api_ai.dart',
+          'api_activity.dart',
+          'api_deduct.dart',
+          'api_mine.dart',
+          'api_search.dart',
+          'api_message.dart',
+          'api_content.dart',
+          'api_blogger.dart',
+          'api_choice.dart',
+          'login.dart',
+
+          // 埋点与上报
+          'report.dart',
+          'routes_register.dart',
+          'ad_report.dart',
+          'tracker.dart',
+          'track_batch_service.dart',
+          'track_config.dart',
+          'track_config_parser.dart',
+          'track_crypto.dart',
+          'track_headers.dart',
+          'track_route_observer.dart',
+          'video_watch_tracker.dart',
+
+          // 视频、支付、下载、AI
+          'main_controller.dart',
+          'video_player_page_controller.dart',
+          'video_player_http_service.dart',
+          'video_player_data_service.dart',
+          'common_video_play_controller.dart',
+          'short_v_p_cell_controller.dart',
+          'short_video_player_page_controller.dart',
+          'play_center_dispatch.dart',
+          'pay_view_controller.dart',
+          'm3u8_downloader_manager.dart',
+          'local_server.dart',
+          'file_downloader.dart',
+          'video_cache_manager.dart',
+          'upload_video_manager.dart',
+          'ai_record_page_controller.dart',
+          'hookup_detail_controller.dart',
+          'game_detail_page_controller.dart',
         ];
       case 'tx':
         return [
@@ -502,6 +1275,35 @@ class CallstackObfuscator {
       case 'lgt':
         // 聊个天/IM：与 acfun 相同策略（服务层 + API 全量 + 路由）
         return _getAllCoreFiles('acfun');
+      case 'douyin':
+        return [
+          'main.dart',
+          'router.dart',
+          'app_init.dart',
+          'app_api.dart',
+          'app_service.dart',
+          'notification_service.dart',
+          'http_api.dart',
+          'http_upload.dart',
+          'device_util.dart',
+          'sp_util.dart',
+          'event_bus.dart',
+          'event_router_observer.dart',
+          'aes_dynamic_util.dart',
+          'websocket_util.dart',
+          'login_api.dart',
+          'system_api.dart',
+          'search_api.dart',
+          'user_api.dart',
+          'movie_api.dart',
+          'post_api.dart',
+          'chat_api.dart',
+          'comment_api.dart',
+          'danmaku_api.dart',
+          'platform_api.dart',
+          'go.dart',
+          'router_util.dart',
+        ];
       default:
         return [
           'api_service.dart',
@@ -519,77 +1321,384 @@ class CallstackObfuscator {
     switch (projectName) {
       case 'hjsq':
         requiredFiles.addAll([
-          'base_service.dart', 'account_service.dart', 'repo.dart',
-          'home_service.dart', 'user_service.dart', 'ai_service.dart',
-          'http_interceptor.dart', 'module_entry.dart', 'app_global.dart',
-          'crypto.dart', 'cache.dart', 'r2_uploader.dart',
-          'cartoon_service.dart', 'game_service.dart', 'live_service.dart',
-          'order_service.dart', 'withdraw_service.dart', 'proxy_service.dart',
+          'base_service.dart',
+          'account_service.dart',
+          'repo.dart',
+          'home_service.dart',
+          'user_service.dart',
+          'ai_service.dart',
+          'http_interceptor.dart',
+          'module_entry.dart',
+          'app_global.dart',
+          'crypto.dart',
+          'cache.dart',
+          'r2_uploader.dart',
+          'cartoon_service.dart',
+          'game_service.dart',
+          'live_service.dart',
+          'order_service.dart',
+          'withdraw_service.dart',
+          'proxy_service.dart',
         ]);
         break;
       case 'ph':
         requiredFiles.addAll(['api_service.dart', 'login.dart']);
         break;
-      case 'md':
-        // module_entry.dart 是B面入口，必须混淆
-        requiredFiles.addAll([
-          'module_entry.dart',
-          'store.dart',
-          'net_manager.dart',
-          'http_signature_interceptor.dart'
-        ]);
-        break;
       case '51pc':
         requiredFiles.addAll([
-          'api.dart', 'http.dart', 'api_path.dart',
-          'encdecrypt.dart', 'local_crypto.dart',
-          'app_global.dart', 'global.dart', 'module_entry.dart',
-          'routers.dart', 'common.dart', 'cgprivilege.dart',
-          'app_event_report.dart', 'api_timing_interceptor.dart',
-          'shelf_proxy.dart', 'pay_mixin.dart', 'shared.dart',
-          'home.dart', 'homeConfig.dart',
+          'api.dart',
+          'http.dart',
+          'api_path.dart',
+          'encdecrypt.dart',
+          'local_crypto.dart',
+          'app_global.dart',
+          'global.dart',
+          'module_entry.dart',
+          'routers.dart',
+          'common.dart',
+          'cgprivilege.dart',
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'shelf_proxy.dart',
+          'pay_mixin.dart',
+          'shared.dart',
+          'home.dart',
+          'homeConfig.dart',
         ]);
         break;
       case 'hlw':
         requiredFiles.addAll([
-          'network_http.dart', 'request_api.dart', 'module_entry.dart',
-          'event_report.dart', 'cache_manager.dart', 'encdecrypt.dart',
-          'base_store.dart', 'go_routers.dart', 'shelf_proxy.dart',
-          'global_click_reporter.dart', 'image_decrypt.dart',
+          'network_http.dart',
+          'request_api.dart',
+          'module_entry.dart',
+          'event_report.dart',
+          'cache_manager.dart',
+          'encdecrypt.dart',
+          'base_store.dart',
+          'go_routers.dart',
+          'shelf_proxy.dart',
+          'global_click_reporter.dart',
+          'image_decrypt.dart',
         ]);
         break;
       case 'tiktok':
         requiredFiles.addAll([
-          'http.dart', 'crypto_util.dart', 'global.dart',
-          'http_config.dart', 'routes.dart', 'module_entry.dart',
-          'line_detection_tool.dart', 'bridge_provider_tool.dart',
-          'report_request.dart', 'report_interface.dart',
-          'upload_manager.dart', 'module_model_config.dart',
-          'module_model_user.dart', 'dio_adapter.dart',
+          'http.dart',
+          'crypto_util.dart',
+          'global.dart',
+          'http_config.dart',
+          'routes.dart',
+          'module_entry.dart',
+          'line_detection_tool.dart',
+          'bridge_provider_tool.dart',
+          'report_request.dart',
+          'report_interface.dart',
+          'upload_manager.dart',
+          'module_model_config.dart',
+          'module_model_user.dart',
+          'dio_adapter.dart',
         ]);
         break;
       case '91cg':
-        requiredFiles.addAll(
-            ['network_http.dart', 'request_api.dart', 'module_entry.dart']);
+        requiredFiles.addAll([
+          'network_http.dart',
+          'request_api.dart',
+          'module_entry.dart',
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'app_global_click_wrapper.dart',
+          'page_click_listener.dart',
+          'page_name.dart',
+          'page_request_tracker.dart',
+          'report_track.dart',
+          'report_utils.dart',
+          'router_observer.dart',
+          'cache_manager.dart',
+          'encdecrypt.dart',
+          'base_store.dart',
+          'go_routers.dart',
+          'utils.dart',
+          'local_png.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'update_sysalert.dart',
+          'shelf_proxy.dart',
+        ]);
+        break;
+      case '51cg':
+        requiredFiles.addAll([
+          'network_http.dart',
+          'request_api.dart',
+          'module_entry.dart',
+          'report_timing_interceptor.dart',
+          'report_timing_observer.dart',
+          'analytics_reporter.dart',
+          'report_gesture_detector.dart',
+          'page_name.dart',
+          'cache_manager.dart',
+          'encdecrypt.dart',
+          'base_store.dart',
+          'go_routers.dart',
+          'utils.dart',
+          'local_png.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'update_sysalert.dart',
+        ]);
+        break;
+      case 'mrds':
+        requiredFiles.addAll([
+          'network_http.dart',
+          'request_api.dart',
+          'module_entry.dart',
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'cache_manager.dart',
+          'encdecrypt.dart',
+          'base_store.dart',
+          'user_status.dart',
+          'go_routers.dart',
+          'utils.dart',
+          'local_png.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'home_page.dart',
+          'community_page.dart',
+          'match_page.dart',
+          'ai_home_page.dart',
+        ]);
+        break;
+      case 'hlbdy':
+        requiredFiles.addAll([
+          'network_http.dart',
+          'request_api.dart',
+          'module_entry.dart',
+          'app_event_report.dart',
+          'api_timing_interceptor.dart',
+          'cache_manager.dart',
+          'encdecrypt.dart',
+          'security_guard.dart',
+          'base_store.dart',
+          'user_status.dart',
+          'go_routers.dart',
+          'utils.dart',
+          'local_png.dart',
+          'index_page.dart',
+          'startup_page.dart',
+          'home_page.dart',
+          'community_page.dart',
+          'video_page.dart',
+          'ai_main_page.dart',
+          'mine_page.dart',
+        ]);
         break;
       case 'yms':
         requiredFiles.addAll([
-          'client_api.dart', 'net_manager.dart',
-          'http_signature_interceptor.dart', 'http_header_interceptor.dart',
-          'http_resp_interceptor.dart', 'store.dart', 'module_entry.dart',
-          'address.dart', 'config.dart', 'app_util.dart',
-          'comic_download_task.dart', 'video_upload_task.dart',
+          'client_api.dart',
+          'net_manager.dart',
+          'http_signature_interceptor.dart',
+          'http_header_interceptor.dart',
+          'http_resp_interceptor.dart',
+          'store.dart',
+          'module_entry.dart',
+          'address.dart',
+          'config.dart',
+          'app_util.dart',
+          'comic_download_task.dart',
+          'video_upload_task.dart',
           'dio_slice_downloader.dart',
+        ]);
+        break;
+      case 'oio':
+        requiredFiles.addAll([
+          'client_api.dart',
+          'net_manager.dart',
+          'http_signature_interceptor.dart',
+          'http_header_interceptor.dart',
+          'http_resp_interceptor.dart',
+          'store.dart',
+          'module_entry.dart',
+          'address.dart',
+          'config.dart',
+          'app_util.dart',
+          'detect_line_manager.dart',
+          'analytics_sdk_initializer.dart',
+          'track_session_manager.dart',
+          'track_uploader.dart',
+          'video_upload_task.dart',
+          'video_download_task.dart',
+          'dio_slice_downloader.dart',
+          'router_map.dart',
+        ]);
+        break;
+      case 'bili':
+        requiredFiles.addAll([
+          'client_api.dart',
+          'net_manager.dart',
+          'http_signature_interceptor.dart',
+          'http_header_interceptor.dart',
+          'http_resp_interceptor.dart',
+          'store.dart',
+          'module_entry.dart',
+          'address.dart',
+          'config.dart',
+          'app_util.dart',
+          'detect_line_manager.dart',
+          'local_notification.dart',
+          'track_session_manager.dart',
+          'track_uploader.dart',
+          'track_event_storage.dart',
+          'device_service.dart',
+          'video_upload_task.dart',
+          'video_download_task.dart',
+          'image_upload_task.dart',
+          'multi_image_upload_task.dart',
+          'dio_slice_downloader.dart',
+          'router_map.dart',
+          'player_util.dart',
+        ]);
+        break;
+      case '91porn':
+        requiredFiles.addAll([
+          'module_entry.dart',
+          'main.dart',
+          'http_manager.dart',
+          'net_manager.dart',
+          'detect_line_manager.dart',
+          'vid_service.dart',
+          'mine_service.dart',
+          'common_service.dart',
+          'splash_logic.dart',
+          'track_uploader.dart',
+          'track_session.dart',
+          'device_service.dart',
+          'store.dart',
+          'router_map.dart',
+          'jump_router.dart',
+          'video_download_manager.dart',
+        ]);
+        break;
+      case '91porn2':
+        requiredFiles.addAll([
+          'module_entry.dart',
+          'main.dart',
+          'global.dart',
+          'routes.dart',
+          'http_config.dart',
+          'http_api.dart',
+          'base_request.dart',
+          'crypto_util.dart',
+          'http.dart',
+          'dio_adapter.dart',
+          'splash_screen_page.dart',
+          'line_detection_tool.dart',
+          'report_monitor_event.dart',
+          'report_video_event.dart',
+          'shelf_proxy.dart',
+          'player_video_mixin.dart',
+        ]);
+        break;
+      case 'txpjb':
+        requiredFiles.addAll([
+          'module_entry.dart',
+          'main.dart',
+          'route_config.dart',
+          'project_config.dart',
+          'analytics_utils.dart',
+          'token_interceptor.dart',
+          'HostProvider.dart',
+          'splash_logic.dart',
+          'first_view.dart',
+          'main_logic.dart',
+          'home_logic.dart',
+          'ai_main_logic.dart',
+          'ai_pic_logic.dart',
+          'ai_pic_to_video_logic.dart',
+          'ai_clear_logic.dart',
+          'task_logic.dart',
+          'movie_detail_logic.dart',
+          'play_video_logic.dart',
+        ]);
+        break;
+      case 'xjpjb':
+        requiredFiles.addAll([
+          'module_entry.dart',
+          'main.dart',
+          'route_config.dart',
+          'project_config.dart',
+          'analytics_utils.dart',
+          'token_interceptor.dart',
+          'HostProvider.dart',
+          'splash_logic.dart',
+          'first_view.dart',
+          'main_logic.dart',
+          'home_logic.dart',
+          'ai_main_logic.dart',
         ]);
         break;
       case 'acfun':
         requiredFiles.addAll([
-          'module_entry.dart', 'app_prepare.dart', 'main.dart',
-          'app_service.dart', 'user_service.dart', 'storage_service.dart',
-          'api_settings.dart', 'api_encrpt.dart', 'api_crypto.dart',
-          'api.dart', 'api_sys.dart', 'api_home.dart', 'api_user.dart',
-          'api_video.dart', 'api_comic.dart', 'api_community.dart',
-          'app_pages.dart', 'app_routes.dart', 'app_config.dart',
+          'module_entry.dart',
+          'app_prepare.dart',
+          'main.dart',
+          'app_service.dart',
+          'user_service.dart',
+          'storage_service.dart',
+          'im_service.dart',
+          'im_quota_service.dart',
+          'api_settings.dart',
+          'api_encrypt.dart',
+          'api_crypto.dart',
+          'api.dart',
+          'api_sys.dart',
+          'api_home.dart',
+          'api_user.dart',
+          'api_video.dart',
+          'api_comic.dart',
+          'api_community.dart',
+          'api_im.dart',
+          'api_dynamic.dart',
+          'api_blogger.dart',
+          'app_pages.dart',
+          'app_routes.dart',
+          'routes_pages_anime.dart',
+          'routes_pages_common.dart',
+          'routes_pages_community.dart',
+          'routes_pages_mine.dart',
+          'routes_pages_novel.dart',
+          'routes_pages_video.dart',
+          'app_config.dart',
+          'app_build_config.dart',
+        ]);
+        break;
+      case 'nnrj':
+        requiredFiles.addAll([
+          'module_entry.dart',
+          'main.dart',
+          'app_prepare.dart',
+          'app_build_config.dart',
+          'routes.dart',
+          'pages.dart',
+          'launch_page.dart',
+          'environment_service.dart',
+          'storage_service.dart',
+          'user_service.dart',
+          'app_service.dart',
+          'im_service.dart',
+          'http_service.dart',
+          'api_service.dart',
+          'api_request_interceptor.dart',
+          'api_response_interceptor.dart',
+          'api.dart',
+          'api_sys.dart',
+          'api_user.dart',
+          'api_video.dart',
+          'api_ai.dart',
+          'report.dart',
+          'tracker.dart',
+          'track_batch_service.dart',
+          'video_player_page_controller.dart',
+          'short_video_player_page_controller.dart',
         ]);
         break;
       case 'tx':
@@ -620,6 +1729,22 @@ class CallstackObfuscator {
           'api_video.dart', 'app_pages.dart', 'app_routes.dart', 'app_config.dart',
         ]);
         break;
+      case 'douyin':
+        requiredFiles.addAll([
+          'router.dart',
+          'app_init.dart',
+          'app_api.dart',
+          'app_service.dart',
+          'http_api.dart',
+          'device_util.dart',
+          'event_bus.dart',
+          'login_api.dart',
+          'system_api.dart',
+          'user_api.dart',
+          'movie_api.dart',
+          'post_api.dart',
+        ]);
+        break;
       default:
         requiredFiles.addAll(['api_service.dart']);
     }
@@ -634,6 +1759,26 @@ class CallstackObfuscator {
     final selected = shuffled.take(count).toList();
 
     return [...requiredFiles, ...selected];
+  }
+
+  /// Resolve the library key for a file.
+  /// Files with `part of '...'` share their parent library's namespace.
+  String _resolveLibraryKey(String filePath) {
+    try {
+      final lines = File(filePath).readAsLinesSync();
+      for (final line in lines) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty || trimmed.startsWith('//')) continue;
+        final match = RegExp(r"^part\s+of\s+'([^']+)'\s*;").firstMatch(trimmed);
+        if (match != null) {
+          final partOfTarget = match.group(1)!;
+          return path
+              .normalize(path.join(path.dirname(filePath), partOfTarget));
+        }
+        break;
+      }
+    } catch (_) {}
+    return path.normalize(filePath);
   }
 
   Future<void> process(
@@ -667,6 +1812,9 @@ class CallstackObfuscator {
     logger.info('随机选择 ${coreFiles.length} 个核心文件: ${coreFiles.join(", ")}');
     logger.info('找到 ${targetFiles.length} 个匹配文件');
 
+    // Track used class names per library to avoid duplicates in part-of files
+    final usedClassNamesPerLibrary = <String, Set<String>>{};
+
     for (final file in targetFiles) {
       try {
         final context = collection.contextFor(file);
@@ -696,10 +1844,21 @@ class CallstackObfuscator {
         final content = File(file).readAsStringSync();
         var newContent = content;
 
-        // 生成包装器类名（每个文件唯一，包含随机因子）
-        final randomSuffix = _random.nextInt(10000);
-        final wrapperClassName = NameGenerator.generateClassName(
-            '${seed}_${path.basenameWithoutExtension(file)}_$randomSuffix');
+        // Resolve the library this file belongs to (handles part-of)
+        final libraryKey = _resolveLibraryKey(file);
+        final usedNames =
+            usedClassNamesPerLibrary.putIfAbsent(libraryKey, () => {});
+
+        // Generate a unique wrapper class name, retrying on collision
+        String wrapperClassName;
+        var attempt = 0;
+        do {
+          final randomSuffix = _random.nextInt(100000);
+          wrapperClassName = NameGenerator.generateClassName(
+              '${seed}_${path.basenameWithoutExtension(file)}_${randomSuffix}_$attempt');
+          attempt++;
+        } while (usedNames.contains(wrapperClassName) && attempt < 100);
+        usedNames.add(wrapperClassName);
 
         // 随机选择方法名前缀
         final prefixes = ['wrap', 'proc', 'exec', 'run', 'call', 'invoke'];

@@ -11,7 +11,8 @@ void main(List<String> arguments) async {
         abbr: 't', help: '目标目录', defaultsTo: 'lib/modules/secondary')
     ..addOption('project',
         abbr: 'p',
-        help: '项目代码 (dq, lgt；其它代号已弃用)')
+        help:
+            '项目代码 (dq, lgt, hjsq, ph, 51pc, 51cg, hlw, tiktok, 91cg, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy, nnrj)')
     ..addOption('method',
         abbr: 'm',
         help: '字符串混淆方法 (bytes, base64, xor, concat)',
@@ -42,6 +43,12 @@ void main(List<String> arguments) async {
       return;
     }
 
+    final projectName = results['project'] as String?;
+    if (projectName == 'md') {
+      stderr.writeln('错误: md 项目已下线，不再支持混淆');
+      exit(1);
+    }
+
     // 检查是否至少选择了一个混淆功能
     final enableAll = results['all'] as bool;
     final enableString = enableAll || results['string'] as bool;
@@ -63,20 +70,22 @@ void main(List<String> arguments) async {
       exit(1);
     }
 
+    final targetDirPath =
+        path.normalize(path.absolute(results['target'] as String));
+
     // 解析 bundleId / version（优先 CLI，否则从 pubspec 读取，用于稳定 seed）
     var bundleId = results['bundle-id'] as String?;
     var version = results['version'] as String?;
     if (bundleId == null || version == null) {
-      final fromPubspec =
-          _readPubspec(path.absolute(results['target'] as String));
+      final fromPubspec = _readPubspec(targetDirPath);
       bundleId ??= fromPubspec.$1;
       version ??= fromPubspec.$2;
     }
 
     // 构建配置
     final config = ObfuscatorConfig(
-      targetDir: results['target'] as String,
-      projectName: results['project'] as String?,
+      targetDir: targetDirPath,
+      projectName: projectName,
       bundleId: bundleId,
       version: version,
       stringMethod: results['method'] as String,
@@ -160,9 +169,23 @@ ${parser.usage}
   --symbols    符号扭曲：生成 extension/generic/mixin 结构
 
 核心文件（--callstack 针对的文件，每个项目不同）:
-  dq:     与 tx 相同（主入口/请求/加解密/WS）
-  lgt:    与 acfun 相同（全量 API/服务/路由，偏 IM 社区向）
-  （历史 alias ph/hjsq/tx 等已收敛，见仓库文档）
+  ph:     api_service.dart, user_service.dart, app_service.dart, login.dart
+  hjsq:   api_service.dart, user_service.dart, app_service.dart
+  tiktok: http.dart, http_config.dart, crypto_util.dart, global.dart, routes.dart
+  91cg:   全量覆盖 (20+ 文件: network, request, report, cache, route, startup 层)
+  51cg:   network_http.dart, request_api.dart, report_timing_interceptor.dart, cache_manager.dart
+  acfun:  module_entry.dart, app_prepare.dart, user_service.dart, api_settings.dart, api_video.dart
+  tx:     module_entry.dart, request.dart, http_request.dart, app_api.dart, splash_logic.dart
+  douyin: router.dart, app_init.dart, http_api.dart, app_api.dart, device_util.dart
+  mrds:   network_http.dart, request_api.dart, app_event_report.dart, cache_manager.dart, go_routers.dart
+  oio:    client_api.dart, net_manager.dart, analytics_sdk_initializer.dart, router_map.dart, module_entry.dart
+  bili:   client_api.dart, net_manager.dart, track_uploader.dart, router_map.dart, module_entry.dart
+  91porn: http_manager.dart, vid_service.dart, splash_logic.dart, track_uploader.dart, router_map.dart
+  91porn2: http_config.dart, http_api.dart, global.dart, routes.dart, report_monitor_event.dart
+  txpjb:  module_entry.dart, route_config.dart, analytics_utils.dart, token_interceptor.dart, splash_logic.dart
+  xjpjb:  module_entry.dart, route_config.dart, analytics_utils.dart, token_interceptor.dart, splash_logic.dart
+  hlbdy:  module_entry.dart, network_http.dart, request_api.dart, app_event_report.dart, go_routers.dart
+  nnrj:   module_entry.dart, app_prepare.dart, http_service.dart, api.dart, tracker.dart
 
 示例:
   dart run bin/obfuscate.dart -p ph --string              # ph 项目字符串混淆

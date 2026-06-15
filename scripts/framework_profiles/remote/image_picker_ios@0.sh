@@ -42,10 +42,35 @@ PROFILE_SKIP_FILES=(
 profile_apply() {
     local plugin_dir="$1"
     local level="$2"
+    local current
+    current="${_PROFILE_CURRENT_NAME:-$(basename "$plugin_dir")}"
 
     local src_dir
     src_dir=$(bt_find_src_dir "$plugin_dir" "image_picker_ios")
     [[ -z "$src_dir" ]] && return 1
+    local nested_src_dir
+    nested_src_dir=$(find "$src_dir" -type f -name "FLTImagePickerPlugin.m" -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)
+    [[ -n "$nested_src_dir" && -d "$nested_src_dir" ]] && src_dir="$nested_src_dir"
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        local plugin_impl="$src_dir/FLTImagePickerPlugin.m"
+        local provider_header="$src_dir/include/$current/FIPViewProvider.h"
+        if [[ -f "$plugin_impl" && -f "$provider_header" ]] && \
+           grep -q "FIPViewProvider" "$plugin_impl" 2>/dev/null && \
+           ! grep -q "FIPViewProvider.h" "$plugin_impl" 2>/dev/null; then
+            perl -0pi -e "s|(#import \"FLTImagePickerPlugin_Test\\.h\"\\n)|\\1#import \"./include/$current/FIPViewProvider.h\"\\n|" "$plugin_impl"
+        fi
+
+        for f in "$src_dir"/*.m; do
+            [[ -f "$f" ]] || continue
+            if grep -q "PHAsset" "$f" 2>/dev/null && ! grep -q "Photos/Photos.h" "$f" 2>/dev/null; then
+                perl -0pi -e 's/(#import[^\n]*\n)/#import <Photos\/Photos.h>\n$1/' "$f"
+            fi
+            if grep -q "PHPickerResult" "$f" 2>/dev/null && ! grep -q "PhotosUI/PhotosUI.h" "$f" 2>/dev/null; then
+                perl -0pi -e 's/(#import[^\n]*\n)/#import <PhotosUI\/PhotosUI.h>\n$1/' "$f"
+            fi
+        done
+    fi
 
     # L0: 注入唯一类
     bt_inject_classes "$src_dir" "$PROFILE_NAME" 6

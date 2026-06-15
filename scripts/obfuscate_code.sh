@@ -11,6 +11,7 @@
 #   4. 业务噪音  --noise      在 build/initState/getHomePage 中注入噪音
 #   5. AST变异   --mutation   在方法体中插入 dummy 代码
 #   6. 符号扭曲  --symbols    extension/generic/mixin 结构生成
+#   7. yms Runner Swift 原生轻量混淆（--all 时自动执行）
 # 调用栈混淆说明：
 #   - 只针对项目核心文件（如 api_service.dart, user_service.dart 等）
 #   - 在方法体中注入包装调用，确保代码会被执行（不会被 tree shaking）
@@ -36,6 +37,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DART_OBFUSCATOR_DIR="$SCRIPT_DIR/dart_obfuscator"
 REPORT_DIR="$SCRIPT_DIR/reports"
+LOG_FILE=""
+JSON_REPORT_FILE=""
+REPORT_STARTED_AT=""
+REPORT_STARTED_EPOCH=""
+REPORT_COMMAND=""
+REPORT_PROJECT_TAG="unknown"
+REPORT_TARGET_DIR=""
+REPORT_DRY_RUN=false
 
 # 日志函数
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -88,6 +97,14 @@ detect_current_project() {
     return 1
 }
 
+reject_retired_project() {
+    local project="$1"
+    if [[ "$project" == "md" ]]; then
+        log_error "md 项目已下线，不再支持混淆"
+        exit 1
+    fi
+}
+
 # 显示帮助
 show_help() {   
     cat << EOF
@@ -96,7 +113,7 @@ B面代码混淆脚本（Dart AST 版）
 用法: $0 [选项] [混淆功能]
 
 可选参数:
-  -p, --project NAME         项目代码 (dq=斗球/直播, lgt=聊个天/IM)
+  -p, --project NAME         项目代码 (dq=斗球/直播, lgt=聊个天/IM, hjsq, ph, 51pc, 51cg, hlw, tiktok, 91cg, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy, nnrj)
                              如不指定，自动从 ab_config.yaml 读取
                              （sync_secondary.sh 执行后会自动生成）
 
@@ -122,9 +139,29 @@ B面代码混淆脚本（Dart AST 版）
   -v, --verbose              详细输出
   -h, --help                 显示帮助
 
-核心文件（--callstack 针对的文件，详见 scripts/dart_obfuscator）:
-  dq:  同原 tx（主入口/请求/加解密/WS 等核心文件名）
-  lgt: 同原 acfun（全量服务/API/路由，偏 IM/社区）
+核心文件（--callstack 针对的文件）:
+  dq:     module_entry.dart, main.dart, http_manager.dart, global_logic.dart, xx_domain_manager.dart (斗球 xty，按 basename 匹配)
+  lgt:    同 acfun 策略（服务层 + API 全量 + 路由，偏 IM/社区）
+  ph:     api_service.dart, user_service.dart, app_service.dart, app_prepare.dart, login.dart
+  hjsq:   全量覆盖 (85+ 文件: services, mixins, repo, domain, app 层)
+  51pc:   全量覆盖 (60+ 文件: utils, store, report, mixin, im, upload 层)
+  51cg:   全量覆盖 (45+ 文件: network, report, cache, base, util, theme 层)
+  hlw:    全量覆盖 (35+ 文件: network, report, cache, base, util, mixin 层)
+  tiktok: 全量覆盖 (50+ 文件: api, public, report, upload, model, util 层)
+  91cg:   全量覆盖 (20+ 文件: network, request, report, cache, route, startup 层)
+  yms:    全量覆盖 (55+ 文件: net, config, store, task, util 层)
+  acfun:  全量覆盖 (45+ 文件: api, service, route, config, util 层)
+  tx:     module_entry.dart, request.dart, http_request.dart, app_api.dart, splash_logic.dart
+  douyin: router.dart, app_init.dart, http_api.dart, app_api.dart, device_util.dart
+  mrds:   全量覆盖 (45+ 文件: network, report, cache, base, util, match/ai 层)
+  oio:    全量覆盖 (55+ 文件: net, config, analytics, store, task, util 层)
+  bili:   全量覆盖 (60+ 文件: net, config, track, store, task, router 层)
+  91porn: 全量覆盖 (45+ 文件: api, net, splash, track, cache, router, util 层)
+  91porn2: 全量覆盖 (45+ 文件: http, public, report, player, payment 层)
+  txpjb:  全量覆盖 (50+ 文件: route, net, analytics, splash, main, media/ai/pay 层)
+  xjpjb:  全量覆盖 (60+ 文件: route, net, analytics, splash, main, media/ai/pay 层)
+  hlbdy:  全量覆盖 (55+ 文件: network, report, cache, base, route, ai/community/video 层)
+  nnrj:   全量覆盖 (70+ 文件: http, api, track, im, video, ai/pay/download 层)
 
 示例:
   $0 --string                     # 字符串混淆
@@ -134,6 +171,7 @@ B面代码混淆脚本（Dart AST 版）
   $0 -p ph --bloat                # 文件膨胀（4.3a）
   $0 -p ph --noise --mutation     # 业务噪音 + AST变异
   $0 --all                        # 所有混淆
+                                    # yms 项目会额外处理 ios/Runner Swift 原生字符串/调用栈
   $0 --string -d                  # 模拟运行（不修改文件）
 EOF
 }
@@ -142,6 +180,8 @@ EOF
 check_dart() {
     if command -v fvm &> /dev/null; then
         DART_CMD="fvm dart"
+    elif [[ -x "$PROJECT_ROOT/.fvm/flutter_sdk/bin/dart" ]]; then
+        DART_CMD="$PROJECT_ROOT/.fvm/flutter_sdk/bin/dart"
     elif command -v dart &> /dev/null; then
         DART_CMD="dart"
     else
@@ -183,13 +223,166 @@ setup_log() {
     mkdir -p "$REPORT_DIR"
     local timestamp
     timestamp=$(date +"%Y%m%d_%H%M%S")
-    LOG_FILE="$REPORT_DIR/code_${project_tag}_${timestamp}.log"
+    REPORT_STARTED_AT=$(date +"%Y-%m-%dT%H:%M:%S%z")
+    REPORT_STARTED_EPOCH=$(date +%s)
+    LOG_FILE="$REPORT_DIR/obf_${project_tag}_code_${timestamp}.log"
+    JSON_REPORT_FILE="$REPORT_DIR/obf_${project_tag}_code_${timestamp}.json"
 
-    exec > >(tee -a "$LOG_FILE") 2>&1
+    local log_pipe="$REPORT_DIR/.obf_${project_tag}_code_${timestamp}.pipe.$$"
+    if mkfifo "$log_pipe" 2>/dev/null; then
+        tee -a "$LOG_FILE" < "$log_pipe" &
+        exec > "$log_pipe" 2>&1
+        rm -f "$log_pipe"
+    else
+        log_warning "无法创建日志管道，继续仅输出到终端: $log_pipe"
+    fi
+}
+
+write_code_report_json() {
+    [[ "$REPORT_DRY_RUN" == "true" || -z "$JSON_REPORT_FILE" ]] && return 0
+
+    local status="${1:-success}"
+    local exit_code="${2:-0}"
+    local ended_at
+    local ended_epoch
+    ended_at=$(date +"%Y-%m-%dT%H:%M:%S%z")
+    ended_epoch=$(date +%s)
+
+    if CODE_REPORT_STATUS="$status" \
+    CODE_REPORT_EXIT_CODE="$exit_code" \
+    CODE_REPORT_STARTED_AT="$REPORT_STARTED_AT" \
+    CODE_REPORT_ENDED_AT="$ended_at" \
+    CODE_REPORT_DURATION_SECONDS="$((ended_epoch - ${REPORT_STARTED_EPOCH:-ended_epoch}))" \
+    CODE_REPORT_COMMAND="$REPORT_COMMAND" \
+    CODE_REPORT_PROJECT="$REPORT_PROJECT_TAG" \
+    CODE_REPORT_TARGET_DIR="$REPORT_TARGET_DIR" \
+    CODE_REPORT_LOG_FILE="$LOG_FILE" \
+    CODE_REPORT_JSON_FILE="$JSON_REPORT_FILE" \
+    CODE_REPORT_DART_OBFUSCATOR_DIR="$DART_OBFUSCATOR_DIR" \
+    python3 - "$JSON_REPORT_FILE" <<'PY'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def env(name, default=""):
+    return os.environ.get(name, default)
+
+
+def read_text(path):
+    if not path.exists():
+        return ""
+    return path.read_text(errors="replace")
+
+
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def count_files(root, suffix):
+    if not root.exists():
+        return 0
+    return sum(1 for path in root.rglob("*") if path.is_file() and path.suffix == suffix)
+
+
+def parse_string_report(path):
+    data = {
+        "path": str(path),
+        "exists": path.exists(),
+        "scanned_files": None,
+        "obfuscated_files": None,
+        "skipped_files": None,
+        "obfuscated_strings": None,
+        "skipped_strings": None,
+    }
+    text = read_text(path)
+    patterns = {
+        "scanned_files": r"扫描文件总数:\s*(\d+)",
+        "obfuscated_files": r"混淆文件数:\s*(\d+)",
+        "skipped_files": r"跳过文件数:\s*(\d+)",
+        "obfuscated_strings": r"混淆字符串:\s*(\d+)",
+        "skipped_strings": r"跳过字符串:\s*(\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            data[key] = int(match.group(1))
+    return data
+
+
+output_path = Path(sys.argv[1])
+target_dir = Path(env("CODE_REPORT_TARGET_DIR"))
+log_file = Path(env("CODE_REPORT_LOG_FILE"))
+dart_obfuscator_dir = Path(env("CODE_REPORT_DART_OBFUSCATOR_DIR"))
+project = env("CODE_REPORT_PROJECT", "unknown")
+log_text = strip_ansi(read_text(log_file))
+
+warning_messages = [
+    line.split("[WARNING]", 1)[1].strip()
+    for line in log_text.splitlines()
+    if "[WARNING]" in line
+]
+error_messages = [
+    line.split("[ERROR]", 1)[1].strip()
+    for line in log_text.splitlines()
+    if "[ERROR]" in line
+]
+
+string_report = dart_obfuscator_dir / "build" / f"string_obfuscation_report_{project}.txt"
+route_reports = sorted(
+    str(path)
+    for path in (dart_obfuscator_dir / "build").glob(f"*route*{project}*.txt")
+)
+
+report = {
+    "schema_version": 1,
+    "stage": "code",
+    "status": env("CODE_REPORT_STATUS"),
+    "exit_code": int(env("CODE_REPORT_EXIT_CODE", "0") or "0"),
+    "started_at": env("CODE_REPORT_STARTED_AT"),
+    "ended_at": env("CODE_REPORT_ENDED_AT"),
+    "duration_seconds": int(env("CODE_REPORT_DURATION_SECONDS", "0") or "0"),
+    "command": env("CODE_REPORT_COMMAND"),
+    "project": project,
+    "paths": {
+        "target_dir": str(target_dir),
+        "log": str(log_file),
+        "json_report": str(output_path),
+        "dart_obfuscator_dir": str(dart_obfuscator_dir),
+    },
+    "counts": {
+        "target_dart_files": count_files(target_dir, ".dart"),
+        "log_steps": log_text.count("[STEP]"),
+        "log_successes": log_text.count("[SUCCESS]"),
+        "log_warnings": len(warning_messages),
+        "log_errors": len(error_messages),
+    },
+    "dart_obfuscator_reports": {
+        "string": parse_string_report(string_report),
+        "route_reports": route_reports,
+    },
+    "log_summary": {
+        "warning_messages": warning_messages,
+        "error_messages": error_messages,
+    },
+}
+
+output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+PY
+    then
+        log_success "结构化报告已保存: $JSON_REPORT_FILE"
+    else
+        log_warning "结构化报告写入失败: $JSON_REPORT_FILE"
+    fi
 }
 
 # 主函数
 main() {
+    REPORT_COMMAND="$0 $*"
+    trap 'rc=$?; if [[ $rc -ne 0 ]]; then write_code_report_json "failed" "$rc" >/dev/null 2>&1 || true; fi' EXIT
+
     echo ""
     echo "=========================================="
     echo "       B面代码混淆脚本 (Dart AST)"
@@ -212,12 +405,42 @@ main() {
     
     # 检测 dry-run
     local is_dry_run=false
+    local is_verbose=false
+    local has_all=false
     for arg in "$@"; do
         if [[ "$arg" == "-d" ]] || [[ "$arg" == "--dry-run" ]]; then
             is_dry_run=true
-            break
+        fi
+        if [[ "$arg" == "-v" ]] || [[ "$arg" == "--verbose" ]]; then
+            is_verbose=true
+        fi
+        if [[ "$arg" == "--all" ]]; then
+            has_all=true
         fi
     done
+
+    local early_has_project=false
+    local early_project=""
+    local early_next_is_project=false
+    for arg in "$@"; do
+        if [[ "$early_next_is_project" == "true" ]]; then
+            early_project="$arg"
+            early_next_is_project=false
+            break
+        fi
+        if [[ "$arg" == "-p" ]] || [[ "$arg" == "--project" ]]; then
+            early_has_project=true
+            early_next_is_project=true
+        fi
+    done
+
+    if [[ "$early_has_project" == "true" ]]; then
+        reject_retired_project "$early_project"
+    else
+        local early_auto_project=""
+        early_auto_project=$(detect_current_project)
+        reject_retired_project "$early_auto_project"
+    fi
 
     # 检查 Dart 环境
     check_dart
@@ -230,10 +453,16 @@ main() {
     
     # 检查用户是否指定了 -t/--target 参数
     local has_target=false
+    local explicit_target_dir="$target_dir"
+    local next_is_target=false
     for arg in "$@"; do
+        if [[ "$next_is_target" == "true" ]]; then
+            explicit_target_dir="$arg"
+            next_is_target=false
+        fi
         if [[ "$arg" == "-t" ]] || [[ "$arg" == "--target" ]]; then
             has_target=true
-            break
+            next_is_target=true
         fi
     done
     
@@ -266,6 +495,14 @@ main() {
 
     # 启动日志记录
     local project_tag="${explicit_project:-${auto_project:-unknown}}"
+    reject_retired_project "$project_tag"
+    REPORT_PROJECT_TAG="$project_tag"
+    if [[ "$explicit_target_dir" == /* ]]; then
+        REPORT_TARGET_DIR="$explicit_target_dir"
+    else
+        REPORT_TARGET_DIR="$PROJECT_ROOT/$explicit_target_dir"
+    fi
+    REPORT_DRY_RUN="$is_dry_run"
     setup_log "$project_tag" "$is_dry_run"
     
     # 调用 Dart 混淆工具
@@ -289,6 +526,22 @@ main() {
     args+=("$@")
     
     $DART_CMD run bin/obfuscate.dart "${args[@]}"
+
+    # yms 的 Runner Swift 属于同步进壳工程的 B 面原生代码，比 Framework/Pod 更像“代码混淆”阶段。
+    if [[ "$project_tag" == "yms" && "$has_all" == "true" ]]; then
+        local runner_swift_script="$SCRIPT_DIR/obfuscate_runner_swift.sh"
+        if [[ -f "$runner_swift_script" ]]; then
+            log_step "执行 yms Runner Swift 原生混淆..."
+            local native_args=("-p" "$project_tag")
+            [[ "$is_dry_run" == "true" ]] && native_args+=("-d")
+            [[ "$is_verbose" == "true" ]] && native_args+=("-v")
+            bash "$runner_swift_script" "${native_args[@]}"
+        else
+            log_warning "Runner Swift 混淆脚本不存在，跳过: $runner_swift_script"
+        fi
+    fi
+
+    write_code_report_json "success" "0"
 
     if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
         echo ""

@@ -1,15 +1,15 @@
 #!/bin/bash
 # =============================================
-#   Profile: package_info_plus (remote)
-#   Version: 8.x (ObjC, SPM layout)
+#   Profile: device_info_plus (remote)
+#   Version: 9.x (ObjC, ios/Classes layout)
 # =============================================
 
-PROFILE_NAME="package_info_plus"
-PROFILE_VERSION="8"
+PROFILE_NAME="device_info_plus"
+PROFILE_VERSION="9"
 PROFILE_STATUS="draft"
 
 PROFILE_PROTECTED=(
-    "FPPPackageInfoPlusPlugin"
+    "FPPDeviceInfoPlusPlugin"
     "registerWithRegistrar"
     "handleMethodCall"
 )
@@ -18,9 +18,8 @@ profile_apply() {
     local plugin_dir="$1"
     local level="$2"
 
-    local src_dir
-    src_dir=$(bt_find_src_dir "$plugin_dir" "package_info_plus")
-    [[ -z "$src_dir" ]] && return 1
+    local src_dir="$plugin_dir/ios/Classes"
+    [[ -d "$src_dir" ]] || return 1
 
     bt_inject_classes "$src_dir" "$PROFILE_NAME" 5
 

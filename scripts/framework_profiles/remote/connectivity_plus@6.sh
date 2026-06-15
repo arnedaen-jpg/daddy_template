@@ -21,6 +21,8 @@ PROFILE_PROTECTED=(
     "register"
     "handle"
     "ConnectivityProvider"
+    "connectivityUpdateHandler"
+    "pathUpdateHandler"
 )
 
 profile_apply() {
