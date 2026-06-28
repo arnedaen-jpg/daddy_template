@@ -21,7 +21,7 @@ class BloatInflator {
   final Logger logger;
 
   static const _internalDir = '_internal';
-  static const _reviewIntensiveProjects = {'yms', 'oio', 'bili'};
+  static const _reviewIntensiveProjects = {'yms', 'oio', 'bili', 'dq'};
 
   bool get _usesReviewIntensiveBloat =>
       _reviewIntensiveProjects.contains(config.projectName);
@@ -88,7 +88,7 @@ class BloatInflator {
 
     logger.info(
       '膨胀规模: $_fileCount 文件 × $_classesPerFile 类 × $_methodsPerClass 方法'
-      '${_usesReviewIntensiveBloat ? " (yms/oio/bili 强化，运行时轻量触达)" : ""}',
+      '${_usesReviewIntensiveBloat ? " (审核强化，运行时轻量触达)" : ""}',
     );
 
     // 2. 生成膨胀代码
@@ -589,7 +589,7 @@ class BloatInflator {
     buffer.writeln('');
 
     // 交叉引用随机 1-3 个后续文件（仅向前引用，避免循环依赖）。
-    // yms/oio/bili 的强化模式关闭交叉运行调用，避免 10 倍文件数带来启动期递归放大。
+    // 审核强化模式关闭交叉运行调用，避免 10 倍文件数带来启动期递归放大。
     final laterIndices = enableCrossRefs
         ? (List.generate(
             fileCount - fileIndex - 1,

@@ -281,7 +281,7 @@ project_uses_shared_deep_obfuscation() {
 
 project_uses_review_intensive_obfuscation() {
     local project="$1"
-    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" ]]
+    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "dq" ]]
 }
 
 native_class_multiplier() {
