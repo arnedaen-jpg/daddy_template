@@ -487,29 +487,35 @@ expand_semantic_word_pool() {
         core native local remote data runtime adaptive dynamic
         secure async cached shared modular private public
     )
+    local result=""
 
-    {
-        printf '%s\n' "${base[@]}"
-        local q w
-        for q in "${qualifiers[@]}"; do
-            for w in "${base[@]}"; do
-                printf '%s_%s\n' "$q" "$w"
-            done
-        done
-        for w in "${base[@]}"; do
+    # ipa_hardening_lib.sh 会开启 pipefail；awk 达到 limit 提前 exit 时，
+    # 写端 for/printf 仍会继续输出并收到 SIGPIPE(141)，不能因此中断全流程。
+    result=$(
+        {
+            printf '%s\n' "${base[@]}"
+            local q w
             for q in "${qualifiers[@]}"; do
-                printf '%s_%s\n' "$w" "$q"
+                for w in "${base[@]}"; do
+                    printf '%s_%s\n' "$q" "$w"
+                done
             done
-        done
-    } | awk -v limit="$target" '
-        /^[A-Za-z][A-Za-z0-9_]*$/ {
-            key = tolower($0)
-            if (seen[key]++) next
-            print $0
-            count++
-            if (count >= limit) exit
-        }
-    '
+            for w in "${base[@]}"; do
+                for q in "${qualifiers[@]}"; do
+                    printf '%s_%s\n' "$w" "$q"
+                done
+            done
+        } | awk -v limit="$target" '
+            /^[A-Za-z][A-Za-z0-9_]*$/ {
+                key = tolower($0)
+                if (seen[key]++) next
+                print $0
+                count++
+                if (count >= limit) exit
+            }
+        '
+    ) || true
+    printf '%s\n' "$result"
 }
 
 expand_loaded_semantic_words() {
