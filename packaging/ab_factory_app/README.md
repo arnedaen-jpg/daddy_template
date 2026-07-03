@@ -18,6 +18,16 @@ packaging/ab_factory_app/app.py
 AB包工厂.app/Contents/Resources/app.py
 ```
 
+## 一键混淆（v6.8+）
+
+对应脚本 `scripts/full_obfuscate.sh`（sync → obfuscate_code --all → obfuscate_frameworks run），拆成两个按钮：
+
+- **步骤 2 · 「一键同步+混淆」**：完整链路 = 同步 B 面 → 工厂 pubspec 修复 → 代码混淆(--all) → Framework 混淆(run)。
+  比直接跑 `full_obfuscate.sh` 多了工厂的 pubspec 修复，避免污染导致后续混淆失败。任一步失败即中止。
+- **步骤 4 · 「一键混淆」**：只串联代码混淆(--all) → Framework 混淆(run)，不重新同步。适合 B 面已同步、只想重跑混淆。
+
+两者均按当前所选「项目代号」显式传 `-p`，串行执行、输出实时写日志。
+
 ## 步骤 5 · 成品包混淆
 
 v6.7+ 在「步骤 5 · 打包 IPA」内增加独立区块：

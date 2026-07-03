@@ -133,7 +133,7 @@ _log_buffer_lock = threading.Lock()
 _log_flush_scheduled = False
 LOG_FLUSH_DEBOUNCE_S = 0.05      # 50ms 攒一波再上主线程
 LOG_FLUSH_FLOOD_LINES = 256      # 攒到这行数就立刻 flush, 不再等 debounce
-APP_VERSION = "6.7"  # 与 Contents/Info.plist、窗口标题/启动日志一致
+APP_VERSION = "6.8"  # 与 Contents/Info.plist、窗口标题/启动日志一致
 ASC_MONITOR_BASE = "https://asc-monitor.arnedaen.workers.dev"
 APP_PY_PATH = os.path.abspath(__file__)
 
@@ -2323,7 +2323,7 @@ class AppDelegate(NSObject):
         y += step1_h + gap
 
         # ── Step 2: Sync secondary ──
-        step2_h = 162
+        step2_h = 192
         box2 = make_section_box("步骤 2 · 同步 B 面代码", pad, y, inner_w, step2_h)
         cv2 = box2.contentView()
         by = int(cv2.bounds().size.height) - row_h - 4
@@ -2386,6 +2386,16 @@ class AppDelegate(NSObject):
         cv2.addSubview_(align_btn)
         self.sync_btn = make_button("同步 B 面代码", bw - 110, by, 110, 28, self, self.syncSecondary_, bold=True)
         cv2.addSubview_(self.sync_btn)
+
+        by -= sp + 6
+        cv2.addSubview_(make_label(
+            "💡 一键跑完整链路（等价 full_obfuscate.sh，含工厂 pubspec 修复）：同步 → 修复pubspec → 代码混淆(--all) → Framework 混淆(run)",
+            0, by + 4, bw - 158, 18, size=10, color=NSColor.secondaryLabelColor()))
+        self.pipeline_btn = make_button("一键同步+混淆", bw - 150, by, 150, 28, self, self.oneClickSyncObf_, bold=True)
+        self.pipeline_btn.setToolTip_(
+            "串联执行：sync_secondary → 修复 pubspec → obfuscate_code --all → obfuscate_frameworks run；"
+            "任一步失败即中止。适合确认源码路径无误后一次跑完。")
+        cv2.addSubview_(self.pipeline_btn)
         doc_view.addSubview_(box2)
         y += step2_h + gap
 
@@ -2436,7 +2446,11 @@ class AppDelegate(NSObject):
         cv4.addSubview_(self.fw_obf_btn)
         self.code_obf_btn = make_button("代码混淆（全部）", 126, by, 126, 26, self, self.obfCode_, bold=True)
         cv4.addSubview_(self.code_obf_btn)
-        self.step4_status = make_label("", 260, by + 2, bw - 260, 20, size=11)
+        self.one_click_obf_btn = make_button("一键混淆", bw - 100, by, 100, 26, self, self.oneClickObf_, bold=True)
+        self.one_click_obf_btn.setToolTip_(
+            "依次执行：代码混淆(--all) → Framework 混淆(run)；等价 full_obfuscate.sh 的后两步（不重新同步）")
+        cv4.addSubview_(self.one_click_obf_btn)
+        self.step4_status = make_label("", 258, by + 2, bw - 258 - 106, 20, size=11)
         cv4.addSubview_(self.step4_status)
 
         by -= sp
@@ -4752,6 +4766,97 @@ class AppDelegate(NSObject):
             args=(cmd, self.sync_btn, "同步 B 面代码", self.step2_status, None, target, on_sync_ok),
             daemon=True).start()
 
+    def oneClickSyncObf_(self, sender):
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+
+        idx = self.project_popup.indexOfSelectedItem()
+        code = PROJECT_CODES[idx] if 0 <= idx < len(PROJECT_CODES) else ""
+        source = str(self.source_field.stringValue()).strip()
+        target = str(self.target_field.stringValue()).strip()
+
+        if not code: self._log("❌ 请选择项目代号"); return
+        if not source or not os.path.isdir(source): self._log(f"❌ 源码路径无效: {source}"); return
+        if not target or not os.path.isdir(target): self._log(f"❌ 目标工程无效: {target}"); return
+
+        sync_script = os.path.join(target, "scripts", "sync_secondary.sh")
+        code_script = os.path.join(target, "scripts", "obfuscate_code.sh")
+        fw_script = os.path.join(target, "scripts", "obfuscate_frameworks.sh")
+        for s in (sync_script, code_script, fw_script):
+            if not os.path.isfile(s):
+                self._log(f"❌ 脚本不存在: {s}"); return
+
+        self._save_b_side_prefs()
+        _state["is_running"] = True
+        self._set_btn(self.pipeline_btn, False, "执行中…")
+        self._set_btn(self.sync_btn, False)
+        self._set_status(self.step2_status, "一键同步+混淆中…")
+
+        self._log(f"▶ 一键同步+混淆 (-p {code})：同步 → 修复pubspec → 代码混淆(--all) → Framework 混淆(run)")
+        threading.Thread(target=self._run_full_pipeline,
+            args=(code, source, target, int(idx)), daemon=True).start()
+
+    @objc.python_method
+    def _run_full_pipeline(self, code, source, target, idx_sel):
+        title = "一键同步+混淆"
+        sync_script = os.path.join(target, "scripts", "sync_secondary.sh")
+        code_script = os.path.join(target, "scripts", "obfuscate_code.sh")
+        fw_script = os.path.join(target, "scripts", "obfuscate_frameworks.sh")
+        try:
+            # 1. 同步 B 面
+            self._log(f"▶ [1/4 同步 B 面] {sync_script} -p {code} -s {source}")
+            rc = self._exec_stream([sync_script, "-p", code, "-s", source], target)
+            if rc != 0:
+                self._log(f"❌ 同步失败 (exit {rc})，已中止后续步骤")
+                self._set_status(self.step2_status, "❌ 同步失败", success=False)
+                self._notify_telegram(title, ok=False, detail=f"sync exit={rc}"); return
+            self._log("✅ 同步完成")
+
+            # 2. 修复 pubspec（与手动同步一致的工厂后处理）
+            self._log("  [2/4 修复 pubspec] B 面源重建 overrides / 去污染 / plugin path …")
+            _changed, pmsg, _fixed = _repair_pubspec_after_b_side_sync(target, source)
+            if _changed:
+                self._log(f"  📦 pubspec: {pmsg}")
+                _run_flutter_pub_get(target, self._log)
+            elif pmsg:
+                self._log(f"  {pmsg}")
+
+            def _ui():
+                n = int(self.obf_project_popup.numberOfItems())
+                if 0 <= idx_sel < n:
+                    self.obf_project_popup.selectItemAtIndex_(idx_sel)
+            NSOperationQueue.mainQueue().addOperationWithBlock_(_ui)
+
+            # 3. Dart 代码全量混淆
+            self._log(f"▶ [3/4 代码混淆] {code_script} -p {code} --all")
+            rc = self._exec_stream([code_script, "-p", code, "--all"], target)
+            if rc != 0:
+                self._log(f"❌ 代码混淆失败 (exit {rc})，已中止后续步骤")
+                self._set_status(self.step2_status, "❌ 代码混淆失败", success=False)
+                self._notify_telegram(title, ok=False, detail=f"code exit={rc}"); return
+            self._log("✅ 代码混淆完成")
+
+            # 4. Framework / Pod / 依赖字符串混淆
+            self._log(f"▶ [4/4 Framework 混淆] {fw_script} run -p {code}")
+            rc = self._exec_stream([fw_script, "run", "-p", code], target)
+            if rc != 0:
+                self._log(f"❌ Framework 混淆失败 (exit {rc})")
+                self._set_status(self.step2_status, "❌ Framework 混淆失败", success=False)
+                self._notify_telegram(title, ok=False, detail=f"fw exit={rc}"); return
+            self._log("✅ Framework 混淆完成")
+
+            self._log("✅ 一键同步+混淆全部完成（同步 → pubspec → 代码 → Framework）")
+            self._set_status(self.step2_status, "✅ 一键完成", success=True)
+            self._notify_telegram(title, ok=True)
+        except Exception as e:
+            self._log(f"❌ 异常: {e}")
+            self._set_status(self.step2_status, f"❌ {e}", success=False)
+            self._notify_telegram(title, ok=False, detail=str(e))
+        finally:
+            _state["is_running"] = False
+            self._set_btn(self.pipeline_btn, True, "一键同步+混淆")
+            self._set_btn(self.sync_btn, True)
+
     # ── Step 3: A-side / Cursor ──
 
     def openInCursor_(self, sender):
@@ -5376,6 +5481,74 @@ class AppDelegate(NSObject):
             self._set_btn(active_btn, True, btn_title)
             self._set_btn(self.fw_obf_btn, True)
             self._set_btn(self.code_obf_btn, True)
+
+    def oneClickObf_(self, sender):
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+        project = str(self.obf_project_field.stringValue()).strip()
+        if not project or not os.path.isdir(project):
+            self._log("❌ 请选择有效的项目目录"); return
+        code_script = os.path.join(project, "scripts", "obfuscate_code.sh")
+        fw_script = os.path.join(project, "scripts", "obfuscate_frameworks.sh")
+        for s in (code_script, fw_script):
+            if not os.path.isfile(s):
+                self._log(f"❌ 脚本不存在: {s}"); return
+
+        idx = int(self.obf_project_popup.indexOfSelectedItem())
+        pcode = PROJECT_CODES[idx] if 0 <= idx < len(PROJECT_CODES) else PROJECT_CODES[0]
+
+        _state["is_running"] = True
+        self._set_btn(self.one_click_obf_btn, False, "混淆中…")
+        self._set_btn(self.fw_obf_btn, False)
+        self._set_btn(self.code_obf_btn, False)
+        self._set_status(self.step4_status, "一键混淆中…")
+
+        steps = [
+            ("代码混淆（全部）", [code_script, "-p", pcode, "--all"]),
+            ("Framework 混淆", [fw_script, "run", "-p", pcode]),
+        ]
+        self._log(f"▶ 一键混淆 (-p {pcode})：代码混淆(--all) → Framework 混淆(run)")
+        threading.Thread(target=self._run_obf_chain,
+            args=(steps, project), daemon=True).start()
+
+    @objc.python_method
+    def _run_obf_chain(self, steps, cwd):
+        title = "一键混淆"
+        try:
+            for label, cmd in steps:
+                self._log(f"▶ [{label}] {' '.join(cmd)}")
+                rc = self._exec_stream(cmd, cwd)
+                if rc != 0:
+                    self._log(f"❌ {label}失败 (exit {rc})，已中止后续步骤")
+                    self._set_status(self.step4_status, f"❌ {label}失败", success=False)
+                    self._notify_telegram(title, ok=False, detail=f"{label} exit={rc}")
+                    return
+                self._log(f"✅ {label}完成")
+            self._log("✅ 一键混淆完成（代码 + Framework）")
+            self._set_status(self.step4_status, "✅ 一键混淆完成", success=True)
+            self._notify_telegram(title, ok=True)
+        except Exception as e:
+            self._log(f"❌ 异常: {e}")
+            self._set_status(self.step4_status, f"❌ {e}", success=False)
+            self._notify_telegram(title, ok=False, detail=str(e))
+        finally:
+            _state["is_running"] = False
+            self._set_btn(self.one_click_obf_btn, True, "一键混淆")
+            self._set_btn(self.fw_obf_btn, True)
+            self._set_btn(self.code_obf_btn, True)
+
+    @objc.python_method
+    def _exec_stream(self, cmd, cwd):
+        """运行单条命令，实时把输出写入日志，返回退出码。供一键链路顺序调用。"""
+        env = get_env()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8', errors='replace', cwd=cwd, env=env)
+        for line in proc.stdout:
+            clean = strip_ansi(line.rstrip())
+            if clean:
+                self._log(f"  {clean}")
+        proc.wait()
+        return proc.returncode
 
     def applySilentPeriod_(self, sender):
         project = str(self.obf_project_field.stringValue()).strip()
