@@ -54,7 +54,7 @@ dart run bin/obfuscate.dart --help
 
 ```
 可选参数:
-  -p, --project NAME         项目代码 (hjsq, ph, 51pc, hlw, tiktok, 91cg, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy)
+  -p, --project NAME         项目代码 (dq, lgt)
                              用于加载项目特定的敏感词和核心文件列表
   -t, --target DIR           目标目录 (默认: lib/modules/secondary)
 
@@ -88,12 +88,8 @@ dart run bin/obfuscate.dart --help
 
 | 项目 | 核心文件 |
 |------|---------|
-| **ph** | `api_service.dart`, `user_service.dart`, `app_service.dart`, `app_prepare.dart`, `login.dart`, `storage_service.dart` |
-| **hjsq** | `api_service.dart`, `user_service.dart`, `app_service.dart` |
-| **51pc** | `api_service.dart`, `user_service.dart` |
-| **tx** | `module_entry.dart`, `request.dart`, `http_request.dart`, `app_api.dart`, `global_logic.dart`, `splash_logic.dart` |
-| **91porn2** | `module_entry.dart`, `http_config.dart`, `http_api.dart`, `global.dart`, `routes.dart`, `report_monitor_event.dart` |
-| **hlbdy** | `module_entry.dart`, `network_http.dart`, `request_api.dart`, `app_event_report.dart`, `go_routers.dart` |
+| **dq** | `module_entry.dart`, `main.dart`, `http_manager.dart`, `global_logic.dart`, `xx_domain_manager.dart` 等（斗球/直播基础设施层） |
+| **lgt** | `module_entry.dart`, `app_service.dart`, `api_*.dart` 全量, `app_routes.dart` 等（聊个天/IM 服务层 + API + 路由） |
 
 ### 混淆效果示例
 

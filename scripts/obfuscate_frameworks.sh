@@ -15,6 +15,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=ipa_hardening_lib.sh
+source "$SCRIPT_DIR/ipa_hardening_lib.sh" 2>/dev/null || true
 PLUGINS_DIR="$PROJECT_ROOT/plugins"
 FLUTTER_BASE_DIR="$PROJECT_ROOT/flutter_base"
 PODS_DIR="$PROJECT_ROOT/ios/Pods"
@@ -54,6 +56,7 @@ MANIFEST_TMPFILE=""
 _REVERSE_MAP_FILE=""
 _FORWARD_MAP_FILE=""
 SKIP_DEP_STRINGS=false
+SKIP_POD_MANGLE=false
 PUB_DEPS_CACHE_FILE=""
 PUB_DEPS_LAST_ERROR=""
 
@@ -248,43 +251,23 @@ detect_current_project() {
     return 1
 }
 
-# 检查项目是否使用 flutter_base
+# 当前保留项目：dq / lgt，均不使用 flutter_base 家族
 project_uses_flutter_base() {
-    local project="$1"
-    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "txpjb" || "$project" == "xjpjb" ]]
+    return 1
 }
 
-# yms/oio/bili use the same flutter_base family. txpjb/xjpjb also have a
-# flutter_base directory, but it is a different implementation and must not
-# reuse this closure manifest.
 project_uses_flutter_base_closure_manifest() {
-    local project="$1"
-    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" ]]
+    return 1
 }
 
-reject_retired_project() {
-    local project="$1"
-    if [[ "$project" == "md" ]]; then
-        log_error "md 项目已下线，不再支持 Framework / Pod / 依赖字符串混淆"
-        exit 1
-    fi
-}
-
-# Shared deep framework/closure rules are opt-in to avoid changing existing
-# projects that already have stable obfuscation manifests.
+# 共享深度混淆规则仅历史项目使用，当前保留项目均不启用
 project_uses_shared_deep_obfuscation() {
-    local project="$1"
-    case "$project" in
-        91cg|91porn|91porn2|txpjb|xjpjb)
-            return 0
-            ;;
-    esac
     return 1
 }
 
 project_uses_review_intensive_obfuscation() {
     local project="$1"
-    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "dq" ]]
+    [[ "$project" == "dq" ]]
 }
 
 native_class_multiplier() {
@@ -3353,7 +3336,7 @@ EOF
     if [[ -d "$PLUGINS_DIR/velvet_anchor" ]]; then
         local velvet_version
         velvet_version=$(get_plugin_version "$PLUGINS_DIR/velvet_anchor")
-        if [[ "$velvet_version" == "2.5.6" || ( "$CURRENT_PROJECT" == "91cg" && "$velvet_version" == "2.5.4" ) ]]; then
+        if [[ "$velvet_version" == "2.5.6" ]]; then
             local shim_dir="$PLUGINS_DIR/shared_preferences_foundation"
             mkdir -p "$shim_dir/lib"
             cat > "$shim_dir/pubspec.yaml" <<EOF
@@ -3692,9 +3675,9 @@ localize_skipped_plugins() {
         done < "$MAPPING_FILE"
     fi
 
-    # 进一步把 manifest 中未被重命名的 remote iOS 插件也本地化。
-    # 这覆盖了 oio 这类项目的大量平台实现包（audio_session、webview 等），
-    # 让它们不只参与 Pod 集成，也能进入 Native Mutation 与 dep-strings。
+    # 进一步把 manifest 中未被重命名的 remote iOS 插件也本地化，
+    # 让大量平台实现包（audio_session、webview 等）不只参与 Pod 集成，
+    # 也能进入 Native Mutation 与 dep-strings。
     if [[ "$MANIFEST_LOADED" == "true" ]]; then
         while IFS= read -r mline || [[ -n "$mline" ]]; do
             local type name version level
@@ -6086,6 +6069,16 @@ run_all() {
     fi
 
     rm -rf Pods Podfile.lock 2>/dev/null || true
+
+    # cocoapods-mangle：仅 ZT_POD_MANGLE=1 时注入（默认关，避免与 Pod 变异/闭源 SDK 冲突）
+    [[ -z "$SEED" ]] && derive_seed
+    if [[ "$DRY_RUN" != "true" ]] && [[ "$SKIP_POD_MANGLE" != "true" ]] \
+        && type should_auto_pod_mangle >/dev/null 2>&1 \
+        && should_auto_pod_mangle "$CURRENT_PROJECT"; then
+        log_info "启用 cocoapods-mangle（seed=$SEED，ZT_POD_MANGLE=1）"
+        maybe_enable_pod_mangle true "$SEED" "$PROJECT_ROOT/ios/Podfile" "$SCRIPT_DIR" \
+            || log_warning "pod mangle 注入失败（需 gem install cocoapods-mangle），继续 pod install"
+    fi
     
     local _pod_log
     _pod_log=$(mktemp)
@@ -6181,6 +6174,7 @@ Framework 混淆脚本 — 统一的 framework 混淆方案
   --verify               变异后验证编译
   --no-platform-detect   禁用自动检测 iOS 平台包
   --no-dep-strings       run 时跳过依赖字符串混淆
+  --no-pod-mangle        run 时跳过 cocoapods-mangle 注入（编译期 Pod 符号前缀）
   --pub-cache DIR        指定 pub cache 目录 (默认自动检测)
   -d, --dry-run          模拟运行，不实际修改
   -v, --verbose          详细输出
@@ -6212,13 +6206,8 @@ Framework 混淆脚本 — 统一的 framework 混淆方案
 
 示例:
   $0 run                               # 一键完成（含字符串混淆，推荐）
-  $0 run -p bili                       # 对 bili 项目执行一键混淆
-  $0 run -p 91porn                     # 对 91porn 项目执行一键混淆
-  $0 run -p 91porn2                    # 对 91porn2 项目执行一键混淆
-  $0 run -p txpjb                      # 对 txpjb 项目执行一键混淆
-  $0 run -p xjpjb                      # 对 xjpjb 项目执行一键混淆
-  $0 run -p hlbdy                      # 对 hlbdy 项目执行一键混淆
-  $0 run -p nnrj                       # 对 nnrj 项目执行一键混淆
+  $0 run -p dq                         # 对 dq 项目执行一键混淆
+  $0 run -p lgt                        # 对 lgt 项目执行一键混淆
   $0 run --no-dep-strings              # 一键完成，跳过字符串混淆
   $0 run -r 80                         # 一键完成，只混淆 80% 的插件
   $0 run -d                            # 模拟运行全流程（不实际修改）
@@ -6311,6 +6300,10 @@ main() {
                 SKIP_DEP_STRINGS=true
                 shift
                 ;;
+            --no-pod-mangle)
+                SKIP_POD_MANGLE=true
+                shift
+                ;;
             -d|--dry-run)
                 DRY_RUN=true
                 shift
@@ -6343,8 +6336,6 @@ main() {
             log_info "提示: 使用 -p 参数指定项目"
         fi
     fi
-
-    reject_retired_project "$CURRENT_PROJECT"
 
     REPORT_COMMAND_NAME="${command:-${GENERATE_MAPPING:+generate}}"
     [[ -z "$REPORT_COMMAND_NAME" && "$CLEAN_ONLY" == "true" ]] && REPORT_COMMAND_NAME="clean"

@@ -349,22 +349,13 @@ detect_current_project() {
     return 1
 }
 
+# 当前保留项目：dq / lgt，均不使用 flutter_base
 project_uses_flutter_base() {
-    local project="$1"
-    [[ "$project" == "yms" || "$project" == "oio" || "$project" == "bili" || "$project" == "txpjb" || "$project" == "xjpjb" ]]
-}
-
-reject_retired_project() {
-    local project="$1"
-    if [[ "$project" == "md" ]]; then
-        log_error "md 项目已下线，不再支持依赖字符串混淆"
-        exit 1
-    fi
+    return 1
 }
 
 project_uses_root_flutter_base_path_dep() {
-    local project="$1"
-    [[ "$project" == "xjpjb" ]]
+    return 1
 }
 
 find_latest_framework_report() {
@@ -1607,7 +1598,7 @@ usage() {
 用法: $0 [选项]
 
 选项:
-  -p, --project NAME     项目代码 (hlw, ph, hjsq, tiktok, 91cg, 51pc, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy, nnrj)
+  -p, --project NAME     项目代码 (dq, lgt)
                          如不指定，自动从 ab_config.yaml 读取
   --plugin NAME          仅处理指定 plugin（调试用）
   --init                 生成清单模板（不执行混淆）
@@ -1640,11 +1631,11 @@ usage() {
   支持精确匹配和正则: /^pattern$/
 
 工作流:
-  1. $0 --init -p hlw                         # 生成 _shared.conf + hlw.conf
-  2. 编辑 _shared.conf（通用 plugin）或 hlw.conf（项目专属）
+  1. $0 --init -p dq                          # 生成 _shared.conf + dq.conf
+  2. 编辑 _shared.conf（通用 plugin）或 dq.conf（项目专属）
   3. 编辑 dep_strings_skip/*.conf 调整跳过规则
-  4. $0 -p hlw -d -v                           # dry-run 预览
-  5. $0 -p hlw                                 # 执行混淆
+  4. $0 -p dq -d -v                            # dry-run 预览
+  5. $0 -p dq                                  # 执行混淆
   6. fvm flutter build ios --release           # 验证编译
 
 也可通过 obfuscate_frameworks.sh 调用:
@@ -1687,8 +1678,6 @@ main() {
             exit 1
         fi
     fi
-
-    reject_retired_project "$CURRENT_PROJECT"
 
     if [[ "$do_init" == "true" ]]; then
         generate_manifest_template

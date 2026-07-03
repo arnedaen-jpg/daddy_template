@@ -28,47 +28,6 @@ class RouteObfuscator {
   /// 获取项目特定的路由/API路径文件模式
   List<String> _getRouteFilePatterns() {
     switch (config.projectName) {
-      case 'ph':
-        return ['routes/routes.dart'];
-      case 'hjsq':
-        return ['router/paths.dart'];
-      case '51pc':
-        return ['routes/routes.dart'];
-      case 'hlw':
-        return ['util/go_routers.dart'];
-      case 'tiktok':
-        return ['public/routes.dart'];
-      case '91cg':
-        return ['util/go_routers.dart'];
-      case '51cg':
-        return ['util/go_routers.dart'];
-      case 'mrds':
-        return ['util/go_routers.dart'];
-      case 'yms':
-        return ['common/local_router/router_map.dart'];
-      case 'oio':
-        return ['common/local_router/router_map.dart'];
-      case 'bili':
-        return ['common/local_router/router_map.dart'];
-      case '91porn':
-        return ['routers/router_map.dart'];
-      case '91porn2':
-        return ['public/routes.dart'];
-      case 'txpjb':
-        return ['route/route_config.dart'];
-      case 'xjpjb':
-        return ['route/route_config.dart'];
-      case 'hlbdy':
-        return ['util/go_routers.dart'];
-      case 'acfun':
-        return ['features/routes/app_routes.dart'];
-      case 'nnrj':
-        return ['routes/routes.dart'];
-      case 'tx':
-        return [
-          'core/routers.dart',
-          'modules/splash/splash_view.dart',
-        ];
       case 'dq':
         // xty / 斗球：GetX 路由多在 config / main
         return [
@@ -76,25 +35,8 @@ class RouteObfuscator {
           'config/config.dart',
         ];
       case 'lgt':
-        // 与 acfun 同：集中路由表
+        // 聊个天/IM：集中路由表
         return ['features/routes/app_routes.dart'];
-      case 'douyin':
-        return [
-          'router.dart',
-          'router/home.dart',
-          'router/library.dart',
-          'router/follow.dart',
-          'router/play.dart',
-          'router/mine.dart',
-          'router/profile.dart',
-          'router/pay.dart',
-          'router/webview.dart',
-          'router/chat.dart',
-          'router/search.dart',
-          'router/common.dart',
-          'router/movie.dart',
-          'router/post.dart',
-        ];
       default:
         return [
           'routes/routes.dart',
@@ -122,28 +64,7 @@ class RouteObfuscator {
     }
 
     if (pathFiles.isEmpty) {
-      if (config.projectName == 'ph' ||
-          config.projectName == 'hjsq' ||
-          config.projectName == '51pc' ||
-          config.projectName == 'hlw' ||
-          config.projectName == 'tiktok' ||
-          config.projectName == '91cg' ||
-          config.projectName == '51cg' ||
-          config.projectName == 'mrds' ||
-          config.projectName == 'yms' ||
-          config.projectName == 'oio' ||
-          config.projectName == 'bili' ||
-          config.projectName == '91porn' ||
-          config.projectName == '91porn2' ||
-          config.projectName == 'txpjb' ||
-          config.projectName == 'xjpjb' ||
-          config.projectName == 'hlbdy' ||
-          config.projectName == 'acfun' ||
-          config.projectName == 'nnrj' ||
-          config.projectName == 'tx' ||
-          config.projectName == 'dq' ||
-          config.projectName == 'lgt' ||
-          config.projectName == 'douyin') {
+      if (config.projectName == 'dq' || config.projectName == 'lgt') {
         logger.warning('未找到路径常量文件: ${patterns.join(" 或 ")}');
       } else {
         logger.info('项目 $projectName 无路径混淆配置，跳过');
@@ -638,10 +559,9 @@ class RouteObfuscator {
   }
 
   bool _shouldSkipRouteObfuscation(String projectName) {
-    // douyin 的 GoRoute 定义使用分段 path，但 Go.push 调用使用完整路径。
-    // 只改 GoRoute.path 会让注册路径和跳转路径不一致，例如:
-    // /home/movie/detailVSearchId -> /<hash>/<hash>/detailVSearchId。
-    return projectName == 'douyin';
+    // 某些项目 GoRoute 定义使用分段 path，但跳转调用使用完整路径，
+    // 只改 GoRoute.path 会让注册路径和跳转路径不一致。当前保留项目无需跳过。
+    return false;
   }
 }
 

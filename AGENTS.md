@@ -159,6 +159,7 @@ fvm flutter build ios --release
 说明：
 
 - `run` 默认包含依赖字符串混淆；如需跳过，传 `--no-dep-strings`。
+- **cocoapods-mangle** 默认关；与 Pod 源码变异/闭源 SDK 可能冲突，仅在需要时 `ZT_POD_MANGLE=1 ./scripts/obfuscate_frameworks.sh run -p dq`。
 - 混淆范围只针对 `pubspec.yaml` 中 `# === 次要模块依赖` 标记后的 B 面依赖。
 - 规则来自 `scripts/project_manifests/*.conf` 与 `scripts/framework_profiles/`。
 - 新项目适配流程见 `docs/ADAPT_NEW_PROJECT.md`。
@@ -181,10 +182,11 @@ fvm flutter build ios --release
 
 说明：
 
-- `build_flutter_ipa.sh` 依赖工作目录下的 `build_config.json`，模板见 `scripts/build_config.json.example`。
+- `build_flutter_ipa.sh` 仅打包，**不做**成品包 IPA 混淆；步骤 5 在 AB 包工厂里用「混淆 IPA」或 CLI `harden_ipa_standalone.sh`。
 - `build_flutter_ipa.sh` 会更新 `lib/config/app_config.dart` 中的 `buildTimestamp`，并按 `--silent`（或历史兼容 `--cooldown`）写入静默期天数 `silentPeriodDays`。
 - `upload_ipa.sh` 依赖 `build_config.json` 里的 `apple_api_key` 与 `proxy` 配置。
 - `build_and_resign.sh` 是从源码构建并用 `cert/` 下证书重签的一体化脚本，适合本地验证。
+- **独立 IPA 混淆**（非工厂包）：`./scripts/open_ipa_hardening_tool.sh` 打开本地 UI，或 `harden_ipa_standalone.sh --ipa <path>`。
 
 ## 其他实用脚本
 

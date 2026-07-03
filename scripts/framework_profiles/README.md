@@ -17,8 +17,8 @@ framework_profiles/
 
 project_manifests/
 ├── template.conf              # 模板
-├── hlw.conf                   # 各项目的混淆清单
-├── 51pc.conf
+├── dq.conf                    # 各项目的混淆清单
+├── lgt.conf
 └── ...
 ```
 

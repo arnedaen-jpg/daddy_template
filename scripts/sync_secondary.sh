@@ -831,24 +831,6 @@ sync_assets() {
 
     do_copy "$SOURCE_PATH/assets" "$TARGET_ASSETS_DIR" "assets"
 
-    # yms 特殊：图片可能在 assetsHoliday / assetsholiday 下
-    if [[ "$PROJECT_NAME" == "yms" ]]; then
-        for src_extra_dir in "$SOURCE_PATH/assetsHoliday" "$SOURCE_PATH/assetsholiday"; do
-            if [[ -d "$src_extra_dir" ]]; then
-                local dir_base
-                dir_base="$(basename "$src_extra_dir")"
-                local dst_extra_dir="$TARGET_ASSETS_DIR/$dir_base"
-
-                # 防止重复运行导致 dst 目录嵌套（cp -r src dst 若 dst 已存在会把 src 再包一层）
-                if [[ -d "$dst_extra_dir" ]]; then
-                    do_remove "${dst_extra_dir:?}"
-                fi
-
-                do_copy "$src_extra_dir" "$dst_extra_dir" "$dir_base"
-            fi
-        done
-    fi
-
     log_success "assets 同步完成"
 }
 
@@ -907,7 +889,7 @@ generate_secondary_base64_map() {
 
     bash "$gen_script" "$TARGET_ASSETS_DIR" "$output_file"
 
-    # md 项目可能含 flutter_base 包；确保 flutter_base 也有映射文件，便于内部复用 Base64 扩展/组件
+    # 项目若含 flutter_base 包，确保其也有映射文件，便于内部复用 Base64 扩展/组件
     if [[ -d "$PROJECT_ROOT/flutter_base" ]]; then
         mkdir -p "$(dirname "$flutter_base_output_file")"
         bash "$gen_script" "$TARGET_ASSETS_DIR" "$flutter_base_output_file"
@@ -939,7 +921,7 @@ ensure_base64_support_darts() {
     fi
     bash "$writer" "$PROJECT_ROOT" "$mode"
 
-    # md 项目：flutter_base 也需要这些 utils（否则 flutter_base 内引用会缺文件）
+    # 项目若含 flutter_base 包，也需要这些 utils（否则 flutter_base 内引用会缺文件）
     if [[ -d "$PROJECT_ROOT/flutter_base" ]]; then
         bash "$writer" "$PROJECT_ROOT/flutter_base" "$mode"
     fi
@@ -1012,166 +994,6 @@ if "key.name.base64data()" not in content:
 if changed:
     file_path.write_text(content, encoding="utf-8")
     print(f"[INFO] MyAssetImage Base64 修复完成: {file_path.name}")
-PY
-}
-
-# md/yms + --base64-map：将主工程生成的 Base64 相关文件复制到 flutter_base/lib/image，
-# 并用模板覆盖 image_loader.dart（与 scripts/templates/md_base64_image_loader.dart 一致）。
-copy_md_base64_to_flutter_base_image() {
-    if [[ ( "$PROJECT_NAME" != "md" && "$PROJECT_NAME" != "yms" ) || "$GENERATE_BASE64_MAP" != "true" ]]; then
-        return
-    fi
-
-    if [[ ! -d "$PROJECT_ROOT/flutter_base" ]]; then
-        return
-    fi
-
-    local map_src="$PROJECT_ROOT/lib/modules/secondary/generate/secondary_image_base64_map.dart"
-    local ext_src="$PROJECT_ROOT/lib/utils/secondary_image_base64_ext.dart"
-    local hh_src="$PROJECT_ROOT/lib/utils/base_hh_image.dart"
-    local fb_image_dir="$PROJECT_ROOT/flutter_base/lib/image"
-    local loader="$fb_image_dir/image_loader.dart"
-    local loader_template="$SCRIPT_DIR/templates/md_base64_image_loader.dart"
-
-    if [[ ! -f "$map_src" ]] || [[ ! -f "$ext_src" ]] || [[ ! -f "$hh_src" ]]; then
-        log_warning "Base64 源文件不完整，跳过复制到 flutter_base/lib/image"
-        return
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] 将复制 Base64 文件到 $fb_image_dir 并更新 $loader"
-        return
-    fi
-
-    log_step "md/yms + base64-map：同步 Base64 文件到 flutter_base/lib/image..."
-
-    mkdir -p "$fb_image_dir"
-    cp -f "$map_src" "$fb_image_dir/secondary_image_base64_map.dart"
-    cp -f "$ext_src" "$fb_image_dir/secondary_image_base64_ext.dart"
-    cp -f "$hh_src" "$fb_image_dir/base_hh_image.dart"
-
-    # 与 lib/utils 不同：image 目录内三文件平铺，扩展里改为同目录 import
-    if [[ "$(uname)" == "Darwin" ]]; then
-        sed -i '' "s|import '../modules/secondary/generate/secondary_image_base64_map.dart';|import 'secondary_image_base64_map.dart';|g" \
-            "$fb_image_dir/secondary_image_base64_ext.dart"
-    else
-        sed -i "s|import '../modules/secondary/generate/secondary_image_base64_map.dart';|import 'secondary_image_base64_map.dart';|g" \
-            "$fb_image_dir/secondary_image_base64_ext.dart"
-    fi
-
-    if [[ -f "$loader_template" ]]; then
-        cp -f "$loader_template" "$loader"
-        log_info "已用模板覆盖: $loader"
-    else
-        log_warning "未找到模板 $loader_template，跳过 image_loader.dart 覆盖"
-    fi
-
-    log_success "已更新 flutter_base/lib/image（含 Base64 与 image_loader）"
-}
-
-# 51pc 专用：将 secondary 内 local_png.dart 的加载改为 BaseHHImage.image
-# 目的：绕开 AssetBundle/解密加载路径，统一走 Base64 map。
-patch_51pc_local_png_to_base_hh_image() {
-    if [[ "$PROJECT_NAME" != "51pc" ]]; then
-        return
-    fi
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] 将尝试修复 secondary 中 local_png.dart: Image(MyAssetImage) -> BaseHHImage.image"
-        return
-    fi
-
-    # 确保 BaseHHImage 已生成（如果用户显式关闭了 Base64/替换，这里也不做）
-    if [[ ! -f "$PROJECT_ROOT/lib/utils/base_hh_image.dart" ]]; then
-        log_warning "未找到 lib/utils/base_hh_image.dart，跳过 51pc local_png.dart 修复"
-        return
-    fi
-
-    python3 - "$TARGET_SIDE_B_DIR" "$PROJECT_ROOT" << 'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-secondary_dir = Path(sys.argv[1])
-project_root = Path(sys.argv[2])
-base_hh_file = project_root / "lib" / "utils" / "base_hh_image.dart"
-
-if not secondary_dir.exists():
-    raise SystemExit(0)
-
-targets = list(secondary_dir.rglob("local_png.dart"))
-if not targets:
-    raise SystemExit(0)
-
-patched = 0
-
-def ensure_import(content: str, file_path: Path) -> str:
-    if "base_hh_image.dart" in content:
-        return content
-    rel_import = Path(os.path.relpath(base_hh_file, file_path.parent)).as_posix()
-    target_import = f"import '{rel_import}';"
-    import_matches = list(re.finditer(r"^import\s+['\"].*?['\"];\s*$", content, flags=re.M))
-    if import_matches:
-        last = import_matches[-1]
-        insert_at = last.end()
-        return content[:insert_at] + "\n" + target_import + content[insert_at:]
-    return target_import + "\n" + content
-
-
-def patch_load_image_block(content: str) -> tuple[str, bool]:
-    # 兼容两种写法：
-    # 1) : Image(image: MyAssetImage(widget.url!), ...)
-    # 2) : Image(MyAssetImage(widget.url!), ...)  (老写法)
-    if "BaseHHImage.image(" in content:
-        return content, False
-
-    replaced = False
-
-    # 写法1
-    pat1 = re.compile(
-        r":\s*Image\(\s*\n(?P<indent>\s*)image:\s*MyAssetImage\((?P<arg>[^)]*)\)\s*,",
-        flags=re.M,
-    )
-    def repl1(m: re.Match) -> str:
-        nonlocal replaced
-        replaced = True
-        indent = m.group("indent")
-        arg = m.group("arg").strip()
-        return f": BaseHHImage.image(\n{indent}{arg},"
-    content2 = pat1.sub(repl1, content)
-
-    # 写法2（仅当写法1没命中时尝试）
-    if not replaced:
-        pat2 = re.compile(
-            r":\s*Image\(\s*\n(?P<indent>\s*)MyAssetImage\((?P<arg>[^)]*)\)\s*,",
-            flags=re.M,
-        )
-        def repl2(m: re.Match) -> str:
-            nonlocal replaced
-            replaced = True
-            indent = m.group("indent")
-            arg = m.group("arg").strip()
-            return f": BaseHHImage.image(\n{indent}{arg},"
-        content2 = pat2.sub(repl2, content2)
-
-    return content2, replaced
-
-
-for file_path in targets:
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except Exception:
-        continue
-
-    new_content, changed = patch_load_image_block(content)
-    if not changed:
-        continue
-
-    new_content = ensure_import(new_content, file_path)
-    file_path.write_text(new_content, encoding="utf-8")
-    patched += 1
-
-print(f"[INFO] 51pc local_png.dart 修复完成: {patched} 个文件")
 PY
 }
 
@@ -1746,9 +1568,6 @@ modify_image_metadata_fast() {
     esac
 }
 
-# 注意: md 专用函数（md_aes_encrypt_path, obfuscate_md_image_metadata, obfuscate_md_assets）
-# 已移至 scripts/compat/compat_md.sh
-
 batch_modify_metadata_exiftool() {
     local file_list="$1"
     local seed="$2"
@@ -1880,14 +1699,6 @@ obfuscate_asset_filenames() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY-RUN] 将混淆资源文件名和元数据"
-        return
-    fi
-    
-    # md 项目的图片路径是 AES 加密的（EncryptUtils.decryptAES），
-    # 需要重命名文件后用 OpenSSL 重新加密路径并替换 dart 代码中的加密字符串
-    if [[ "$PROJECT_NAME" == "md" ]] || [[ -f "$TARGET_SIDE_B_DIR/assets/assets_mdgetx_client.dart" ]]; then
-        log_info "检测到 md 项目，使用完整资源混淆模式（重命名 + 加密引用更新 + 元数据修改）"
-        obfuscate_md_assets
         return
     fi
 
@@ -2312,7 +2123,7 @@ sync_plugins() {
     log_success "plugins 同步完成"
 }
 
-# 同步 flutter_base（md 项目特有）
+# 同步 flutter_base（源项目含该包时）
 sync_flutter_base() {
     if [[ ! -d "$SOURCE_PATH/flutter_base" ]]; then
         return
@@ -2895,28 +2706,8 @@ update_assets_paths() {
     # 只替换资源引用（字符串中的 assets/），不替换 import 语句中的相对路径
     # 关键修复：使用 '\./assets/' 会错误匹配 '../assets/' 中的 './assets/' 子串
     # 解决方案：只匹配引号后紧跟的 './assets/' 格式（资源字符串），不影响 import 相对路径
-    # hjsq 项目使用 './assets/images/xxx.png' 格式
     local count=0
     while IFS= read -r -d '' file; do
-        # yms 特殊：源项目可能使用 assetsholiday/ 作为资源根目录，需要映射到 assets/secondary 下
-        if [[ "$PROJECT_NAME" == "yms" ]]; then
-            if grep -q "assetsholiday/" "$file" 2>/dev/null; then
-                if [[ "$(uname)" == "Darwin" ]]; then
-                    # 跳过 import/export 语句，只处理资源字符串
-                    sed -i '' "/^[[:space:]]*import /!s|'assetsholiday/|'assets/secondary/assetsholiday/|g" "$file"
-                    sed -i '' "/^[[:space:]]*export /!s|'assetsholiday/|'assets/secondary/assetsholiday/|g" "$file"
-                    sed -i '' '/^[[:space:]]*import /!s|"assetsholiday/|"assets/secondary/assetsholiday/|g' "$file"
-                    sed -i '' '/^[[:space:]]*export /!s|"assetsholiday/|"assets/secondary/assetsholiday/|g' "$file"
-                else
-                    sed -i "/^[[:space:]]*import /!s|'assetsholiday/|'assets/secondary/assetsholiday/|g" "$file"
-                    sed -i "/^[[:space:]]*export /!s|'assetsholiday/|'assets/secondary/assetsholiday/|g" "$file"
-                    sed -i '/^[[:space:]]*import /!s|"assetsholiday/|"assets/secondary/assetsholiday/|g' "$file"
-                    sed -i '/^[[:space:]]*export /!s|"assetsholiday/|"assets/secondary/assetsholiday/|g' "$file"
-                fi
-                count=$((count + 1))
-            fi
-        fi
-
         # 检查文件是否包含 './assets/ 或 "./assets/ 格式的资源引用（引号紧跟 ./）
         if grep -q "'\./assets/" "$file" 2>/dev/null || grep -q '"\./assets/' "$file" 2>/dev/null; then
             if [[ "$(uname)" == "Darwin" ]]; then
@@ -3363,15 +3154,6 @@ merge_pubspec_impl() {
         grep "^    -" | \
         sed 's|assets/|assets/secondary/|g' > "$temp_assets" || true
 
-    # yms 特殊：assetsholiday/ 资源根目录也需要映射到 assets/secondary 下
-    if [[ "$PROJECT_NAME" == "yms" ]]; then
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' 's|assetsholiday/|assets/secondary/assetsholiday/|g' "$temp_assets"
-        else
-            sed -i 's|assetsholiday/|assets/secondary/assetsholiday/|g' "$temp_assets"
-        fi
-    fi
-
     local assets_count
     assets_count=$(wc -l < "$temp_assets" | tr -d ' ')
 
@@ -3542,7 +3324,6 @@ merge_pubspec_impl() {
     log_success "pubspec.yaml 简化合并完成"
 }
 
-# 添加 flutter_base 和 md_gen 路径依赖（md 项目专用）
 add_swift_file_to_xcode_project() {
     local pbxproj="$1"
     local filename="$2"
@@ -3596,7 +3377,6 @@ add_swift_file_to_xcode_project() {
     log_info "  $filename 已添加到 Xcode 项目"
 }
 
-# 更新 md 项目 pubspec.yaml 添加原始路径声明
 show_summary() {
     echo ""
     echo "=============================================="
@@ -3731,8 +3511,7 @@ write_sync_log() {
     log_success "同步日志已写入: $log_file"
 }
 
-# 清理并重装 CocoaPods（md 项目专用）
-# 解决 Module not found 问题
+# 清理并重装 CocoaPods，解决 Module not found 问题
 run_pub_get() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY-RUN] 将运行 fvm flutter pub get"
@@ -4082,10 +3861,9 @@ main() {
     fix_absolute_path_imports     # 修复绝对路径导入（以 / 开头）
     fix_existing_relative_imports # 修复已有的相对路径
     update_assets_paths           # 更新 assets 路径
-    type -t update_md_assets_paths &>/dev/null && update_md_assets_paths
     sync_assets
-# md 项目可能包含 flutter_base 包；Base64 支持 Dart 需要同时写入该包内
-sync_flutter_base
+    # 源项目含 flutter_base 包时，Base64 支持 Dart 需要同时写入该包内
+    sync_flutter_base
     #optimize_secondary_images     # 压缩优化图片资源（减小包体积）
     # 暂时禁用：资源文件名混淆（避免 obfuscate_asset_filenames 出现误替换/误改字符串的问题）
     # 典型问题：不应影响 Dart 代码里的 JSON key，如 json["share"]。
@@ -4093,16 +3871,12 @@ sync_flutter_base
     generate_secondary_base64_map # 生成图片 Base64 映射（默认开启）
     ensure_base64_support_darts   # 按需写入 base_hh_image / secondary_image_base64_ext
     patch_secondary_my_asset_image_to_base64 # MyAssetImage 优先走 Base64 映射（避免删图后 bundle 读不到）
-    patch_51pc_local_png_to_base_hh_image # 51pc：local_png.dart 改为 BaseHHImage.image
-    copy_md_base64_to_flutter_base_image # md/yms + base64-map：flutter_base/lib/image + 模板 image_loader
     replace_image_asset_entries   # 批量替换图片入口组件（可选）
     replace_asset_image_providers # 批量替换 AssetImage/ExactAssetImage（Base64 下的 DecorationImage 等场景）
     type -t create_md_assets_symlinks &>/dev/null && create_md_assets_symlinks
     sync_plugins                  # 须在 merge_pubspec 前完成，供 path override 解析 plugins/
     sync_ios_permissions          # 同步 iOS 权限配置
     sync_ios_podfile              # 同步 iOS Podfile 配置（解决 iOS 18.5 libswiftWebKit 问题）
-    type -t sync_md_ios_native_files &>/dev/null && sync_md_ios_native_files
-    type -t sync_yms_ios_native_files &>/dev/null && sync_yms_ios_native_files
     generate_entry_file
     fix_flutter_api_compatibility # 修复 Flutter API 兼容性问题
     # 项目专用兼容修复（由 compat_*.sh 定义）

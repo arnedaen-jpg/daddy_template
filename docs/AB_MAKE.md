@@ -19,11 +19,12 @@ AB 包制作流程大致分为 3 条线，分别是开发者账号、 APP 开发
 
 ### 提审
 1. 在 appstore connect 后台填写 app 信息（类目、title、keywords、description、截图等等）。
-2. 使用 `build_flutter_ipa.sh` 脚本打包 ipa。
-3. 重签&真机验证（可选）。
-4. 使用 `upload_ipa.sh` 脚本上传 ipa。
-5. 所有信息 ready，提交审核。
-6. 在提包管理后台将该 APP 配置置为已提审状态。
+2. 使用 `build_flutter_ipa.sh` 脚本打包 ipa（或在 AB 包工厂步骤 5 点「打包 IPA」）。
+3. 在 AB 包工厂步骤 5 点 **「混淆 IPA」**（或 CLI `harden_ipa_standalone.sh`），对工厂产物或外部 IPA 做资源指纹差异化；可选 Mach-O。
+4. 重签&真机验证（可选；混淆时若已填描述文件则已重签）。
+5. 使用 `upload_ipa.sh` 脚本上传 ipa。
+6. 所有信息 ready，提交审核。
+7. 在提包管理后台将该 APP 配置置为已提审状态。
 
 ## 二. 开发者账号
 ### 账号分配
@@ -102,6 +103,19 @@ AB 包制作流程大致分为 3 条线，分别是开发者账号、 APP 开发
 ### dart 混淆
 执行打包脚本 `build_flutter_ipa.sh` 时，会自动加上官方 dart 代码混淆效果。
 
+### 成品包加固（4.3a，步骤 5 独立操作）
+
+针对**二进制 Pod / 成品 IPA** 的差异化，在 **AB 包工厂 → 步骤 5** 中单独提供（与「打包 IPA」按钮分离）：
+
+| 手段 | 位置 | 说明 |
+|------|------|------|
+| **cocoapods-mangle** | 步骤 4 Framework 混淆（可选） | 默认关；`ZT_POD_MANGLE=1` 时 `run` 注入 Podfile |
+| **资源指纹 / Mach-O** | 步骤 5「混淆 IPA」 | 填 IPA 路径后点击；可处理工厂产物或外部 IPA |
+
+- **打包**：`build_flutter_ipa.sh` **不再**自动做成品包混淆；打包成功后工厂会把 `工作目录/ipa/*.ipa` 填入「IPA 路径」。
+- **混淆**：在步骤 5 点 **「混淆 IPA」**；勾选 Mach-O 为可选项（需真机回归）。使用工作目录下的描述文件自动重签。
+- 命令行等价：`./scripts/harden_ipa_standalone.sh --ipa /path/in.ipa [--profile ...]`
+
 ## 五. 打包 ipa
 
 ### 信息收集
@@ -142,7 +156,7 @@ TestApp/
 ```
 
 3. 在 Flutter 代码工程根目录执行打包脚本 `./scripts/build_flutter_ipa.sh /path/to/TestApp`
-4. 打包完成后，IPA 文件将生成到工作目录的 `ipa/` 文件夹。
+4. 打包完成后，IPA 文件将生成到工作目录的 `ipa/` 文件夹。**默认**会执行成品包资源指纹差异化并重签（见上文「成品包加固」）。
 
 
 ### 重签

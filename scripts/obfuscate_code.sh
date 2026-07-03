@@ -11,7 +11,6 @@
 #   4. 业务噪音  --noise      在 build/initState/getHomePage 中注入噪音
 #   5. AST变异   --mutation   在方法体中插入 dummy 代码
 #   6. 符号扭曲  --symbols    extension/generic/mixin 结构生成
-#   7. yms Runner Swift 原生轻量混淆（--all 时自动执行）
 # 调用栈混淆说明：
 #   - 只针对项目核心文件（如 api_service.dart, user_service.dart 等）
 #   - 在方法体中注入包装调用，确保代码会被执行（不会被 tree shaking）
@@ -98,11 +97,7 @@ detect_current_project() {
 }
 
 reject_retired_project() {
-    local project="$1"
-    if [[ "$project" == "md" ]]; then
-        log_error "md 项目已下线，不再支持混淆"
-        exit 1
-    fi
+    : # 历史下线项目校验占位（当前保留 dq / lgt，无需拒绝）
 }
 
 # 显示帮助
@@ -113,7 +108,7 @@ B面代码混淆脚本（Dart AST 版）
 用法: $0 [选项] [混淆功能]
 
 可选参数:
-  -p, --project NAME         项目代码 (dq=斗球/直播, lgt=聊个天/IM, hjsq, ph, 51pc, 51cg, hlw, tiktok, 91cg, yms, acfun, tx, douyin, mrds, oio, bili, 91porn, 91porn2, txpjb, xjpjb, hlbdy, nnrj)
+  -p, --project NAME         项目代码 (dq=斗球/直播, lgt=聊个天/IM)
                              如不指定，自动从 ab_config.yaml 读取
                              （sync_secondary.sh 执行后会自动生成）
 
@@ -141,37 +136,16 @@ B面代码混淆脚本（Dart AST 版）
 
 核心文件（--callstack 针对的文件）:
   dq:     module_entry.dart, main.dart, http_manager.dart, global_logic.dart, xx_domain_manager.dart (斗球 xty，按 basename 匹配)
-  lgt:    同 acfun 策略（服务层 + API 全量 + 路由，偏 IM/社区）
-  ph:     api_service.dart, user_service.dart, app_service.dart, app_prepare.dart, login.dart
-  hjsq:   全量覆盖 (85+ 文件: services, mixins, repo, domain, app 层)
-  51pc:   全量覆盖 (60+ 文件: utils, store, report, mixin, im, upload 层)
-  51cg:   全量覆盖 (45+ 文件: network, report, cache, base, util, theme 层)
-  hlw:    全量覆盖 (35+ 文件: network, report, cache, base, util, mixin 层)
-  tiktok: 全量覆盖 (50+ 文件: api, public, report, upload, model, util 层)
-  91cg:   全量覆盖 (20+ 文件: network, request, report, cache, route, startup 层)
-  yms:    全量覆盖 (55+ 文件: net, config, store, task, util 层)
-  acfun:  全量覆盖 (45+ 文件: api, service, route, config, util 层)
-  tx:     module_entry.dart, request.dart, http_request.dart, app_api.dart, splash_logic.dart
-  douyin: router.dart, app_init.dart, http_api.dart, app_api.dart, device_util.dart
-  mrds:   全量覆盖 (45+ 文件: network, report, cache, base, util, match/ai 层)
-  oio:    全量覆盖 (55+ 文件: net, config, analytics, store, task, util 层)
-  bili:   全量覆盖 (60+ 文件: net, config, track, store, task, router 层)
-  91porn: 全量覆盖 (45+ 文件: api, net, splash, track, cache, router, util 层)
-  91porn2: 全量覆盖 (45+ 文件: http, public, report, player, payment 层)
-  txpjb:  全量覆盖 (50+ 文件: route, net, analytics, splash, main, media/ai/pay 层)
-  xjpjb:  全量覆盖 (60+ 文件: route, net, analytics, splash, main, media/ai/pay 层)
-  hlbdy:  全量覆盖 (55+ 文件: network, report, cache, base, route, ai/community/video 层)
-  nnrj:   全量覆盖 (70+ 文件: http, api, track, im, video, ai/pay/download 层)
+  lgt:    服务层 + API 全量 + 路由（偏 IM/社区）
 
 示例:
   $0 --string                     # 字符串混淆
-  $0 -p ph --string               # ph 项目字符串混淆
-  $0 -p ph --callstack            # ph 项目调用栈混淆
-  $0 -p ph --callstack --depth 4  # 调用栈深度 4
-  $0 -p ph --bloat                # 文件膨胀（4.3a）
-  $0 -p ph --noise --mutation     # 业务噪音 + AST变异
+  $0 -p dq --string               # dq 项目字符串混淆
+  $0 -p dq --callstack            # dq 项目调用栈混淆
+  $0 -p dq --callstack --depth 4  # 调用栈深度 4
+  $0 -p dq --bloat                # 文件膨胀（4.3a）
+  $0 -p dq --noise --mutation     # 业务噪音 + AST变异
   $0 --all                        # 所有混淆
-                                    # yms 项目会额外处理 ios/Runner Swift 原生字符串/调用栈
   $0 --string -d                  # 模拟运行（不修改文件）
 EOF
 }
@@ -526,20 +500,6 @@ main() {
     args+=("$@")
     
     $DART_CMD run bin/obfuscate.dart "${args[@]}"
-
-    # yms 的 Runner Swift 属于同步进壳工程的 B 面原生代码，比 Framework/Pod 更像“代码混淆”阶段。
-    if [[ "$project_tag" == "yms" && "$has_all" == "true" ]]; then
-        local runner_swift_script="$SCRIPT_DIR/obfuscate_runner_swift.sh"
-        if [[ -f "$runner_swift_script" ]]; then
-            log_step "执行 yms Runner Swift 原生混淆..."
-            local native_args=("-p" "$project_tag")
-            [[ "$is_dry_run" == "true" ]] && native_args+=("-d")
-            [[ "$is_verbose" == "true" ]] && native_args+=("-v")
-            bash "$runner_swift_script" "${native_args[@]}"
-        else
-            log_warning "Runner Swift 混淆脚本不存在，跳过: $runner_swift_script"
-        fi
-    fi
 
     write_code_report_json "success" "0"
 

@@ -21,7 +21,7 @@ class BloatInflator {
   final Logger logger;
 
   static const _internalDir = '_internal';
-  static const _reviewIntensiveProjects = {'yms', 'oio', 'bili', 'dq'};
+  static const _reviewIntensiveProjects = {'dq'};
 
   bool get _usesReviewIntensiveBloat =>
       _reviewIntensiveProjects.contains(config.projectName);

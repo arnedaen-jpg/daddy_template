@@ -9,7 +9,7 @@
 #
 #   Status: draft
 #   注意: v2.x 与 v1.x 同为 Classes/ 结构（非 SPM）；已对 dq vibration-2.1.0 实测结构一致。
-#         其他项目（acfun/hlw/tiktok）已在 v1/v3 上跑 L3，本 profile 让 v2.x 同样可达 L3。
+#         本 profile 让 v2.x 同样可达 L3。
 # =============================================
 
 PROFILE_NAME="vibration"

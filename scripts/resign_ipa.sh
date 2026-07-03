@@ -83,6 +83,24 @@ if [ "$CURRENT_BUNDLE_ID" != "$NEW_BUNDLE_ID" ]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $NEW_BUNDLE_ID" "$APP_DIR/Info.plist"
 fi
 
+# 2.5 (可选) 成品包混淆：资源指纹差异化 / Mach-O 符号混淆
+# 通过环境变量门控，默认关闭；改写后由本脚本后续重签名。
+#   ZT_IPA_OBFUSCATE=1        启用（默认只做资源差异化）
+#   ZT_IPA_MACHO=1            额外启用 Mach-O 类名混淆（中高风险，需真机回归）
+#   ZT_IPA_SEED=<seed>        差异化 seed（缺省用目标 Bundle ID）
+if [ "${ZT_IPA_OBFUSCATE:-0}" = "1" ]; then
+    OBF_SCRIPT="$PROJECT_ROOT/scripts/obfuscate_ipa.sh"
+    if [ -f "$OBF_SCRIPT" ]; then
+        OBF_SEED="${ZT_IPA_SEED:-$NEW_BUNDLE_ID}"
+        OBF_ARGS=(--app "$APP_DIR" --seed "$OBF_SEED" --resources)
+        [ "${ZT_IPA_MACHO:-0}" = "1" ] && OBF_ARGS+=(--macho)
+        echo "成品包混淆 (seed=$OBF_SEED, macho=${ZT_IPA_MACHO:-0})..."
+        bash "$OBF_SCRIPT" "${OBF_ARGS[@]}" || echo "警告: 成品包混淆失败，继续重签名"
+    else
+        echo "警告: 未找到 $OBF_SCRIPT，跳过成品包混淆"
+    fi
+fi
+
 # 3. Clean up old signature
 echo "Removing old signature..."
 rm -rf "$APP_DIR/_CodeSignature"

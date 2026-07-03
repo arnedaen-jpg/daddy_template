@@ -319,6 +319,21 @@ if [[ "$CURRENT_BUNDLE_ID" != "$TARGET_BUNDLE_ID" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $TARGET_BUNDLE_ID" "$WORKING_APP/Info.plist"
 fi
 
+# 1.5 (可选) 成品包混淆：资源指纹差异化 / Mach-O 符号混淆（改写后本脚本重签名）
+#   ZT_IPA_OBFUSCATE=1 启用；ZT_IPA_MACHO=1 额外开 Mach-O；ZT_IPA_SEED 指定 seed
+if [[ "${ZT_IPA_OBFUSCATE:-0}" == "1" ]]; then
+    OBF_SCRIPT="$SCRIPT_DIR/obfuscate_ipa.sh"
+    if [[ -f "$OBF_SCRIPT" ]]; then
+        OBF_SEED="${ZT_IPA_SEED:-$TARGET_BUNDLE_ID}"
+        OBF_ARGS=(--app "$WORKING_APP" --seed "$OBF_SEED" --resources)
+        [[ "${ZT_IPA_MACHO:-0}" == "1" ]] && OBF_ARGS+=(--macho)
+        log_info "成品包混淆 (seed=$OBF_SEED, macho=${ZT_IPA_MACHO:-0})..."
+        bash "$OBF_SCRIPT" "${OBF_ARGS[@]}" || log_warning "成品包混淆失败，继续重签名"
+    else
+        log_warning "未找到 $OBF_SCRIPT，跳过成品包混淆"
+    fi
+fi
+
 # 2. 删除旧签名
 log_info "删除旧签名..."
 rm -rf "$WORKING_APP/_CodeSignature"

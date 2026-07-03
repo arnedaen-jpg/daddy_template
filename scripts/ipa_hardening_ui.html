@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IPA 成品包混淆（独立工具）</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, sans-serif; color: #0f172a; }
+    body { max-width: 720px; margin: 24px auto; padding: 0 16px 48px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    .muted { color: #64748b; font-size: 13px; line-height: 1.5; }
+    label { display: block; font-weight: 600; font-size: 13px; margin: 16px 0 6px; }
+    input[type="text"] {
+      width: 100%; box-sizing: border-box; padding: 8px 10px;
+      border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px;
+    }
+    input[type="text"]:focus { outline: 2px solid #3b82f6; border-color: #3b82f6; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 8px; }
+    .check { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: normal; margin: 0; }
+    .check input { width: auto; }
+    button.primary {
+      margin-top: 20px; padding: 10px 24px; font-size: 15px; font-weight: 600;
+      background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer;
+    }
+    button.primary:hover { background: #1d4ed8; }
+    button.primary:disabled { background: #94a3b8; cursor: not-allowed; }
+    #log {
+      margin-top: 20px; padding: 12px; background: #0f172a; color: #e2e8f0;
+      border-radius: 8px; font-size: 12px; line-height: 1.45; white-space: pre-wrap;
+      word-break: break-all; min-height: 80px; display: none;
+    }
+    #log.show { display: block; }
+    .err { color: #dc2626; font-size: 13px; margin-top: 8px; }
+    .ok { color: #16a34a; font-size: 13px; margin-top: 8px; font-weight: 600; }
+    .tag { display: inline-block; font-size: 11px; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; margin-left: 6px; color: #475569; }
+  </style>
+</head>
+<body>
+  <h1>IPA 成品包混淆 <span class="tag">独立工具</span></h1>
+  <p class="muted">
+    用于<strong>非 AB 包工厂</strong>打包的任意 IPA：资源指纹差异化（默认）/ 可选 Mach-O 类名混淆。
+    填写本机绝对路径后点「开始混淆」。与工厂流水线 <code>build_flutter_ipa.sh</code> 互不干扰。
+  </p>
+
+  <label for="ipaPath">IPA 路径 <span style="color:#dc2626">*</span></label>
+  <input type="text" id="ipaPath" placeholder="/Users/you/Downloads/MyApp.ipa" autocomplete="off" />
+
+  <label for="outPath">输出路径 <span class="muted" style="font-weight:normal">（留空 → 同目录 原名_hardened.ipa）</span></label>
+  <input type="text" id="outPath" placeholder="/Users/you/Downloads/MyApp_hardened.ipa" autocomplete="off" />
+
+  <label for="seed">Seed <span class="muted" style="font-weight:normal">（留空 → 从 IPA 读 Bundle ID）</span></label>
+  <input type="text" id="seed" placeholder="com.example.myapp" autocomplete="off" />
+
+  <div class="row">
+    <label class="check"><input type="checkbox" id="resources" checked /> 资源指纹差异化（推荐）</label>
+    <label class="check"><input type="checkbox" id="macho" /> Mach-O 类名混淆（中高风险，需真机回归）</label>
+  </div>
+
+  <label for="profilePath">描述文件 <span class="muted" style="font-weight:normal">（填则加固后自动重签，可安装；留空则输出未签名 IPA）</span></label>
+  <input type="text" id="profilePath" placeholder="/path/to/appstore.mobileprovision" autocomplete="off" />
+
+  <label for="bundleId">Bundle ID <span class="muted" style="font-weight:normal">（重签时可选，默认从 IPA 读取）</span></label>
+  <input type="text" id="bundleId" placeholder="com.example.myapp" autocomplete="off" />
+
+  <button type="button" class="primary" id="btnRun">开始混淆</button>
+  <p id="status"></p>
+  <pre id="log"></pre>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    $("btnRun").addEventListener("click", async () => {
+      const btn = $("btnRun");
+      const status = $("status");
+      const logEl = $("log");
+      status.textContent = "";
+      status.className = "";
+      logEl.textContent = "";
+      logEl.classList.remove("show");
+
+      const ipa = $("ipaPath").value.trim();
+      if (!ipa) {
+        status.textContent = "请填写 IPA 路径";
+        status.className = "err";
+        return;
+      }
+
+      btn.disabled = true;
+      status.textContent = "正在执行，请稍候（大 IPA 可能需数分钟）…";
+      status.className = "muted";
+
+      try {
+        const res = await fetch("/api/harden", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ipa_path: ipa,
+            out_path: $("outPath").value.trim(),
+            seed: $("seed").value.trim(),
+            resources: $("resources").checked,
+            macho: $("macho").checked,
+            profile_path: $("profilePath").value.trim(),
+            bundle_id: $("bundleId").value.trim(),
+          }),
+        });
+        const data = await res.json();
+        if (data.log) {
+          logEl.textContent = data.log;
+          logEl.classList.add("show");
+        }
+        if (data.ok) {
+          status.textContent = "完成 → " + (data.output_path || "见日志");
+          status.className = "ok";
+        } else {
+          status.textContent = data.error || "失败";
+          status.className = "err";
+        }
+      } catch (e) {
+        status.textContent = "请求失败: " + e.message;
+        status.className = "err";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

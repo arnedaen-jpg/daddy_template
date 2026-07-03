@@ -51,8 +51,8 @@ usage() {
   $0 <项目代号> <B面源码路径>
 
 示例:
-  $0 -p 91porn2 -s /Users/user/Documents/tibao_apps/yueda/91porn
-  $0 91porn2 /Users/user/Documents/tibao_apps/yueda/91porn
+  $0 -p dq -s /Users/t-yh/dqiu/xty
+  $0 dq /Users/t-yh/dqiu/xty
 
 选项:
   -p, --project NAME     项目代号
@@ -163,11 +163,6 @@ validate_inputs() {
     if [[ -z "$PROJECT_NAME" || -z "$SOURCE_PATH" ]]; then
         log_error "请指定项目代号和 B 面源码路径"
         usage
-        exit 1
-    fi
-
-    if [[ "$PROJECT_NAME" == "md" ]]; then
-        log_error "md 项目已下线，不再支持一键全量混淆"
         exit 1
     fi
 

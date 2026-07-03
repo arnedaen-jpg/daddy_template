@@ -16,5 +16,12 @@
   },
   "proxy": {
     "socks5": "socks5://host:port:username:password"
+  },
+  "ipa_hardening": {
+    "enabled": false,
+    "resources": true,
+    "macho": false,
+    "pod_mangle": false,
+    "seed": ""
   }
 }

@@ -7,7 +7,7 @@
 #         含预处理块的文件自动跳过（file_has_preprocessor_blocks 守卫），避免破坏
 #         webp/libwebp 指针运算链路。保护 registerWithRegistrar/handleMethodCall/
 #         generateThumbnail（ObjC 类方法，跨文件按类名引用，renamer 不会改类方法）。
-#         oio/bili/yms 历史上保守取 L0；此处借预处理守卫安全提至 L3（实质为类注入）。
+#         历史上保守取 L0；此处借预处理守卫安全提至 L3（实质为类注入）。
 # =============================================
 
 PROFILE_NAME="video_thumbnail"
