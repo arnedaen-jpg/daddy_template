@@ -23,9 +23,9 @@ class BusinessNoiseInjector {
 
   static const _targetMethodNames = ['build', 'initState', 'getHomePage'];
 
-  /// 注入概率 (0.6 ~ 0.85)
-  static const _minInjectionRate = 0.6;
-  static const _maxInjectionRate = 0.85;
+  /// 注入概率 (0.70 ~ 0.95)
+  static const _minInjectionRate = 0.70;
+  static const _maxInjectionRate = 0.95;
 
   Future<void> process(
     List<String> files,

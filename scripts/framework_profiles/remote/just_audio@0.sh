@@ -27,7 +27,7 @@ profile_apply() {
     src_dir=$(bt_find_src_dir "$plugin_dir" "just_audio")
     [[ -z "$src_dir" ]] && return 1
 
-    bt_inject_classes "$src_dir" "$PROFILE_NAME" 10
+    bt_inject_classes "$src_dir" "$PROFILE_NAME" 12
 
     if [[ "$level" == "L1" || "$level" == "L2" || "$level" == "L3" ]]; then
         while IFS= read -r f; do

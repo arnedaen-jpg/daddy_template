@@ -21,9 +21,14 @@ class ASTMutationObfuscator {
   final Logger logger;
   late final Random _random;
 
-  /// 注入概率 (0.3 ~ 0.6)
-  static const _minRate = 0.3;
-  static const _maxRate = 0.6;
+  /// 注入概率 (0.45 ~ 0.75，随 seed 抖动)
+  static const _minRate = 0.45;
+  static const _maxRate = 0.75;
+
+  /// 插入位置权重（随 seed 抖动，让不同包的 dummy 分布结构不同）
+  /// _posStartWeight: 落在方法体开头的概率上界；[_posStartWeight,_posMidUpper) 落中间；其余落末尾。
+  late final double _posStartWeight;
+  late final double _posMidUpper;
 
   /// 随机生成 dummy 代码，避免固定 pattern（如 identical(1,1)）被 ML 识别
   String _randomDummySnippet() {
@@ -67,6 +72,14 @@ class ASTMutationObfuscator {
         ? seedBase.hashCode
         : (DateTime.now().millisecondsSinceEpoch +
             (config.projectName?.hashCode ?? 0)));
+
+    // 独立 seed 流派生插入位置权重，避免影响 _random 主流的既有行为。
+    final posRng = Random(seedBase != null
+        ? '${seedBase}_mutpos'.hashCode
+        : (DateTime.now().millisecondsSinceEpoch ^ 0x2545f491));
+    _posStartWeight = 0.50 + posRng.nextDouble() * 0.15; // 0.50..0.65
+    _posMidUpper =
+        _posStartWeight + 0.15 + posRng.nextDouble() * 0.13; // +0.15..0.28
 
     if (config.dryRun) {
       logger.info('[DRY-RUN] 将在方法体中插入 dummy 代码');
@@ -300,9 +313,9 @@ class ASTMutationObfuscator {
     if (len < 30) return bodyStart;
 
     final r = _random.nextDouble();
-    if (r < 0.6) return bodyStart;
+    if (r < _posStartWeight) return bodyStart;
 
-    if (r < 0.8) {
+    if (r < _posMidUpper) {
       // 中间：插入到第一个「顶层语句」之后，由 AST 提供，避免误入 for/if-else 内部
       if (firstStatementEnd > bodyStart && firstStatementEnd < bodyEnd - 2) {
         var pos = firstStatementEnd;

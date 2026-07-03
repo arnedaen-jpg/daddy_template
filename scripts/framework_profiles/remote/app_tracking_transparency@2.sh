@@ -7,6 +7,10 @@
 #   说明: 与 flutter_statusbarcolor_ns@0 同构（Swift+ObjC 桥）。仅重命名 Swift
 #         文件内 private 方法（文件内一致替换，安全），注入唯一类与死分支；
 #         保护注册符号 register/registerWithRegistrar/handle，channel 名为字符串字面量不受影响。
+#   ⚠️ 关键：bt_rename_swift_privates 按全文件词边界替换，若 private 方法名与
+#         Apple 系统 selector 同名（requestTrackingAuthorization / addObserver /
+#         removeObserver 等），系统调用会被一并误改导致编译失败。故这些 selector
+#         名必须列入 PROFILE_PROTECTED，使其跳过重命名。
 # =============================================
 
 PROFILE_NAME="app_tracking_transparency"
@@ -20,6 +24,11 @@ PROFILE_PROTECTED=(
     "register"
     "handle"
     "detachFromEngine"
+    # --- Apple 系统 selector：与插件 private 方法同名，禁止重命名 ---
+    "requestTrackingAuthorization"
+    "addObserver"
+    "removeObserver"
+    "trackingAuthorizationStatus"
 )
 
 profile_apply() {

@@ -2033,8 +2033,8 @@ class CallstackObfuscator {
 
   /// 随机选择部分方法进行混淆
   List<_MethodInfo> _selectMethodsToWrap(List<_MethodInfo> methods) {
-    // 混淆 70%-95% 的方法
-    final ratio = 0.7 + _random.nextDouble() * 0.25;
+    // 混淆 80%-100% 的方法（随 seed 抖动）
+    final ratio = 0.8 + _random.nextDouble() * 0.2;
     final count = (methods.length * ratio).ceil().clamp(1, methods.length);
 
     final shuffled = List<_MethodInfo>.from(methods)..shuffle(_random);

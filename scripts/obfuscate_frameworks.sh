@@ -44,6 +44,9 @@ REVIEW_NATIVE_MAX_INFO_ENTRIES=26
 REVIEW_NATIVE_MAX_DEAD_BRANCHES_PER_METHOD=10
 REVIEW_MUTATION_DETAIL_INJECT_LIMIT=8
 REVIEW_MUTATION_DETAIL_MODIFIED_LIMIT=12
+# review-intensive 项目会用 SEED 把上面的 native 力度旋钮随机到区间内（见
+# randomize_review_native_knobs），此标志确保每次运行只随机一次。
+_REVIEW_KNOBS_RANDOMIZED=false
 MANIFEST_FILE=""
 MANIFEST_FILE_EXPLICIT=false
 MANIFEST_LOADED=false
@@ -3867,6 +3870,37 @@ derive_seed() {
     log_info "建议将 seed 记录到 ab_config.yaml 或通过 --seed 参数传入"
 }
 
+# 从 SEED 派生一个 [min,max] 内的确定性整数：同 seed 可复现，不同 seed 不同。
+# 用于把混淆力度旋钮随 seed 抖动，避免所有包恰好同一倍率/上限。
+seed_rand_range() {
+    local salt="$1" min="$2" max="$3"
+    local span=$(( max - min + 1 ))
+    [[ "$span" -le 0 ]] && { echo "$min"; return; }
+    local hex dec
+    hex=$(hash_derive "${SEED}_${salt}")
+    dec=$(( 0x${hex:0:8} ))
+    echo $(( min + (dec % span) ))
+}
+
+# review-intensive 项目：用 SEED 把 native 力度旋钮随机到区间内，
+# 让不同包（不同 bundleId/version）的注入规模、死分支强度、junk 上限不同，
+# 降低 4.3(a) 结构相似度。仅随机一次，且尊重 SEED 稳定性（同包同版本可复现）。
+randomize_review_native_knobs() {
+    project_uses_review_intensive_obfuscation "$CURRENT_PROJECT" || return 0
+    [[ "$_REVIEW_KNOBS_RANDOMIZED" == "true" ]] && return 0
+    [[ -z "$SEED" ]] && return 0
+
+    REVIEW_NATIVE_CLASS_MULTIPLIER=$(seed_rand_range clsmul 4 7)
+    REVIEW_NATIVE_DEAD_BRANCH_MULTIPLIER=$(seed_rand_range dbmul 4 7)
+    REVIEW_NATIVE_MAX_CLASSES_PER_SOURCE=$(seed_rand_range clscap 100 140)
+    REVIEW_NATIVE_MAX_EXTRA_METHODS=$(seed_rand_range extmeth 14 22)
+    REVIEW_NATIVE_MAX_OPS=$(seed_rand_range ops 24 36)
+    REVIEW_NATIVE_MAX_INFO_ENTRIES=$(seed_rand_range info 22 34)
+    _REVIEW_KNOBS_RANDOMIZED=true
+
+    log_info "Native 力度(seed 派生): class×${REVIEW_NATIVE_CLASS_MULTIPLIER}, deadbranch×${REVIEW_NATIVE_DEAD_BRANCH_MULTIPLIER}, class_cap=${REVIEW_NATIVE_MAX_CLASSES_PER_SOURCE}, extra_methods=${REVIEW_NATIVE_MAX_EXTRA_METHODS}, ops=${REVIEW_NATIVE_MAX_OPS}, info=${REVIEW_NATIVE_MAX_INFO_ENTRIES}"
+}
+
 # 构建重命名映射缓存：同时支持当前 mapping 文件与最近一次报告兜底。
 build_rename_maps() {
     if [[ -n "$_FORWARD_MAP_FILE" && -f "$_FORWARD_MAP_FILE" && -n "$_REVERSE_MAP_FILE" && -f "$_REVERSE_MAP_FILE" ]]; then
@@ -5006,6 +5040,8 @@ run_mutate() {
     log_info "Seed: $SEED"
     log_info "Seed Hash: ${seed_hash:0:16}..."
 
+    randomize_review_native_knobs
+
     load_base_transforms
     load_manifest
     _build_class_words_pool
@@ -5328,6 +5364,57 @@ mutate_pod() {
     _REPORT_POD_MUTATED=$((_REPORT_POD_MUTATED + 1))
 }
 
+# 二进制/闭源 Pod 的 bundle 层差异化（4.3(a)）。
+# 这些 Pod（融云/友盟/IJK 等）逐字节相同，是两包相似度的固定来源，但机器码不可改。
+# 策略（低风险）：不碰被签名的 .framework/.xcframework 二进制及其 Info.plist，
+# 仅向 Pod 附带的 .bundle 资源包内写入一个 seed 派生的惰性资源文件——
+# .bundle 会被 CocoaPods 资源阶段拷入 .app，从而改变最终 IPA 指纹；
+# iOS 不对资源 .bundle 单独签名，SDK 通常也不校验其资源包，故运行不受影响。
+# 不同 SEED 内容不同 → 降低相似度；同 SEED 可复现（利于稳定构建）。
+differentiate_binary_pod() {
+    local pod_name="$1"
+    local pod_dir="$PODS_DIR/$pod_name"
+    [[ -d "$pod_dir" ]] || return 0
+    [[ -z "$SEED" ]] && return 0
+
+    local bundles=()
+    local b
+    while IFS= read -r b; do
+        [[ -z "$b" ]] && continue
+        # 跳过嵌套在被签名 framework 内的 bundle，避免破坏其目录树/签名
+        case "$b" in
+            *.framework/*|*.xcframework/*) continue ;;
+        esac
+        bundles+=("$b")
+    done < <(find "$pod_dir" -type d -name "*.bundle" 2>/dev/null)
+
+    if [[ ${#bundles[@]} -eq 0 ]]; then
+        [[ "$VERBOSE" == "true" ]] && log_info "  $pod_name: 未找到可安全差异化的 .bundle 资源包，跳过" || true
+        _REPORT_POD_ENTRIES+=("$pod_name [bundle-diff]: 无 .bundle 资源，跳过")
+        return 0
+    fi
+
+    local touched=0
+    for b in "${bundles[@]}"; do
+        local salt content fname
+        salt="poddiff_${pod_name}_$(basename "$b")"
+        content=$(hash_derive "${SEED}_${salt}")
+        fname=".zt_${content:0:12}.dat"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "  [DRY-RUN] $pod_name: 将写入惰性资源 $b/$fname"
+            touched=$((touched + 1))
+        elif printf '%s%s%s\n' "$content" "$content" "$content" > "$b/$fname" 2>/dev/null; then
+            touched=$((touched + 1))
+        fi
+    done
+
+    if [[ $touched -gt 0 ]]; then
+        log_success "  $pod_name [bundle-diff]: 注入惰性资源到 $touched 个 .bundle"
+        _REPORT_POD_ENTRIES+=("$pod_name [bundle-diff]: +$touched .bundle 资源")
+    fi
+    return 0
+}
+
 # 执行第三方 Pod 变异阶段
 # 从清单文件中读取 pod: 类型条目，对每个有源码的 Pod 进行原地变异
 run_mutate_pods() {
@@ -5344,6 +5431,7 @@ run_mutate_pods() {
 
     # 确保基础设施已加载
     [[ -z "$SEED" ]] && derive_seed
+    randomize_review_native_knobs
     load_base_transforms
     load_manifest
 
@@ -5381,6 +5469,10 @@ run_mutate_pods() {
 
         pod_count=$((pod_count + 1))
         mutate_pod "$name"
+        # 二进制/闭源（disabled）Pod 机器码不可改，走 bundle 层差异化弥补其对 4.3a 的固定相似度贡献
+        local _plvl
+        _plvl=$(get_plugin_level "$name")
+        [[ "$_plvl" == "disabled" ]] && differentiate_binary_pod "$name"
     done < <(manifest_config_lines)
 
     _REPORT_POD_TOTAL=$pod_count

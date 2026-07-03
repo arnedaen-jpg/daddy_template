@@ -26,12 +26,45 @@ class BloatInflator {
   bool get _usesReviewIntensiveBloat =>
       _reviewIntensiveProjects.contains(config.projectName);
 
-  int get _fileCount => _usesReviewIntensiveBloat ? 500 : 50;
-  int get _classesPerFile => 25;
-  int get _methodsPerClass => 10;
-  int get _runtimeTouchCount => _usesReviewIntensiveBloat ? 50 : _fileCount;
+  // 结构维度：review-intensive 项目下由 seed 派生区间随机，让不同包（不同 bundleId/version）
+  // 的膨胀骨架规模不同，降低 4.3(a) 结构相似度；非 review 项目保持固定小规模。
+  // 由 _deriveDimensions(seed) 在 process() 内、seed 确定后初始化。
+  late final int _fileCount;
+  late final int _classesPerFile;
+  late final int _methodsPerClass;
+  late final int _runtimeTouchCount;
+
+  // 方法体模板的 seed 派生排列：同一个 variant 值在不同包里映射到不同模板，
+  // 使两包的模板分布/顺序不同（而非都覆盖同样 12 种同样顺序）。
+  late final List<int> _templatePermutation;
+
+  // Runner 骨架的 seed 派生变体索引，避免 PreloadRunner 逐字节一致。
+  late final int _mainVariant;
+
   bool get _retainAllMethods => _usesReviewIntensiveBloat;
   bool get _enableCrossRefs => !_usesReviewIntensiveBloat;
+
+  /// 从稳定 seed 派生结构维度与模板排列（同包同版本可复现）。
+  void _deriveDimensions(String seed) {
+    // 模板排列与主骨架变体：所有项目都随 seed 变化。
+    final permRng = Random('${seed}_tpl'.hashCode);
+    _templatePermutation = List<int>.generate(12, (i) => i)..shuffle(permRng);
+    _mainVariant = Random('${seed}_main'.hashCode).nextInt(3);
+
+    if (!_usesReviewIntensiveBloat) {
+      _fileCount = 50;
+      _classesPerFile = 25;
+      _methodsPerClass = 10;
+      _runtimeTouchCount = _fileCount;
+      return;
+    }
+
+    final dimRng = Random('${seed}_dims'.hashCode);
+    _fileCount = 420 + dimRng.nextInt(221); // 420..640
+    _classesPerFile = 18 + dimRng.nextInt(15); // 18..32
+    _methodsPerClass = 7 + dimRng.nextInt(8); // 7..14
+    _runtimeTouchCount = 40 + dimRng.nextInt(41); // 40..80
+  }
 
   /// 获取膨胀入口文件（优先 module_entry，排除 _internal 子目录）
   String _getBloatEntryFile(List<String> files) {
@@ -68,8 +101,11 @@ class BloatInflator {
         ? '${project}_${config.seedBase}'
         : '${project}_${DateTime.now().millisecondsSinceEpoch}';
 
+    _deriveDimensions(seed);
+
     if (config.dryRun) {
-      logger.info('[DRY-RUN] 将生成膨胀代码 (seed: $seed)');
+      logger.info(
+          '[DRY-RUN] 将生成膨胀代码 (seed: $seed, 规模: $_fileCount×$_classesPerFile×$_methodsPerClass)');
       return;
     }
 
@@ -417,7 +453,8 @@ class BloatInflator {
 
   /// 多样化的方法体模板（每类 ~6-12 行，看起来像真实业务逻辑）
   void _writeMethodBody(StringBuffer buf, String seed, int variant) {
-    final v = variant % 12;
+    // 经 seed 派生排列映射，使同一 variant 在不同包里落到不同模板。
+    final v = _templatePermutation[variant % 12];
     switch (v) {
       case 0:
         buf.writeln('    var a = x; var b = y;');
@@ -749,16 +786,28 @@ class BloatInflator {
     buffer.writeln('    _run = true;');
     buffer.writeln('    var preloadScore = 0.0;');
     if (runtimeTouchCount < fileCount) {
-      buffer.writeln('    final total = _runners.length;');
+      // seed 派生的等价变体：变量名与起点表达式不同，避免 PreloadRunner 逐字节一致。
+      const nameSets = [
+        ['total', 'touchCount', 'step', 'index', 'touched'],
+        ['count', 'picks', 'stride', 'cursor', 'done'],
+        ['len', 'hits', 'gap', 'pos', 'iter'],
+      ];
+      const startExprs = [
+        'DateTime.now().millisecondsSinceEpoch.abs()',
+        'DateTime.now().microsecondsSinceEpoch.abs()',
+        '(DateTime.now().millisecondsSinceEpoch.abs() ^ 0x5bd1e995)',
+      ];
+      final n = nameSets[_mainVariant % nameSets.length];
+      final startExpr = startExprs[_mainVariant % startExprs.length];
+      buffer.writeln('    final ${n[0]} = _runners.length;');
       buffer.writeln(
-          '    final touchCount = total < $runtimeTouchCount ? total : $runtimeTouchCount;');
-      buffer.writeln('    final step = (total / touchCount).ceil();');
+          '    final ${n[1]} = ${n[0]} < $runtimeTouchCount ? ${n[0]} : $runtimeTouchCount;');
+      buffer.writeln('    final ${n[2]} = (${n[0]} / ${n[1]}).ceil();');
+      buffer.writeln('    var ${n[3]} = $startExpr % ${n[2]};');
       buffer.writeln(
-          '    var index = DateTime.now().millisecondsSinceEpoch.abs() % step;');
-      buffer.writeln(
-          '    for (var touched = 0; touched < touchCount && index < total; touched++) {');
-      buffer.writeln('      preloadScore += _runners[index]();');
-      buffer.writeln('      index += step;');
+          '    for (var ${n[4]} = 0; ${n[4]} < ${n[1]} && ${n[3]} < ${n[0]}; ${n[4]}++) {');
+      buffer.writeln('      preloadScore += _runners[${n[3]}]();');
+      buffer.writeln('      ${n[3]} += ${n[2]};');
       buffer.writeln('    }');
     } else {
       for (var f = 0; f < fileCount; f++) {

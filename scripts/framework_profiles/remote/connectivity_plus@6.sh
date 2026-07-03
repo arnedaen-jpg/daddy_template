@@ -34,8 +34,8 @@ profile_apply() {
     src_dir=$(bt_find_src_dir "$plugin_dir" "connectivity_plus")
     [[ -z "$src_dir" ]] && return 1
 
-    # L0: 注入唯一类
-    bt_inject_classes "$src_dir" "$PROFILE_NAME" 6
+    # L0: 注入唯一类（基数经 native_class_count 随 seed 放大并封顶）
+    bt_inject_classes "$src_dir" "$PROFILE_NAME" 8
 
     # L1: 重命名 private 符号
     if [[ "$level" == "L1" || "$level" == "L2" || "$level" == "L3" ]]; then
