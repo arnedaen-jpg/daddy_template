@@ -17,6 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck source=ipa_hardening_lib.sh
 source "$SCRIPT_DIR/ipa_hardening_lib.sh" 2>/dev/null || true
+# ipa_hardening_lib.sh 顶层 set -euo pipefail 会泄漏进本脚本；但本脚本按 set -e 语义编写
+# （大量可选空数组展开 "${arr[@]}"、管道提前 exit），nounset/pipefail 会造成误报中断。
+# 恢复为原始意图：保留 errexit，关闭 nounset 与 pipefail。
+set +u +o pipefail
 PLUGINS_DIR="$PROJECT_ROOT/plugins"
 FLUTTER_BASE_DIR="$PROJECT_ROOT/flutter_base"
 PODS_DIR="$PROJECT_ROOT/ios/Pods"
