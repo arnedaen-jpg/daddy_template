@@ -32,6 +32,7 @@ from AppKit import (
     NSPopUpButton, NSBox, NSOperationQueue, NSScreen,
     NSMenu, NSMenuItem,
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
+    NSAnimationContext,
 )
 from Foundation import NSObject, NSMakeRect, NSMakeSize, NSURL, NSAttributedString, NSDictionary, NSUserDefaults
 
@@ -110,6 +111,7 @@ def generate_random_bundle_id():
 _state = {
     "is_running": False,
     "flutter_proc": None,
+    "fp_proc": None,
     "devices": [],
     "last_flutter_log": [],  # 最近一次 flutter run / pub get 的日志行，供「修Bug」交给 Cursor
     "crawl_stop": False,
@@ -117,11 +119,23 @@ _state = {
     "multi_pending_rel": [],  # 相对路径列表，如 ab_factory_pending/001.png
     "multi_cap_lock": False,  # 单张截图写入中，防连点
     "socks_proxy_urls": [],   # 与 cfg_proxy_popup 选项一一对应（不含首项占位）
+    "fp_proxy_urls": [],      # 指纹浏览器区 proxifly 下拉
+    "socks_proxy_entries": [],  # [(基础标签, url), ...]
+    "socks_proxy_checks": {},   # url -> (状态, 详情[, 耗时ms])
+    "socks_proxy_checking": False,
+    "fp_profile_names": [],     # 与 fp_profile_popup 选项对应（不含占位）
+    "fp_profile_proxies": {},   # name -> proxy url
+    "fp_profile_ip_cache": {},  # proxy url -> 出口 IP（curl 快查）
+    "advanced_open": False,
 }
 PROXIFLY_US_PROXY_URL = (
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.json"
 )
 PROXIFLY_US_PROXY_MAX = 100  # 下拉最多展示条数（按 score 降序）
+PROXY_CHECK_TIMEOUT = 10
+PROXY_CHECK_MAX_WORKERS = 3
+PROXY_CHECK_HTTP_URL = "http://api.ipify.org?format=json"
+PROXY_BROWSER_PROBE_TIMEOUT = 45
 MAX_FLUTTER_LOG_LINES = 4000
 MAX_MULTI_PENDING_SHOTS = 40
 
@@ -133,7 +147,10 @@ _log_buffer_lock = threading.Lock()
 _log_flush_scheduled = False
 LOG_FLUSH_DEBOUNCE_S = 0.05      # 50ms 攒一波再上主线程
 LOG_FLUSH_FLOOD_LINES = 256      # 攒到这行数就立刻 flush, 不再等 debounce
-APP_VERSION = "6.8"  # 与 Contents/Info.plist、窗口标题/启动日志一致
+APP_VERSION = "6.10"  # 与 Contents/Info.plist、窗口标题/启动日志一致
+ADVANCED_PANEL_W = 380
+ADVANCED_TAB_W = 36
+ADVANCED_HEADER_H = 40
 ASC_MONITOR_BASE = "https://asc-monitor.arnedaen.workers.dev"
 APP_PY_PATH = os.path.abspath(__file__)
 
@@ -749,36 +766,116 @@ _BRAND_TEXT_ASSET_EXT = {
     ".yaml", ".yml", ".js", ".css", ".csv", ".strings",
 }
 _FROMCHARCODES_RE = re.compile(r"String\.fromCharCodes\(\s*\[([0-9,\s]+)\]\s*\)")
+_PROTOCOL_HTML_FILES = ("user-agreement.html", "privacy-policy.html")
+_REMOTE_PROTOCOL_URL_RE = re.compile(
+    r"https?://[^\s\"']*?(?:user-agreement|privacy-policy)\.html",
+    re.IGNORECASE,
+)
+_WEBVIEW_HTML_PATH_FILES = (
+    "lib/modules/secondary/component/webview_page.dart",
+    "lib/modules/secondary/component/webview2_page.dart",
+    "lib/component/webview_page.dart",
+    "lib/component/webview2_page.dart",
+)
+
+
+def _decode_charcodes_list(nums_raw):
+    try:
+        return "".join(chr(int(n)) for n in nums_raw)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _encode_charcodes_string(s):
+    return f"String.fromCharCodes([{', '.join(str(ord(c)) for c in s)}])"
+
+
+def _localize_protocol_url(s):
+    """远程用户/隐私协议 URL → 本地 html 文件名（WebView 走 assets 加载）。"""
+    if not s or not str(s).lower().startswith("http"):
+        return None
+    low = str(s).lower()
+    for name in _PROTOCOL_HTML_FILES:
+        if low.endswith(name) or f"/{name}" in low:
+            return name
+    return None
 
 
 def _replace_brand_in_dart(content, src, dst):
     """
-    在单个 .dart 文本中把品牌串 src 替换为 dst。两步：
-    1) String.fromCharCodes([...]) 数组：解码 -> 若含 src 则替换 -> 重编码
-       （仅改数组本体；解码后不含 src 的数组，如「星期」原样保留）。
-    2) 整段做明文替换 src->dst，覆盖普通字面量与注释 /* ... */ 提示。
-    返回 (new_content, cc_blocks_changed, plain_replacements)。
+    在单个 .dart 文本中把品牌串 src 替换为 dst：
+    1) String.fromCharCodes：解码后替换品牌串，和/或远程协议 URL 改本地文件名
+    2) 明文 https://...user-agreement|privacy-policy.html → 本地文件名
+    3) 整段明文 src->dst
+    返回 (new_content, cc_blocks_changed, plain_replacements, protocol_urls)。
     """
     cc_changed = 0
+    url_localized = 0
 
     def _cc_sub(m):
-        nonlocal cc_changed
+        nonlocal cc_changed, url_localized
         nums_raw = [x for x in re.split(r"[,\s]+", m.group(1).strip()) if x]
-        try:
-            s = "".join(chr(int(n)) for n in nums_raw)
-        except (ValueError, OverflowError):
+        s = _decode_charcodes_list(nums_raw)
+        if s is None:
             return m.group(0)
-        if src not in s:
+        s2 = s
+        changed = False
+        local = _localize_protocol_url(s)
+        if local:
+            s2 = local
+            changed = True
+            url_localized += 1
+        if src in s2:
+            s2 = s2.replace(src, dst)
+            changed = True
+        if not changed:
             return m.group(0)
-        s2 = s.replace(src, dst)
-        new_nums = ", ".join(str(ord(c)) for c in s2)
         cc_changed += 1
-        return f"String.fromCharCodes([{new_nums}])"
+        return _encode_charcodes_string(s2)
 
     content2 = _FROMCHARCODES_RE.sub(_cc_sub, content)
-    plain_n = content2.count(src)
-    content3 = content2.replace(src, dst) if plain_n else content2
-    return content3, cc_changed, plain_n
+
+    def _plain_url_sub(m):
+        nonlocal url_localized
+        local = _localize_protocol_url(m.group(0))
+        if not local:
+            return m.group(0)
+        url_localized += 1
+        return local
+
+    content3 = _REMOTE_PROTOCOL_URL_RE.sub(_plain_url_sub, content2)
+    plain_n = content3.count(src)
+    content4 = content3.replace(src, dst) if plain_n else content3
+    return content4, cc_changed, plain_n, url_localized
+
+
+def _fix_webview_html_asset_paths(project_root, dry_run=False):
+    """
+    AB 壳 pubspec 注册 assets/secondary/other，B 面 WebView 仍 load assets/other → 对齐。
+    返回修改的文件数。
+    """
+    sec_other = os.path.join(project_root, "assets", "secondary", "other")
+    if not os.path.isdir(sec_other):
+        return 0
+    changed = 0
+    for rel in _WEBVIEW_HTML_PATH_FILES:
+        fp = os.path.join(project_root, rel)
+        if not os.path.isfile(fp):
+            continue
+        try:
+            with open(fp, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        new_content = content.replace(
+            "assets/other/", "assets/secondary/other/")
+        if new_content == content:
+            continue
+        changed += 1
+        if not dry_run:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(new_content)
+    return changed
 
 
 def _bside_roots(project_root):
@@ -804,12 +901,226 @@ def _bside_roots(project_root):
     return roots
 
 
+def _plist_string_after_key(plist_xml, key):
+    """从 security cms -D 输出的 XML 中取 <key>…</key> 后第一个 <string>。"""
+    m = re.search(
+        rf"<key>\s*{re.escape(key)}\s*</key>\s*<string>([^<]*)</string>",
+        plist_xml or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    return (m.group(1).strip() if m else "") or ""
+
+
+def _mobileprovision_meta(profile_path):
+    """
+    解析 .mobileprovision：返回 (name, uuid, err)。
+    name 用作 PROVISIONING_PROFILE_SPECIFIER；uuid 用于安装到系统 Profiles 目录。
+    """
+    if not profile_path or not os.path.isfile(profile_path):
+        return "", "", f"描述文件不存在: {profile_path or '(空)'}"
+    try:
+        r = subprocess.run(
+            ["security", "cms", "-D", "-i", profile_path],
+            capture_output=True, text=True, timeout=30, env=get_env(),
+        )
+    except Exception as e:
+        return "", "", f"解析描述文件失败: {e}"
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+        return "", "", f"无效的 mobileprovision: {err[:200]}"
+    xml = r.stdout or ""
+    name = _plist_string_after_key(xml, "Name")
+    uuid = _plist_string_after_key(xml, "UUID")
+    if not name:
+        name = os.path.splitext(os.path.basename(profile_path))[0]
+    if not uuid:
+        return name, "", "描述文件缺少 UUID"
+    return name, uuid, None
+
+
+def _install_mobileprovision(profile_path, uuid):
+    """安装到 ~/Library/MobileDevice/Provisioning Profiles/<UUID>.mobileprovision。"""
+    dest_dir = os.path.expanduser(
+        "~/Library/MobileDevice/Provisioning Profiles")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, f"{uuid}.mobileprovision")
+    shutil.copy2(profile_path, dest)
+    return dest
+
+
+def _set_pbx_setting(content, key, value, quoted=False):
+    """
+    设置 project.pbxproj 中的 build setting。
+    同时覆盖普通键与带 [sdk=…] 后缀的键（Xcode Manual 签名常用后者）。
+    """
+    val = f'"{value}"' if quoted else value
+    # "KEY[sdk=iphoneos*]" = "…";
+    content = re.sub(
+        rf'("{re.escape(key)}\[[^\]]+\]"\s*=\s*)[^;]*;',
+        rf'\1{val};',
+        content,
+    )
+    # KEY = …;
+    content = re.sub(
+        rf'(?<!")(\b{re.escape(key)}\s*=\s*)[^;]*;',
+        rf'\1{val};',
+        content,
+    )
+    return content
+
+
+def _apply_ios_signing_to_pbxproj(
+        pbxproj_path, bundle_id, team_id, profile_specifier,
+        signing_style="manual", code_sign_identity="Apple Distribution"):
+    """
+    把 Bundle ID / Team / 描述文件名写入 Runner.xcodeproj/project.pbxproj。
+    返回 (ok, message)。
+    """
+    if not pbxproj_path or not os.path.isfile(pbxproj_path):
+        return False, f"project.pbxproj 不存在: {pbxproj_path}"
+    try:
+        with open(pbxproj_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return False, str(e)
+
+    style = "Manual" if str(signing_style).lower() == "manual" else "Automatic"
+
+    if bundle_id:
+        # 主 Target：不含 .RunnerTests
+        content = re.sub(
+            r"(PRODUCT_BUNDLE_IDENTIFIER\s*=\s*)(?![^;]*\.RunnerTests)[^;]*;",
+            rf"\1{bundle_id};",
+            content,
+        )
+        content = re.sub(
+            r"(PRODUCT_BUNDLE_IDENTIFIER\s*=\s*)[^;]*\.RunnerTests\s*;",
+            rf"\1{bundle_id}.RunnerTests;",
+            content,
+        )
+    if team_id:
+        content = _set_pbx_setting(content, "DEVELOPMENT_TEAM", team_id)
+    content = _set_pbx_setting(content, "CODE_SIGN_STYLE", style)
+    if code_sign_identity:
+        content = _set_pbx_setting(
+            content, "CODE_SIGN_IDENTITY", code_sign_identity, quoted=True)
+        # 常见键："CODE_SIGN_IDENTITY[sdk=iphoneos*]"
+        content = re.sub(
+            r'("CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]"\s*=\s*)"[^"]*"\s*;',
+            rf'\1"{code_sign_identity}";',
+            content,
+        )
+    if profile_specifier and style == "Manual":
+        content = _set_pbx_setting(
+            content, "PROVISIONING_PROFILE_SPECIFIER",
+            profile_specifier, quoted=True)
+        # 若仅有空的普通键、没有 sdk 后缀键，补一行 sdk 键（在普通键后）
+        if f'"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]"' not in content:
+            content = re.sub(
+                r'(PROVISIONING_PROFILE_SPECIFIER\s*=\s*"[^"]*"\s*;)',
+                rf'\1\n\t\t\t\t"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "{profile_specifier}";',
+                content,
+                count=3,
+            )
+
+    try:
+        with open(pbxproj_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return False, str(e)
+    return True, "ok"
+
+
+def _apply_build_config_signing(project_root, workdir, cfg=None):
+    """
+    从工作目录 build_config.json（或传入 cfg）读取 bundle_id / profile / team_id，
+    写入 Flutter 工程 ios/Runner.xcodeproj，并安装 .mobileprovision。
+    返回 (ok, log_lines)。
+    """
+    logs = []
+    if cfg is None:
+        config_path = os.path.join(workdir, "build_config.json")
+        if not os.path.isfile(config_path):
+            return False, [f"未找到 build_config.json: {config_path}"]
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            return False, [f"读取 build_config.json 失败: {e}"]
+
+    bundle_id = str(cfg.get("bundle_id") or "").strip()
+    team_id = str(cfg.get("team_id") or "").strip()
+    profile_rel = str(cfg.get("profile") or "appstore.mobileprovision").strip()
+    profile_spec_override = str(cfg.get("profile_specifier") or "").strip()
+    signing_style = str(cfg.get("signing_style") or "manual").strip() or "manual"
+    code_sign_identity = (
+        str(cfg.get("code_sign_identity") or "Apple Distribution").strip()
+        or "Apple Distribution"
+    )
+
+    if not bundle_id:
+        return False, ["build_config.json 缺少 bundle_id"]
+    if not team_id:
+        return False, ["build_config.json 缺少 team_id"]
+
+    profile_path = profile_rel
+    if profile_path and not os.path.isabs(profile_path):
+        profile_path = os.path.join(workdir, profile_path)
+
+    profile_name = profile_spec_override
+    if not profile_name:
+        name, uuid, err = _mobileprovision_meta(profile_path)
+        if err and not name:
+            return False, [err]
+        if err:
+            logs.append(f"⚠ {err}")
+        profile_name = name
+        if uuid:
+            try:
+                dest = _install_mobileprovision(profile_path, uuid)
+                logs.append(f"已安装描述文件 → {dest}")
+                logs.append(f"  Profile Name: {profile_name}")
+                logs.append(f"  Profile UUID: {uuid}")
+            except Exception as e:
+                logs.append(f"⚠ 安装描述文件失败（仍会写入 Xcode 配置）: {e}")
+    else:
+        logs.append(f"使用配置中的 profile_specifier: {profile_name}")
+        # 仍尝试安装文件，便于 Xcode / xcodebuild 找到
+        if os.path.isfile(profile_path):
+            _n, uuid, err = _mobileprovision_meta(profile_path)
+            if uuid and not err:
+                try:
+                    dest = _install_mobileprovision(profile_path, uuid)
+                    logs.append(f"已安装描述文件 → {dest}")
+                except Exception as e:
+                    logs.append(f"⚠ 安装描述文件失败: {e}")
+
+    pbx = os.path.join(
+        project_root, "ios", "Runner.xcodeproj", "project.pbxproj")
+    ok, msg = _apply_ios_signing_to_pbxproj(
+        pbx, bundle_id, team_id, profile_name,
+        signing_style=signing_style,
+        code_sign_identity=code_sign_identity,
+    )
+    if not ok:
+        return False, logs + [msg]
+
+    logs.append(f"已写入 Xcode 签名配置: {os.path.relpath(pbx, project_root)}")
+    logs.append(f"  Bundle ID: {bundle_id}")
+    logs.append(f"  Team ID: {team_id}")
+    logs.append(f"  Profile Specifier: {profile_name or '(空)'}")
+    logs.append(f"  Signing Style: {signing_style}")
+    return True, logs
+
+
 def _replace_brand_in_bside(project_root, src, dst, dry_run=False):
     """
-    遍历 B 面，把 src 替换为 dst。.dart 走 charcode+明文两步，文本资产仅明文。
-    返回 dict: files_changed, cc_blocks, plain_count, scanned, details[(rel, cc, plain)]。
+    遍历 B 面，把 src 替换为 dst。.dart 走 charcode+明文+协议 URL 本地化。
+    返回 dict: files_changed, cc_blocks, plain_count, protocol_urls, webview_paths,
+    scanned, details[(rel, cc, plain, urls)]。
     """
     res = {"files_changed": 0, "cc_blocks": 0, "plain_count": 0,
+           "protocol_urls": 0, "webview_paths": 0,
            "scanned": 0, "details": []}
     src = (src or "").strip()
     if not src:
@@ -829,20 +1140,28 @@ def _replace_brand_in_bside(project_root, src, dst, dry_run=False):
                     continue
                 res["scanned"] += 1
                 if is_dart:
-                    new_content, cc, plain = _replace_brand_in_dart(content, src, dst)
+                    new_content, cc, plain, urls = _replace_brand_in_dart(
+                        content, src, dst)
                 else:
                     plain = content.count(src)
                     cc = 0
+                    urls = 0
                     new_content = content.replace(src, dst) if plain else content
                 if new_content == content:
                     continue
                 res["files_changed"] += 1
                 res["cc_blocks"] += cc
                 res["plain_count"] += plain
-                res["details"].append((os.path.relpath(fp, project_root), cc, plain))
+                res["protocol_urls"] += urls
+                res["details"].append(
+                    (os.path.relpath(fp, project_root), cc, plain, urls))
                 if not dry_run:
                     with open(fp, "w", encoding="utf-8") as f:
                         f.write(new_content)
+    wv = _fix_webview_html_asset_paths(project_root, dry_run=dry_run)
+    res["webview_paths"] = wv
+    if wv:
+        res["files_changed"] += wv
     return res
 
 
@@ -1458,8 +1777,26 @@ def make_section_box(title, x, y, w, h):
     box = NSBox.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
     box.setTitle_(title)
     box.setTitleFont_(NSFont.boldSystemFontOfSize_(13))
-    box.setContentViewMargins_(NSMakeSize(10, 8))
+    box.setContentViewMargins_(NSMakeSize(10, 4))
     return box
+
+
+SECTION_CHROME_V = 52
+SECTION_TOP_PAD = 4
+SECTION_BOTTOM_PAD = 4
+
+
+def section_inner_h(outer_h):
+    """NSBox 内容区高度（勿用 contentView.bounds，首次布局时常偏大导致底部留白）。"""
+    return max(60, int(outer_h) - SECTION_CHROME_V)
+
+
+def fit_section_box(box, x, y, w, top_y, lowest_y):
+    """按内容收紧 NSBox 外框，去掉底部空白。"""
+    fitted_inner = max(40, int(top_y - lowest_y + SECTION_BOTTOM_PAD))
+    fitted_outer = SECTION_CHROME_V + fitted_inner
+    box.setFrame_(NSMakeRect(x, y, w, fitted_outer))
+    return fitted_outer
 
 
 def list_simulators():
@@ -1938,6 +2275,7 @@ class AppDelegate(NSObject):
     cfg_proxy_field = objc.ivar()
     cfg_proxy_popup = objc.ivar()
     refresh_proxy_btn = objc.ivar()
+    verify_proxy_btn = objc.ivar()
     upload_ipa_btn = objc.ivar()
     add_asc_monitor_btn = objc.ivar()
 
@@ -1952,6 +2290,29 @@ class AppDelegate(NSObject):
     agent_fix_spinner = objc.ivar()
     sim_crawl_btn = objc.ivar()
     sim_crawl_stop_btn = objc.ivar()
+
+    fp_profile_popup = objc.ivar()
+    fp_name_field = objc.ivar()
+    fp_os_popup = objc.ivar()
+    fp_engine_popup = objc.ivar()
+    fp_locale_field = objc.ivar()
+    fp_proxy_popup = objc.ivar()
+    fp_proxy_field = objc.ivar()
+    fp_refresh_btn = objc.ivar()
+    fp_add_btn = objc.ivar()
+    fp_launch_btn = objc.ivar()
+    fp_verify_btn = objc.ivar()
+    fp_update_proxy_btn = objc.ivar()
+    fp_regen_btn = objc.ivar()
+    fp_install_btn = objc.ivar()
+    fp_status = objc.ivar()
+
+    advanced_panel = objc.ivar()
+    advanced_inner = objc.ivar()
+    advanced_btn = objc.ivar()
+    advanced_close_btn = objc.ivar()
+    advanced_bottom_btn = objc.ivar()
+    advanced_tab_btn = objc.ivar()
 
     step1_status = objc.ivar()
     step2_status = objc.ivar()
@@ -1986,6 +2347,7 @@ class AppDelegate(NSObject):
         self.window.setTitle_("AB 包工厂")
         self.window.setMinSize_((650, 600))
         self.window.center()
+        self.window.setDelegate_(self)
         content = self.window.contentView()
 
         pad = 14
@@ -2031,21 +2393,20 @@ class AppDelegate(NSObject):
         # 这里用外框高度推算内容区高度，并收窄可用宽度；开启 masksToBounds 裁剪溢出。
         # 与「运行日志」标题紧挨，减少大块空白；「打开项目」「清空」放在面板内与运行按钮同一行
         run_panel_y = toolbar_y + 6
-        run_panel_h = 404
+        run_panel_h = 188
         run_row_gap = 14
         run_line_h = 26
         run_box = make_section_box("运行项目（每步完成后可运行验证）", pad, run_panel_y, inner_w, run_panel_h)
         rcv = run_box.contentView()
         rcv.setWantsLayer_(True)
         rcv.layer().setMasksToBounds_(True)
-        # 标题栏 + NSBox 边框 + contentViewMargins 约占垂直空间；水平方向再减一档防止贴边裁切
-        _run_chrome_v = 52
-        _inner_h = max(140, run_panel_h - _run_chrome_v)
+        _inner_h = section_inner_h(run_panel_h)
         _bw_cap = max(200, inner_w - 36)
         rbw = int(min(max(50.0, float(rcv.bounds().size.width)), _bw_cap))
         _rx = 10
         _uw = rbw - 2 * _rx
-        rby = _inner_h - run_line_h - 8
+        rby = _inner_h - run_line_h - SECTION_TOP_PAD
+        _run_top = rby + run_line_h
         btn_h = 26
         _refresh_w = 52
         _choose_w = 56
@@ -2055,6 +2416,7 @@ class AppDelegate(NSObject):
         _hr_w = 58
         _rs_w = 52
         _fix_w = 108
+        _adv_w = 52
 
         rcv.addSubview_(make_label("项目:", _rx, rby, 36, run_line_h, size=11))
         self.run_project_field = make_input(
@@ -2063,143 +2425,218 @@ class AppDelegate(NSObject):
         rcv.addSubview_(make_button("选择…", _rx + _uw - _choose_w, rby, _choose_w, run_line_h, self, self.browseRunProject_))
 
         rby -= run_row_gap + run_line_h
+        _status_w = 92
+        _cache_w = 198
+        _dev_pop_w = max(120, _uw - 38 - _refresh_w - 6 - _cache_w - 6 - _status_w)
         rcv.addSubview_(make_label("设备:", _rx, rby, 36, run_line_h, size=11))
         self.device_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(_rx + 38, rby, _uw - 38 - _refresh_w - 8, run_line_h), False)
+            NSMakeRect(_rx + 38, rby, _dev_pop_w, run_line_h), False)
         self.device_popup.setFont_(NSFont.systemFontOfSize_(11))
         rcv.addSubview_(self.device_popup)
-        rcv.addSubview_(make_button("刷新", _rx + _uw - _refresh_w, rby, _refresh_w, run_line_h, self, self.refreshDevices_))
-
-        rby -= run_row_gap + run_line_h
-        rcv.addSubview_(make_label("模式:", _rx, rby, 40, run_line_h, size=11))
-        self.mode_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(_rx + 42, rby, _mode_w, run_line_h), False)
-        self.mode_popup.setFont_(NSFont.systemFontOfSize_(11))
-        self.mode_popup.addItemWithTitle_("Debug")
-        self.mode_popup.addItemWithTitle_("Release")
-        rcv.addSubview_(self.mode_popup)
-        _st_x = _rx + 42 + _mode_w + 10
-        self.step3_status = make_label("", _st_x, rby + 2, max(40, _rx + _uw - _st_x), 20, size=10)
-        rcv.addSubview_(self.step3_status)
-
-        rby -= run_row_gap + run_line_h
-        rcv.addSubview_(make_label("修复模型:", _rx, rby, 72, run_line_h, size=11))
-        _model_pop_w = min(340, max(220, _uw - 120))
-        self.agent_model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(_rx + 76, rby, _model_pop_w, run_line_h), False)
-        self.agent_model_popup.setFont_(NSFont.systemFontOfSize_(11))
-        for _lbl, _ in AGENT_MODEL_PRESETS:
-            self.agent_model_popup.addItemWithTitle_(_lbl)
-        rcv.addSubview_(self.agent_model_popup)
-        self.agent_model_custom_field = make_input(
-            _rx + 76 + _model_pop_w + 8, rby, _uw - 76 - _model_pop_w - 16, run_line_h,
-            "自定义 id（优先）；下拉未列出的模型写这里", mono=True)
-        rcv.addSubview_(self.agent_model_custom_field)
-        self._load_agent_model_from_defaults()
-
-        rby -= run_row_gap + run_line_h
-        rcv.addSubview_(make_label("自动探查:", _rx, rby, 64, run_line_h, size=11))
-        _scw, _ssw = 92, 48
-        self.sim_crawl_btn = make_button(
-            "模拟器巡检", _rx + 68, rby, _scw, btn_h, self, self.simulatorCrawlStart_, bold=True)
-        self.sim_crawl_btn.setToolTip_(
-            "启动/前置模拟器，在设备画面内网格点击并逐张截图，生成报告后可交 Cursor Agent 汇总疑似界面问题。"
-            " 需在「系统设置 › 隐私与安全性 › 辅助功能」中允许本应用，否则无法模拟点击。"
-            " 无法替代业务自动化测试，不保证遍历所有页面。")
-        rcv.addSubview_(self.sim_crawl_btn)
-        self.sim_crawl_stop_btn = make_button(
-            "停止", _rx + 68 + _scw + 8, rby, _ssw, btn_h, self, self.simulatorCrawlStop_)
-        self.sim_crawl_stop_btn.setEnabled_(False)
-        rcv.addSubview_(self.sim_crawl_stop_btn)
-        _hint_left = _rx + 68 + _scw + 8 + _ssw + 10
-        _hint_w = max(80, int(_uw - _hint_left + _rx))
-        rcv.addSubview_(make_label(
-            "网格点击→截图→可选 Agent；须辅助功能授权；请先 ▶ 运行 再巡检",
-            _hint_left, rby + 3, _hint_w, run_line_h, size=9, color=NSColor.secondaryLabelColor()))
-
-        rby -= run_row_gap + run_line_h
-        rcv.addSubview_(make_label("多图说明:", _rx, rby, 56, run_line_h, size=11))
-        self.multi_shot_note_field = make_input(
-            _rx + 58, rby, _uw - 58 - 8, run_line_h,
-            "一句话描述问题（可选）；多次点「截一张」暂存，最后点「多图提交修Bug」", mono=False)
-        self.multi_shot_note_field.setFont_(NSFont.systemFontOfSize_(11))
-        rcv.addSubview_(self.multi_shot_note_field)
-
-        rby -= run_row_gap + run_line_h
-        _capw, _clrw, _subw = 64, 52, 118
-        self.multi_shot_capture_btn = make_button(
-            "截一张", _rx, rby, _capw, btn_h, self, self.multiShotCaptureOne_, bold=True)
-        self.multi_shot_capture_btn.setToolTip_("截取当前模拟器画面，追加到待提交列表（可切换界面后再截）")
-        rcv.addSubview_(self.multi_shot_capture_btn)
-        self.multi_shot_clear_btn = make_button(
-            "清空", _rx + _capw + 6, rby, _clrw, btn_h, self, self.multiShotClearPending_)
-        self.multi_shot_clear_btn.setToolTip_("清空待提交列表并删除 ab_factory_pending 下已暂存的 PNG")
-        rcv.addSubview_(self.multi_shot_clear_btn)
-        self.multi_shot_count_label = make_label(
-            "已 0 张", _rx + _capw + 6 + _clrw + 10, rby + 2, 120, run_line_h, size=11)
-        rcv.addSubview_(self.multi_shot_count_label)
-        self.multi_shot_submit_btn = make_button(
-            "多图提交修Bug", _rx + _uw - _subw, rby, _subw, btn_h,
-            self, self.multiScreensSubmitFixBug_, bold=True)
-        self.multi_shot_submit_btn.setToolTip_(
-            "将当前暂存的多张截图与说明、日志一并交给 Cursor Agent（与「截屏修Bug」单张流程独立）")
-        rcv.addSubview_(self.multi_shot_submit_btn)
-
-        rby -= run_row_gap + run_line_h
-        _cache_w = min(260, max(196, _uw - 2 * _rx))
+        _refresh_x = _rx + 38 + _dev_pop_w + 6
+        rcv.addSubview_(make_button(
+            "刷新", _refresh_x, rby, _refresh_w, run_line_h, self, self.refreshDevices_))
+        _cache_x = _refresh_x + _refresh_w + 6
         self.clear_ios_cache_btn = make_button(
-            "清 iOS 引擎与 Xcode 缓存", _rx, rby, _cache_w, btn_h,
+            "清 iOS 引擎与 Xcode 缓存", _cache_x, rby, _cache_w, btn_h,
             self, self.clearFlutterIosCache_)
         self.clear_ios_cache_btn.setToolTip_(
             "在「运行项目」目录执行 fvm flutter precache --ios；删除 FVM 下本工具锁定版本的 "
             "ios/ios-profile/ios-release 引擎缓存；并移除 ~/Library/Developer/Xcode/DerivedData/Runner-*。"
             " 可能耗时数分钟。")
         rcv.addSubview_(self.clear_ios_cache_btn)
+        self.step3_status = make_label(
+            "", _rx + _uw - _status_w, rby + 2, _status_w, 20, size=10)
+        rcv.addSubview_(self.step3_status)
 
         rby -= run_row_gap + run_line_h
-        _gap_btn = 8
-        _btn_total = (
-            _fix_w + _gap_btn + _run_w + _gap_btn + _stop_w
-            + _gap_btn + _hr_w + _gap_btn + _rs_w
-        )
-        _bx0 = _rx + _uw - _btn_total
-        _opw = 76
-        _clw = 48
-        _shotw = 100
-        rcv.addSubview_(make_button("打开项目", _rx, rby, _opw, btn_h, self, self.openProjectDir_))
-        rcv.addSubview_(make_button("清空", _rx + _opw + 6, rby, _clw, btn_h, self, self.clearLog_))
-        self.screenshot_fix_btn = make_button(
-            "截屏修Bug", _rx + _opw + 6 + _clw + 6, rby, _shotw, btn_h,
-            self, self.screenshotSimulatorFixBug_, bold=True)
-        self.screenshot_fix_btn.setToolTip_(
-            "对当前所选 iOS 模拟器窗口截图（须已启动），结合运行日志生成说明并交给 Cursor Agent 分析界面与代码")
-        rcv.addSubview_(self.screenshot_fix_btn)
-        self.fix_bug_btn = make_button(
-            "一键修Bug", _bx0, rby, _fix_w, btn_h, self, self.fixBugWithCursor_, bold=True)
-        self.fix_bug_btn.setToolTip_(
-            "优先调用 Cursor Agent CLI 根据日志自动改代码；未安装 CLI 则打开 Cursor 与说明文档。"
-            " CLI 安装: https://cursor.com/install")
-        rcv.addSubview_(self.fix_bug_btn)
+        _gap_btn = 6
+        _opw = 72
+        _clw = 44
+        _x = _rx
+        rcv.addSubview_(make_button("打开项目", _x, rby, _opw, btn_h, self, self.openProjectDir_))
+        _x += _opw + _gap_btn
+        rcv.addSubview_(make_button("清空", _x, rby, _clw, btn_h, self, self.clearLog_))
+        _x += _clw + 10
         self.run_btn = make_button(
-            "▶ 运行", _bx0 + _fix_w + _gap_btn, rby, _run_w, btn_h, self, self.runFlutter_, bold=True)
+            "▶ 运行", _x, rby, _run_w, btn_h, self, self.runFlutter_, bold=True)
         rcv.addSubview_(self.run_btn)
+        _x += _run_w + _gap_btn
         self.stop_btn = make_button(
-            "■ 停止", _bx0 + _fix_w + _gap_btn + _run_w + _gap_btn, rby, _stop_w, btn_h, self, self.stopFlutter_)
+            "■ 停止", _x, rby, _stop_w, btn_h, self, self.stopFlutter_)
         self.stop_btn.setEnabled_(False)
         rcv.addSubview_(self.stop_btn)
-        _x_hr = _bx0 + _fix_w + _gap_btn + _run_w + _gap_btn + _stop_w + _gap_btn
+        _x += _stop_w + _gap_btn
         self.hot_reload_btn = make_button(
-            "热更新", _x_hr, rby, _hr_w, btn_h, self, self.flutterHotReload_)
+            "热更新", _x, rby, _hr_w, btn_h, self, self.flutterHotReload_)
         self.hot_reload_btn.setToolTip_("向 flutter run 发送 r：热重载（保留状态）")
         self.hot_reload_btn.setEnabled_(False)
         rcv.addSubview_(self.hot_reload_btn)
+        _x += _hr_w + _gap_btn
         self.hot_restart_btn = make_button(
-            "重启", _x_hr + _hr_w + _gap_btn, rby, _rs_w, btn_h, self, self.flutterHotRestart_)
+            "重启", _x, rby, _rs_w, btn_h, self, self.flutterHotRestart_)
         self.hot_restart_btn.setToolTip_("向 flutter run 发送 R：热重启（重新执行 main）")
         self.hot_restart_btn.setEnabled_(False)
         rcv.addSubview_(self.hot_restart_btn)
+        _x += _rs_w + _gap_btn
+        self.advanced_btn = make_button(
+            "高级", _x, rby, _adv_w, btn_h, self, self.toggleAdvancedPanel_, bold=True)
+        self.advanced_btn.setToolTip_(
+            "从右侧展开：修 Bug、运行模式、修复模型、模拟器巡检、多图提交等")
+        rcv.addSubview_(self.advanced_btn)
+
+        run_panel_h = fit_section_box(
+            run_box, pad, run_panel_y, inner_w,
+            _run_top, rby)
 
         content.addSubview_(run_box)
+
+        # ── Advanced drawer (right slide-out) ──
+        self.advanced_panel = NSView.alloc().initWithFrame_(NSMakeRect(win_w, 0, ADVANCED_PANEL_W, win_h))
+        self.advanced_panel.setWantsLayer_(True)
+        self.advanced_panel.layer().setBackgroundColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(0.97, 1.0).CGColor())
+        self.advanced_panel.layer().setBorderWidth_(1.0)
+        self.advanced_panel.layer().setBorderColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(0.75, 1.0).CGColor())
+        self.advanced_panel.setAutoresizingMask_(0x02 | 0x04)
+
+        self.advanced_inner = FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, ADVANCED_PANEL_W, win_h))
+        self.advanced_inner.setAutoresizingMask_(0x02 | 0x01 | 0x04 | 0x08)
+        self.advanced_panel.addSubview_(self.advanced_inner)
+        adv_flipped = self.advanced_inner
+        _ax = 10
+        _aw = ADVANCED_PANEL_W - 20
+        aby = 8
+
+        adv_flipped.addSubview_(make_label("高级", _ax, aby + 4, 72, 20, size=14, bold=True))
+        self.advanced_close_btn = make_button(
+            "收起", _aw - 76, aby, 76, 28, self, self.toggleAdvancedPanel_, bold=True)
+        self.advanced_close_btn.setToolTip_("收起右侧高级面板")
+        adv_flipped.addSubview_(self.advanced_close_btn)
+        adv_flipped.addSubview_(make_label(
+            "运行模式 · 修 Bug · 巡检 · 多图 · 同步修复",
+            _ax, aby + 30, _aw, 14, size=9, color=NSColor.secondaryLabelColor()))
+
+        aby = ADVANCED_HEADER_H + 4
+        adv_flipped.addSubview_(make_label("模式:", _ax, aby, 40, run_line_h, size=11))
+        self.mode_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(_ax + 42, aby, _mode_w, run_line_h), False)
+        self.mode_popup.setFont_(NSFont.systemFontOfSize_(11))
+        self.mode_popup.addItemWithTitle_("Debug")
+        self.mode_popup.addItemWithTitle_("Release")
+        adv_flipped.addSubview_(self.mode_popup)
+
+        aby += run_row_gap + run_line_h
+        adv_flipped.addSubview_(make_label("修复模型:", _ax, aby, 72, run_line_h, size=11))
+        _model_pop_w = _aw - 76
+        self.agent_model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(_ax + 76, aby, _model_pop_w, run_line_h), False)
+        self.agent_model_popup.setFont_(NSFont.systemFontOfSize_(11))
+        for _lbl, _ in AGENT_MODEL_PRESETS:
+            self.agent_model_popup.addItemWithTitle_(_lbl)
+        adv_flipped.addSubview_(self.agent_model_popup)
+
+        aby += run_row_gap + run_line_h
+        self.agent_model_custom_field = make_input(
+            _ax, aby, _aw, run_line_h,
+            "自定义 id（优先）；下拉未列出的模型写这里", mono=True)
+        adv_flipped.addSubview_(self.agent_model_custom_field)
+        self._load_agent_model_from_defaults()
+
+        aby += run_row_gap + run_line_h
+        adv_flipped.addSubview_(make_label("修 Bug:", _ax, aby, 48, run_line_h, size=11))
+        self.screenshot_fix_btn = make_button(
+            "截屏修Bug", _ax + 52, aby, 96, btn_h,
+            self, self.screenshotSimulatorFixBug_, bold=True)
+        self.screenshot_fix_btn.setToolTip_(
+            "对当前所选 iOS 模拟器窗口截图（须已启动），结合运行日志生成说明并交给 Cursor Agent 分析界面与代码")
+        adv_flipped.addSubview_(self.screenshot_fix_btn)
+        self.fix_bug_btn = make_button(
+            "一键修Bug", _ax + 154, aby, 96, btn_h, self, self.fixBugWithCursor_, bold=True)
+        self.fix_bug_btn.setToolTip_(
+            "优先调用 Cursor Agent CLI 根据日志自动改代码；未安装 CLI 则打开 Cursor 与说明文档。"
+            " CLI 安装: https://cursor.com/install")
+        adv_flipped.addSubview_(self.fix_bug_btn)
+
+        aby += run_row_gap + run_line_h
+        adv_flipped.addSubview_(make_label("自动探查:", _ax, aby, 64, run_line_h, size=11))
+        _scw, _ssw = 92, 48
+        self.sim_crawl_btn = make_button(
+            "模拟器巡检", _ax + 68, aby, _scw, btn_h, self, self.simulatorCrawlStart_, bold=True)
+        self.sim_crawl_btn.setToolTip_(
+            "启动/前置模拟器，在设备画面内网格点击并逐张截图，生成报告后可交 Cursor Agent 汇总疑似界面问题。"
+            " 需在「系统设置 › 隐私与安全性 › 辅助功能」中允许本应用，否则无法模拟点击。"
+            " 无法替代业务自动化测试，不保证遍历所有页面。")
+        adv_flipped.addSubview_(self.sim_crawl_btn)
+        self.sim_crawl_stop_btn = make_button(
+            "停止", _ax + 68 + _scw + 8, aby, _ssw, btn_h, self, self.simulatorCrawlStop_)
+        self.sim_crawl_stop_btn.setEnabled_(False)
+        adv_flipped.addSubview_(self.sim_crawl_stop_btn)
+        adv_flipped.addSubview_(make_label(
+            "网格点击→截图→可选 Agent；须辅助功能授权；请先 ▶ 运行 再巡检",
+            _ax, aby + 22, _aw, 16, size=9, color=NSColor.secondaryLabelColor()))
+
+        aby += run_row_gap + run_line_h + 10
+        adv_flipped.addSubview_(make_label("多图说明:", _ax, aby, 56, run_line_h, size=11))
+        self.multi_shot_note_field = make_input(
+            _ax + 58, aby, _aw - 58, run_line_h,
+            "一句话描述问题（可选）；多次点「截一张」暂存，最后点「多图提交修Bug」", mono=False)
+        self.multi_shot_note_field.setFont_(NSFont.systemFontOfSize_(11))
+        adv_flipped.addSubview_(self.multi_shot_note_field)
+
+        aby += run_row_gap + run_line_h
+        _capw, _clrw, _subw = 64, 52, max(100, _aw - 64 - 6 - 52 - 90)
+        self.multi_shot_capture_btn = make_button(
+            "截一张", _ax, aby, _capw, btn_h, self, self.multiShotCaptureOne_, bold=True)
+        self.multi_shot_capture_btn.setToolTip_("截取当前模拟器画面，追加到待提交列表（可切换界面后再截）")
+        adv_flipped.addSubview_(self.multi_shot_capture_btn)
+        self.multi_shot_clear_btn = make_button(
+            "清空", _ax + _capw + 6, aby, _clrw, btn_h, self, self.multiShotClearPending_)
+        self.multi_shot_clear_btn.setToolTip_("清空待提交列表并删除 ab_factory_pending 下已暂存的 PNG")
+        adv_flipped.addSubview_(self.multi_shot_clear_btn)
+        self.multi_shot_count_label = make_label(
+            "已 0 张", _ax + _capw + 6 + _clrw + 10, aby + 2, 80, run_line_h, size=11)
+        adv_flipped.addSubview_(self.multi_shot_count_label)
+        self.multi_shot_submit_btn = make_button(
+            "多图提交修Bug", _ax + _aw - _subw, aby, _subw, btn_h,
+            self, self.multiScreensSubmitFixBug_, bold=True)
+        self.multi_shot_submit_btn.setToolTip_(
+            "将当前暂存的多张截图与说明、日志一并交给 Cursor Agent（与「截屏修Bug」单张流程独立）")
+        adv_flipped.addSubview_(self.multi_shot_submit_btn)
+
+        aby += run_row_gap + run_line_h + 6
+        adv_flipped.addSubview_(make_label("同步修复:", _ax, aby, 64, run_line_h, size=11))
+        self.repair_imports_btn = make_button(
+            "修正导入", _ax + 68, aby, 92, btn_h, self, self.repairObfImports_)
+        self.repair_imports_btn.setToolTip_(
+            "同步后修复：把 A 面 lib/ 中残留的混淆包名 import 还原为标准包名"
+            "（如 package:orbit_layout/shared_preferences.dart → package:shared_preferences/shared_preferences.dart），"
+            "随后自动 pub get。混淆名按 pubspec 已声明的真实依赖自动识别，可在同步前/后随时点，幂等安全。")
+        adv_flipped.addSubview_(self.repair_imports_btn)
+        self.restore_pubspec_btn = make_button(
+            "还原", _ax + 168, aby, 72, btn_h, self, self.restorePubspecClean_)
+        self.restore_pubspec_btn.setToolTip_(
+            "将目标工程 pubspec.yaml 还原为干净副本：优先 pubspec.yaml.clean，"
+            "其次 git HEAD，再次 pubspec.yaml.bak；当前文件备份为 pubspec.yaml.before_restore")
+        adv_flipped.addSubview_(self.restore_pubspec_btn)
+        adv_flipped.addSubview_(make_label(
+            "使用步骤 2 的「目标工程」路径",
+            _ax + 248, aby + 2, _aw - 248, 16, size=9, color=NSColor.secondaryLabelColor()))
+
+        self.advanced_bottom_btn = make_button(
+            "收起高级面板", _ax, win_h - 44, _aw, 32, self, self.toggleAdvancedPanel_, bold=True)
+        self.advanced_bottom_btn.setToolTip_("缩回右侧高级面板")
+        adv_flipped.addSubview_(self.advanced_bottom_btn)
+
+        # 左侧接缝缩回把手（展开时露出在主界面与侧栏之间）
+        self.advanced_tab_btn = make_button(
+            "◀", 0, 0, ADVANCED_TAB_W, 80, self, self.toggleAdvancedPanel_, bold=True)
+        self.advanced_tab_btn.setToolTip_("收起高级面板")
+        self.advanced_tab_btn.setAutoresizingMask_(0x02 | 0x04)
+        self.advanced_tab_btn.setHidden_(True)
+
         steps_bottom = run_panel_y + run_panel_h + 4
 
         # ── Scrollable steps area ──
@@ -2255,19 +2692,19 @@ class AppDelegate(NSObject):
         doc_view.addSubview_(self.show_dev_float_switch)
         y += row_h + 10
 
-        # ── Step 1: Create project ──
-        # NSBox 的 contentView 首次构建时 bounds 高度常偏大，若用 bounds 算 by 会把各行挤到可视区下方，中间留出大块空白
-        step1_h = 248
-        _s1_chrome_v = 52
-        _s1_inner_h = max(160, step1_h - _s1_chrome_v)
+        # ── Step 1: Create project（与步骤 2 相同的紧凑行距 sp）──
+        step1_h = 188
+        _s1_git_h = 28
         box1 = make_section_box("步骤 1 · 创建新项目", pad, y, inner_w, step1_h)
         cv1 = box1.contentView()
         cv1.setWantsLayer_(True)
         cv1.layer().setMasksToBounds_(True)
-        by = _s1_inner_h - row_h - 4
+        _s1_inner = section_inner_h(step1_h)
+        by = _s1_inner - row_h - SECTION_TOP_PAD
+        _s1_top = by + row_h
 
         cv1.addSubview_(make_label("模板路径:", 0, by, 62, row_h, size=11))
-        _tpl_choose_w = 52
+        _tpl_choose_w = 54
         _tpl_pull_w = 78
         _tpl_gap = 6
         _tpl_right_choose = bw - _tpl_choose_w
@@ -2278,18 +2715,14 @@ class AppDelegate(NSObject):
         cv1.addSubview_(make_button("拉取更新", _tpl_right_pull, by, _tpl_pull_w, row_h, self, self.updateTemplateFromGit_))
         cv1.addSubview_(make_button("选择…", _tpl_right_choose, by, _tpl_choose_w, row_h, self, self.browseTemplate_))
 
-        _tpl_row_top = by
-        _git_gap = 8
-        _git_h = 42
-        # Flipped coords: 模板行在区块底部；Git 放在模板行上方，避免与输入框重叠
-        _git_y = _tpl_row_top - _git_gap - _git_h
+        by -= 4 + _s1_git_h
         self.template_git_status_label = make_label(
-            "模板 Git：—", 0, _git_y, bw, _git_h, size=10, color=NSColor.secondaryLabelColor())
+            "模板 Git：—", 0, by, bw, _s1_git_h, size=10, color=NSColor.secondaryLabelColor())
         self.template_git_status_label.setToolTip_("模板目录当前分支与提交，拉取更新前后会刷新")
         self.template_git_status_label.setMaximumNumberOfLines_(2)
         cv1.addSubview_(self.template_git_status_label)
 
-        by = _git_y - run_row_gap - row_h
+        by -= sp
         cv1.addSubview_(make_label("项目名称:", 0, by, 62, row_h, size=11))
         self.project_name_field = make_input(62, by, 158, row_h, "my_app", mono=True)
         cv1.addSubview_(self.project_name_field)
@@ -2314,11 +2747,12 @@ class AppDelegate(NSObject):
         cv1.addSubview_(self.output_field)
         cv1.addSubview_(make_button("选择…", bw - 54, by, 54, row_h, self, self.browseOutput_))
 
-        by -= sp + 4
+        by -= sp + 2
         self.step1_status = make_label("", 0, by + 2, bw - 110, 20, size=11)
         cv1.addSubview_(self.step1_status)
         self.create_btn = make_button("创建项目", bw - 90, by, 90, 28, self, self.createProject_, bold=True)
         cv1.addSubview_(self.create_btn)
+        step1_h = fit_section_box(box1, pad, y, inner_w, _s1_top, by)
         doc_view.addSubview_(box1)
         y += step1_h + gap
 
@@ -2326,7 +2760,9 @@ class AppDelegate(NSObject):
         step2_h = 192
         box2 = make_section_box("步骤 2 · 同步 B 面代码", pad, y, inner_w, step2_h)
         cv2 = box2.contentView()
-        by = int(cv2.bounds().size.height) - row_h - 4
+        _s2_inner = section_inner_h(step2_h)
+        by = _s2_inner - row_h - SECTION_TOP_PAD
+        _s2_top = by + row_h
 
         cv2.addSubview_(make_label("项目代号:", 0, by, 62, row_h, size=11))
         self.project_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(62, by, 158, row_h), False)
@@ -2364,21 +2800,8 @@ class AppDelegate(NSObject):
         cv2.addSubview_(write_ch_btn)
 
         by -= sp + 2
-        self.step2_status = make_label("", 0, by + 2, bw - 464, 20, size=11)
+        self.step2_status = make_label("", 0, by + 2, bw - 250, 20, size=11)
         cv2.addSubview_(self.step2_status)
-        self.repair_imports_btn = make_button(
-            "修正导入", bw - 454, by, 104, 28, self, self.repairObfImports_)
-        self.repair_imports_btn.setToolTip_(
-            "同步后修复：把 A 面 lib/ 中残留的混淆包名 import 还原为标准包名"
-            "（如 package:orbit_layout/shared_preferences.dart → package:shared_preferences/shared_preferences.dart），"
-            "随后自动 pub get。混淆名按 pubspec 已声明的真实依赖自动识别，可在同步前/后随时点，幂等安全。")
-        cv2.addSubview_(self.repair_imports_btn)
-        self.restore_pubspec_btn = make_button(
-            "还原 pubspec", bw - 340, by, 100, 28, self, self.restorePubspecClean_)
-        self.restore_pubspec_btn.setToolTip_(
-            "将目标工程 pubspec.yaml 还原为干净副本：优先 pubspec.yaml.clean，"
-            "其次 git HEAD，再次 pubspec.yaml.bak；当前文件备份为 pubspec.yaml.before_restore")
-        cv2.addSubview_(self.restore_pubspec_btn)
         align_btn = make_button("对齐模板脚本", bw - 230, by, 114, 28, self, self.alignScriptsFromTemplate_)
         align_btn.setToolTip_(
             "把模板 scripts/ 覆盖到目标工程，确保同步用的是工程自身的最新脚本"
@@ -2396,6 +2819,7 @@ class AppDelegate(NSObject):
             "串联执行：sync_secondary → 修复 pubspec → obfuscate_code --all → obfuscate_frameworks run；"
             "任一步失败即中止。适合确认源码路径无误后一次跑完。")
         cv2.addSubview_(self.pipeline_btn)
+        step2_h = fit_section_box(box2, pad, y, inner_w, _s2_top, by)
         doc_view.addSubview_(box2)
         y += step2_h + gap
 
@@ -2403,7 +2827,9 @@ class AppDelegate(NSObject):
         step3a_h = 72
         box3a = make_section_box("步骤 3 · 添加 A 面代码", pad, y, inner_w, step3a_h)
         cv3a = box3a.contentView()
-        by = int(cv3a.bounds().size.height) - row_h - 4
+        _s3_inner = section_inner_h(step3a_h)
+        by = _s3_inner - row_h - SECTION_TOP_PAD
+        _s3_top = by + row_h
 
         cv3a.addSubview_(make_label("项目路径:", 0, by, 62, row_h, size=11))
         self.aside_project_field = make_input(62, by, bw - 200, row_h, "步骤1创建的项目路径（自动填入）", mono=True)
@@ -2415,6 +2841,7 @@ class AppDelegate(NSObject):
             "💡 先完成步骤1、2并运行验证 · A 面仅 lib/modules/primary/ · 兼容 iOS 且需适配 iPad 审核",
             0, by - 18, bw, 16, size=10, color=NSColor.secondaryLabelColor()
         ))
+        step3a_h = fit_section_box(box3a, pad, y, inner_w, _s3_top, by - 18)
         doc_view.addSubview_(box3a)
         y += step3a_h + gap
 
@@ -2422,7 +2849,9 @@ class AppDelegate(NSObject):
         step4_h = 190
         box4 = make_section_box("步骤 4 · 混淆与配置", pad, y, inner_w, step4_h)
         cv4 = box4.contentView()
-        by = int(cv4.bounds().size.height) - row_h - 4
+        _s4_inner = section_inner_h(step4_h)
+        by = _s4_inner - row_h - SECTION_TOP_PAD
+        _s4_top = by + row_h
 
         cv4.addSubview_(make_label("项目路径:", 0, by, 62, row_h, size=11))
         self.obf_project_field = make_input(62, by, bw - 132, row_h, "步骤1创建的项目路径（自动填入）", mono=True)
@@ -2471,8 +2900,9 @@ class AppDelegate(NSObject):
         cv4.addSubview_(make_label("替换星火:", 0, by, 62, row_h, size=11))
         self.brand_replace_field = make_input(62, by, 200, row_h, "新品牌名，替换所有「星火」")
         self.brand_replace_field.setToolTip_(
-            "把 B 面所有「星火」替换为此文字：明文字面量/注释 + 混淆 "
-            "String.fromCharCodes 编码串都会改；「星期」等无关字符不动。")
+            "把 B 面所有「星火」替换为此文字；远程用户/隐私协议 URL 会改成本地 "
+            "user-agreement.html / privacy-policy.html（走 assets 内已替换的 html）；"
+            "AB 壳工程会同步修正 WebView 的 assets 路径。")
         cv4.addSubview_(self.brand_replace_field)
         cv4.addSubview_(make_button("预览", 268, by, 48, 24, self, self.previewBrandReplace_))
         cv4.addSubview_(make_button("替换星火", 322, by, 80, 24, self, self.replaceBrandText_, bold=True))
@@ -2480,6 +2910,7 @@ class AppDelegate(NSObject):
             "💡 先「预览」看命中，确认后「替换」；改完建议 git diff 复核",
             410, by + 2, bw - 410, 16, size=10, color=NSColor.secondaryLabelColor()
         ))
+        step4_h = fit_section_box(box4, pad, y, inner_w, _s4_top, by)
         doc_view.addSubview_(box4)
         y += step4_h + gap
 
@@ -2489,7 +2920,9 @@ class AppDelegate(NSObject):
         cv5 = box5.contentView()
         lw = 72
         col2 = mid_x
-        by = int(cv5.bounds().size.height) - row_h - 4
+        _s5_inner = section_inner_h(step5_h)
+        by = _s5_inner - row_h - SECTION_TOP_PAD
+        _s5_top = by + row_h
 
         cv5.addSubview_(make_label("Flutter工程:", 0, by, lw, row_h, size=11))
         self.ipa_project_field = make_input(lw, by, bw - lw - 58, row_h, "步骤1创建的项目路径（自动填入）", mono=True)
@@ -2538,14 +2971,8 @@ class AppDelegate(NSObject):
         by -= 26
 
         cv5.addSubview_(make_label("Bundle ID:", 0, by, lw, row_h, size=11))
-        _cfg_bid_rnd_w = 44
-        _cfg_bid_gap = 4
-        _cfg_bid_in_w = col2 - lw - 10 - _cfg_bid_rnd_w - _cfg_bid_gap
-        self.cfg_bundle_field = make_input(lw, by, _cfg_bid_in_w, row_h, "com.example.app", mono=True)
+        self.cfg_bundle_field = make_input(lw, by, col2 - lw - 10, row_h, "com.example.app", mono=True)
         cv5.addSubview_(self.cfg_bundle_field)
-        _cfg_bid_btn = make_button("随机", col2 - 10 - _cfg_bid_rnd_w, by, _cfg_bid_rnd_w, row_h, self, self.randomBundleIdCfg_)
-        _cfg_bid_btn.setToolTip_("从本机系统英语词典（/usr/share/dict/words 等）随机生成 com.xxx.xxx")
-        cv5.addSubview_(_cfg_bid_btn)
         cv5.addSubview_(make_label("Team ID:", col2, by, 56, row_h, size=11))
         self.cfg_team_field = make_input(col2 + 56, by, bw - col2 - 56, row_h, "XXXXXXXXXX", mono=True)
         cv5.addSubview_(self.cfg_team_field)
@@ -2580,7 +3007,8 @@ class AppDelegate(NSObject):
         by -= sp
         _px_lbl, _px_dd_x, _px_dd_w = 34, 34, 210
         _px_rf_w, _px_rf_x = 44, _px_dd_x + _px_dd_w + 4
-        _px_up_w, _px_in_x = 100, _px_rf_x + _px_rf_w + 4
+        _px_chk_w, _px_chk_x = 44, _px_rf_x + _px_rf_w + 4
+        _px_up_w, _px_in_x = 100, _px_chk_x + _px_chk_w + 4
         _px_in_w = bw - _px_in_x - _px_up_w - 4
         cv5.addSubview_(make_label("代理:", 0, by, _px_lbl, row_h, size=11))
         self.cfg_proxy_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
@@ -2594,6 +3022,12 @@ class AppDelegate(NSObject):
         self.refresh_proxy_btn = make_button(
             "刷新", _px_rf_x, by, _px_rf_w, row_h, self, self.refreshProxyList_)
         cv5.addSubview_(self.refresh_proxy_btn)
+        self.verify_proxy_btn = make_button(
+            "检验", _px_chk_x, by, _px_chk_w, row_h, self, self.verifyProxyList_)
+        self.verify_proxy_btn.setToolTip_(
+            "用 Camoufox 浏览器（与「核验 IP/指纹」相同）检测所有 SOCKS5："
+            "✓=HTTPS 可核验；○=仅 HTTP 通；✗=不可用")
+        cv5.addSubview_(self.verify_proxy_btn)
         self.cfg_proxy_field = make_input(
             _px_in_x, by, max(80, _px_in_w), row_h,
             "socks5://host:port:user:pass（上传用）", mono=True)
@@ -2647,13 +3081,131 @@ class AppDelegate(NSObject):
         self.build_ipa_btn = make_button("打包 IPA", bw - 100, by, 100, 28, self, self.buildIpa_, bold=True)
         cv5.addSubview_(self.build_ipa_btn)
 
+        step5_h = fit_section_box(box5, pad, y, inner_w, _s5_top, by)
         doc_view.addSubview_(box5)
-        y += step5_h + 10
+        y += step5_h + gap
+
+        # ── Fingerprint browsers ──
+        step6_h = 200
+        box6 = make_section_box("指纹浏览器 · 防跟踪隔离", pad, y, inner_w, step6_h)
+        cv6 = box6.contentView()
+        _s6_inner = section_inner_h(step6_h)
+        by = _s6_inner - row_h - SECTION_TOP_PAD
+        _s6_top = by + row_h
+        lw6 = 56
+
+        cv6.addSubview_(make_label(
+            "每个身份独立配置 + 专属 SOCKS5；引擎可选系统 Chrome 或 Camoufox",
+            0, by + 2, bw, 16, size=10, color=NSColor.secondaryLabelColor()))
+        _s6_top = by + 18
+        by -= sp
+
+        cv6.addSubview_(make_label("身份:", 0, by, lw6, row_h, size=11))
+        self.fp_profile_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(lw6, by, 200, row_h), False)
+        self.fp_profile_popup.setFont_(NSFont.systemFontOfSize_(10))
+        self.fp_profile_popup.addItemWithTitle_("— 选择身份 —")
+        self.fp_profile_popup.setTarget_(self)
+        self.fp_profile_popup.setAction_(objc.selector(
+            self.fpProfilePopupChanged_, signature=b'v@:@'))
+        cv6.addSubview_(self.fp_profile_popup)
+        self.fp_refresh_btn = make_button("刷新", lw6 + 206, by, 44, row_h, self, self.refreshFpProfiles_)
+        cv6.addSubview_(self.fp_refresh_btn)
+        cv6.addSubview_(make_label("名称:", lw6 + 256, by, 36, row_h, size=11))
+        _fp_name_x = lw6 + 292
+        self.fp_name_field = make_input(
+            _fp_name_x, by, max(80, bw - _fp_name_x), row_h, "新身份名，如 account_01")
+        cv6.addSubview_(self.fp_name_field)
+
+        by -= sp
+        cv6.addSubview_(make_label("引擎:", 0, by, lw6, row_h, size=11))
+        self.fp_engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(lw6, by, 86, row_h), False)
+        for _eng in ("Camoufox", "Chrome"):
+            self.fp_engine_popup.addItemWithTitle_(_eng)
+        self.fp_engine_popup.selectItemAtIndex_(0)
+        cv6.addSubview_(self.fp_engine_popup)
+        cv6.addSubview_(make_label("系统:", lw6 + 92, by, 36, row_h, size=11))
+        self.fp_os_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(lw6 + 128, by, 82, row_h), False)
+        for _os in ("macos", "windows", "linux"):
+            self.fp_os_popup.addItemWithTitle_(_os)
+        cv6.addSubview_(self.fp_os_popup)
+        cv6.addSubview_(make_label("语言:", lw6 + 216, by, 36, row_h, size=11))
+        _fp_loc_x = lw6 + 252
+        self.fp_locale_field = make_input(
+            _fp_loc_x, by, max(72, bw - _fp_loc_x), row_h, "en-US")
+        self.fp_locale_field.setStringValue_("en-US")
+        cv6.addSubview_(self.fp_locale_field)
+
+        by -= sp
+        _fp_px_lbl, _fp_px_dd_x, _fp_px_dd_w = 34, 34, 180
+        _fp_px_rf_w, _fp_px_rf_x = 44, _fp_px_dd_x + _fp_px_dd_w + 4
+        _fp_px_in_x = _fp_px_rf_x + _fp_px_rf_w + 4
+        _fp_px_in_w = max(120, bw - _fp_px_in_x)
+        cv6.addSubview_(make_label("代理:", 0, by, _fp_px_lbl, row_h, size=11))
+        self.fp_proxy_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(_fp_px_dd_x, by, _fp_px_dd_w, row_h), False)
+        self.fp_proxy_popup.setFont_(NSFont.systemFontOfSize_(10))
+        self.fp_proxy_popup.addItemWithTitle_("— proxifly US —")
+        self.fp_proxy_popup.setTarget_(self)
+        self.fp_proxy_popup.setAction_(objc.selector(
+            self.fpProxyPopupChanged_, signature=b'v@:@'))
+        cv6.addSubview_(self.fp_proxy_popup)
+        cv6.addSubview_(make_button(
+            "刷新", _fp_px_rf_x, by, _fp_px_rf_w, row_h, self, self.refreshFpProxyList_))
+        self.fp_proxy_field = make_input(
+            _fp_px_in_x, by, _fp_px_in_w, row_h,
+            "socks5://host:port 或 socks5://host:port:user:pass", mono=True)
+        cv6.addSubview_(self.fp_proxy_field)
+
+        by -= sp + 4
+        # 圆角按钮内边距大，宽度需按文案留足，状态放到下一行避免挤裁切
+        _fp_btn_gap = 4
+        _fp_bx = 0
+        self.fp_add_btn = make_button("添加身份", _fp_bx, by, 82, 26, self, self.addFpProfile_, bold=True)
+        cv6.addSubview_(self.fp_add_btn)
+        _fp_bx += 82 + _fp_btn_gap
+        self.fp_launch_btn = make_button("打开浏览器", _fp_bx, by, 98, 26, self, self.launchFpBrowser_, bold=True)
+        self.fp_launch_btn.setToolTip_(
+            "Chrome：系统 Google Chrome + 独立配置目录 + SOCKS5；"
+            "Camoufox：反检测 Firefox。关闭窗口即结束会话。")
+        cv6.addSubview_(self.fp_launch_btn)
+        _fp_bx += 98 + _fp_btn_gap
+        self.fp_verify_btn = make_button("核验 IP", _fp_bx, by, 78, 26, self, self.verifyFpBrowser_)
+        self.fp_verify_btn.setToolTip_("核验当前身份的出口 IP / 指纹")
+        cv6.addSubview_(self.fp_verify_btn)
+        _fp_bx += 78 + _fp_btn_gap
+        self.fp_update_proxy_btn = make_button("换 IP", _fp_bx, by, 62, 26, self, self.updateFpProxy_)
+        self.fp_update_proxy_btn.setToolTip_("仅更换当前选中身份的 SOCKS5 出口 IP，已固化指纹不变")
+        cv6.addSubview_(self.fp_update_proxy_btn)
+        _fp_bx += 62 + _fp_btn_gap
+        self.fp_regen_btn = make_button("换指纹", _fp_bx, by, 72, 26, self, self.regenFpFingerprint_)
+        self.fp_regen_btn.setToolTip_("重新生成该身份的浏览器指纹（代理不变）")
+        cv6.addSubview_(self.fp_regen_btn)
+        self.fp_install_btn = make_button("安装依赖", bw - 88, by, 88, 26, self, self.installFpDeps_)
+        self.fp_install_btn.setToolTip_(
+            "首次使用：创建 Camoufox 专用 venv 并下载浏览器本体（约 300MB）")
+        cv6.addSubview_(self.fp_install_btn)
+
+        by -= 18
+        self.fp_status = make_label("", 0, by, max(120, bw - 280), 16, size=10)
+        cv6.addSubview_(self.fp_status)
+        cv6.addSubview_(make_label(
+            "💡 数据目录: ~/Library/Application Support/ABFactory/fingerprint-browsers",
+            max(120, bw - 280) + 8, by, 272, 16, size=10, color=NSColor.secondaryLabelColor()))
+
+        step6_h = fit_section_box(box6, pad, y, inner_w, _s6_top, by)
+        doc_view.addSubview_(box6)
+        y += step6_h + 10
 
         # ── Set document view height ──
         doc_view.setFrame_(NSMakeRect(0, 0, win_w, y))
         steps_scroll.setDocumentView_(doc_view)
         content.addSubview_(steps_scroll)
+        content.addSubview_(self.advanced_panel)
+        content.addSubview_(self.advanced_tab_btn)
+        self._layout_advanced_panel(animate=False)
 
         self.window.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
@@ -2685,6 +3237,9 @@ class AppDelegate(NSObject):
             lambda: self._refresh_template_git_status_label())
         threading.Thread(
             target=self._refresh_socks_proxy_list, kwargs={"log": False}, daemon=True).start()
+        NSOperationQueue.mainQueue().addOperationWithBlock_(self._refresh_fp_profile_popup)
+        threading.Thread(
+            target=self._refresh_fp_proxy_list, kwargs={"log": False}, daemon=True).start()
 
     # ── Devices ──
 
@@ -2954,6 +3509,110 @@ class AppDelegate(NSObject):
             if title:
                 btn.setTitle_(title)
         NSOperationQueue.mainQueue().addOperationWithBlock_(_do)
+
+    @objc.python_method
+    def _schedule_on_main(self, fn):
+        """单次主线程 UI 更新；勿在 block 内再调 _set_btn（避免 PyObjC 桥递归崩溃）。"""
+
+        def _do():
+            try:
+                fn()
+            except Exception:
+                pass
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(_do)
+
+    @objc.python_method
+    def _reset_fp_launch_ui(self):
+        self.fp_launch_btn.setEnabled_(True)
+        self.fp_launch_btn.setTitle_("打开浏览器")
+        self.fp_launch_btn.setAction_("launchFpBrowser:")
+        self.fp_status.setStringValue_("就绪")
+
+    @objc.python_method
+    def _set_fp_launch_running_ui(self, name):
+        self.fp_launch_btn.setEnabled_(True)
+        self.fp_launch_btn.setTitle_("结束会话")
+        self.fp_launch_btn.setAction_("stopFpSession:")
+        self.fp_status.setStringValue_(f"{name} 已打开，关闭窗口或点「结束会话」")
+
+    @objc.python_method
+    def _fp_heartbeat_path(self, name):
+        return os.path.expanduser(
+            f"~/Library/Application Support/ABFactory/fingerprint-browsers/.launch-heartbeat-{name}"
+        )
+
+    @objc.python_method
+    def _kill_fp_proc(self, proc):
+        if not proc or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    @objc.python_method
+    def _log_fp_stderr(self, err_text):
+        if not err_text:
+            return
+        for line in err_text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # macOS LibreSSL + urllib3 v2 噪音，与浏览器功能无关
+            if "NotOpenSSLWarning" in s or "urllib3 v2 only supports OpenSSL" in s:
+                continue
+            if s.startswith("warnings.warn("):
+                continue
+            self._log(f"   {s}")
+
+    @objc.python_method
+    def _watch_fp_launch_proc(self, proc, name):
+        """子进程结束或心跳停更时恢复按钮（Firefox 崩溃后 Playwright 可能挂死不退出）。"""
+        import time
+
+        started = time.time()
+        running_ui_set = False
+        hb_path = self._fp_heartbeat_path(name)
+        while _state.get("fp_proc") is proc:
+            rc = proc.poll()
+            if rc is not None:
+                _state["is_running"] = False
+                self._schedule_on_main(self._reset_fp_launch_ui)
+                return
+            if not running_ui_set and time.time() - started >= 2.0:
+                running_ui_set = True
+                self._schedule_on_main(lambda: self._set_fp_launch_running_ui(name))
+            if time.time() - started >= 15.0 and os.path.isfile(hb_path):
+                try:
+                    stale = time.time() - os.path.getmtime(hb_path)
+                except Exception:
+                    stale = 0
+                if stale > 6.0:
+                    self._log("⚠ 浏览器已断开但子进程未退出，正在自动清理…")
+                    self._kill_fp_proc(proc)
+                    _state["is_running"] = False
+                    self._schedule_on_main(self._reset_fp_launch_ui)
+                    return
+            time.sleep(0.8)
+
+    @objc.python_method
+    def _reset_fp_verify_ui(self):
+        self.fp_verify_btn.setEnabled_(True)
+        self.fp_verify_btn.setTitle_("核验 IP")
 
     @objc.python_method
     def _set_agent_fix_ui_busy(self, busy):
@@ -4448,6 +5107,57 @@ class AppDelegate(NSObject):
         proj = self._run_project_path_for_devices()
         threading.Thread(target=self._refresh_device_list, args=(proj,), daemon=True).start()
 
+    def toggleAdvancedPanel_(self, sender):
+        self._set_advanced_panel_open(not _state.get("advanced_open"), animate=True)
+
+    @objc.python_method
+    def _layout_advanced_panel(self, animate=False):
+        panel = self.advanced_panel
+        if panel is None:
+            return
+        content = self.window.contentView()
+        cw = content.bounds().size.width
+        ch = content.bounds().size.height
+        open_ = _state.get("advanced_open", False)
+        x = cw - ADVANCED_PANEL_W if open_ else cw
+
+        def apply_frame():
+            panel.setFrame_(NSMakeRect(x, 0, ADVANCED_PANEL_W, ch))
+            inner = self.advanced_inner
+            if inner is not None:
+                inner.setFrame_(NSMakeRect(0, 0, ADVANCED_PANEL_W, ch))
+            if self.advanced_bottom_btn is not None:
+                self.advanced_bottom_btn.setFrame_(
+                    NSMakeRect(10, ch - 42, ADVANCED_PANEL_W - 20, 32))
+            tab = self.advanced_tab_btn
+            if tab is not None:
+                tab_h = 80
+                tab_y = max(100, int(ch * 0.38))
+                if open_:
+                    tab.setFrame_(NSMakeRect(x - ADVANCED_TAB_W, tab_y, ADVANCED_TAB_W, tab_h))
+                    tab.setHidden_(False)
+                    self.window.contentView().addSubview_(tab)
+                else:
+                    tab.setHidden_(True)
+            if self.advanced_btn is not None:
+                self.advanced_btn.setTitle_("高级")
+
+        if animate:
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.currentContext().setDuration_(0.22)
+            apply_frame()
+            NSAnimationContext.endGrouping()
+        else:
+            apply_frame()
+
+    @objc.python_method
+    def _set_advanced_panel_open(self, open_, *, animate=True):
+        _state["advanced_open"] = bool(open_)
+        self._layout_advanced_panel(animate=animate)
+
+    def windowDidResize_(self, notification):
+        self._layout_advanced_panel(animate=False)
+
     @objc.python_method
     def _fetch_proxifly_us_proxies(self):
         import urllib.request
@@ -4506,16 +5216,283 @@ class AppDelegate(NSObject):
             return [], str(e)
 
     @objc.python_method
+    def _format_proxy_speed(self, ms):
+        if ms is None:
+            return ""
+        try:
+            ms = int(ms)
+        except Exception:
+            return ""
+        if ms < 0:
+            return ""
+        if ms < 1000:
+            return f"{ms}ms"
+        return f"{ms / 1000:.1f}s"
+
+    @objc.python_method
+    def _unpack_proxy_check(self, chk):
+        """兼容 (status, detail) 与 (status, detail, ms)。"""
+        if not chk:
+            return None, None, None
+        status = chk[0]
+        detail = chk[1] if len(chk) > 1 else ""
+        ms = chk[2] if len(chk) > 2 else None
+        return status, detail, ms
+
+    @objc.python_method
+    def _format_proxy_menu_label(self, base_label, url):
+        chk = (_state.get("socks_proxy_checks") or {}).get(url)
+        if not chk:
+            return base_label
+        status, detail, ms = self._unpack_proxy_check(chk)
+        suffix = f" · {status}"
+        if detail:
+            # 详情里若已带「仅HTTP」等说明，原样展示；IP 优先
+            suffix += f" {detail}"
+        speed = self._format_proxy_speed(ms)
+        if speed:
+            suffix += f" · {speed}"
+        label = base_label + suffix
+        if len(label) > 140:
+            label = label[:137] + "..."
+        return label
+
+    @objc.python_method
+    def _rebuild_proxy_popups(self, preserve_selection=True):
+        entries = _state.get("socks_proxy_entries") or []
+        # 有检验结果时：可用优先，同状态按耗时升序
+        checks = _state.get("socks_proxy_checks") or {}
+        if checks:
+            rank = {"✓": 0, "○": 1, "✗": 2}
+
+            def _sort_key(item):
+                _base, url = item
+                st, _d, ms = self._unpack_proxy_check(checks.get(url))
+                return (rank.get(st, 9), ms if ms is not None else 10**9, url)
+
+            entries = sorted(entries, key=_sort_key)
+
+        popups = (
+            (self.cfg_proxy_popup, "socks_proxy_urls", "— 选择 proxifly US 代理 —"),
+            (self.fp_proxy_popup, "fp_proxy_urls", "— proxifly US —"),
+        )
+        for popup, urls_key, placeholder in popups:
+            sel_url = None
+            if preserve_selection:
+                idx = popup.indexOfSelectedItem()
+                urls_old = _state.get(urls_key) or []
+                if idx > 0 and idx - 1 < len(urls_old):
+                    sel_url = urls_old[idx - 1]
+            popup.removeAllItems()
+            popup.addItemWithTitle_(placeholder)
+            urls = []
+            for base, url in entries:
+                popup.addItemWithTitle_(self._format_proxy_menu_label(base, url))
+                urls.append(url)
+            _state[urls_key] = urls
+            if sel_url and sel_url in urls:
+                popup.selectItemAtIndex_(urls.index(sel_url) + 1)
+            else:
+                popup.selectItemAtIndex_(0)
+
+    @objc.python_method
+    def _store_proxy_entries(self, entries):
+        _state["socks_proxy_entries"] = list(entries)
+        _state["socks_proxy_checks"] = {}
+
+    @objc.python_method
     def _apply_proxy_popup_entries(self, entries):
-        popup = self.cfg_proxy_popup
-        popup.removeAllItems()
-        popup.addItemWithTitle_("— 选择 proxifly US 代理 —")
-        urls = []
-        for label, url in entries:
-            popup.addItemWithTitle_(label)
-            urls.append(url)
-        _state["socks_proxy_urls"] = urls
-        popup.selectItemAtIndex_(0)
+        self._store_proxy_entries(entries)
+        self._rebuild_proxy_popups(preserve_selection=False)
+
+    @objc.python_method
+    def _proxy_check_parse_ip(self, body):
+        try:
+            ip = json.loads(body).get("ip", "")
+            if ip:
+                return str(ip)
+        except Exception:
+            pass
+        return (body or "").strip()[:20]
+
+    @objc.python_method
+    def _proxy_check_curl(self, url, target_url):
+        import subprocess
+
+        try:
+            r = subprocess.run(
+                [
+                    "curl", "-sS", "--max-time", str(PROXY_CHECK_TIMEOUT),
+                    "-x", url, target_url,
+                ],
+                capture_output=True, text=True, timeout=PROXY_CHECK_TIMEOUT + 3,
+            )
+            if r.returncode == 0:
+                return True, r.stdout, ""
+            err = (r.stderr or r.stdout or "").strip().replace("\n", " ")
+            return False, "", err
+        except subprocess.TimeoutExpired:
+            return False, "", "超时"
+        except FileNotFoundError:
+            return False, "", "无 curl"
+        except Exception as e:
+            return False, "", str(e)
+
+    @objc.python_method
+    def _proxy_check_fail_label(self, err, ms=None):
+        err_l = (err or "").lower()
+        if "ssl certificate" in err_l or "certificate" in err_l:
+            return "✗", "证书不可信", ms
+        if "timed out" in err_l or "timeout" in err_l:
+            return "✗", "超时", ms
+        if "connection refused" in err_l:
+            return "✗", "拒绝连接", ms
+        if "could not resolve" in err_l or "couldn't connect" in err_l:
+            return "✗", "无法连接", ms
+        return "✗", ((err or "")[:28]) or "失败", ms
+
+    @objc.python_method
+    def _proxy_browser_probe(self, url):
+        """与 fpbrowser verify 相同的 Camoufox 栈探测 HTTPS/HTTP 出口。返回 (status, detail)。"""
+        import subprocess
+
+        runner = self._fp_runner()
+        if not runner.is_ready():
+            return "✗", "未安装依赖"
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self._fp_app_dir()
+        cmd = [runner.python_path(), "-m", "fpbrowser.cli", "probe-proxy", url]
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=PROXY_BROWSER_PROBE_TIMEOUT,
+                env=env,
+                cwd=self._fp_app_dir(),
+            )
+            for line in reversed((r.stdout or "").splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("HTTPS_OK|"):
+                    return "✓", line.split("|", 1)[1]
+                if line.startswith("HTTP_ONLY|"):
+                    ip = line.split("|", 1)[1]
+                    return "○", f"{ip} 仅HTTP"
+                if line.startswith("FAIL|"):
+                    return "✗", line.split("|", 1)[1][:28]
+            err = ((r.stderr or r.stdout or "").strip().replace("\n", " "))[:28]
+            return "✗", err or f"exit {r.returncode}"
+        except subprocess.TimeoutExpired:
+            return "✗", "浏览器超时"
+        except Exception as e:
+            return "✗", str(e)[:28]
+
+    @objc.python_method
+    def _check_one_socks_proxy(self, url):
+        import time
+
+        t0 = time.monotonic()
+        ok, body, err = self._proxy_check_curl(url, PROXY_CHECK_HTTP_URL)
+        if not ok:
+            ms = int((time.monotonic() - t0) * 1000)
+            return self._proxy_check_fail_label(err, ms)
+
+        ip = self._proxy_check_parse_ip(body)
+        if not ip:
+            ms = int((time.monotonic() - t0) * 1000)
+            return "✗", "无 IP", ms
+
+        status, detail = self._proxy_browser_probe(url)
+        ms = int((time.monotonic() - t0) * 1000)
+        return status, detail, ms
+
+    @objc.python_method
+    def _verify_all_socks_proxies(self, log=True):
+        entries = _state.get("socks_proxy_entries") or []
+        if not entries:
+            if log:
+                self._log("❌ 代理列表为空，请先点「刷新」拉取 proxifly 列表")
+            return
+        if _state.get("socks_proxy_checking"):
+            if log:
+                self._log("⏳ 代理检验仍在进行中…")
+            return
+        _state["socks_proxy_checking"] = True
+        urls = [u for _, u in entries]
+        total = len(urls)
+        if log:
+            self._log(
+                f"▶ 开始检验 {total} 个 SOCKS5 代理"
+                f"（Camoufox 浏览器探测，每项最多 {PROXY_BROWSER_PROBE_TIMEOUT}s，"
+                f"并发 {PROXY_CHECK_MAX_WORKERS}；完成后按速度排序）…")
+
+        def run():
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            done = 0
+            ip_ok = 0
+            http_only = 0
+            checks = {}
+            try:
+                with ThreadPoolExecutor(max_workers=PROXY_CHECK_MAX_WORKERS) as pool:
+                    futures = {pool.submit(self._check_one_socks_proxy, u): u for u in urls}
+                    for fut in as_completed(futures):
+                        url = futures[fut]
+                        try:
+                            result = fut.result()
+                            if len(result) >= 3:
+                                status, detail, ms = result[0], result[1], result[2]
+                            else:
+                                status, detail, ms = result[0], result[1], None
+                        except Exception as e:
+                            status, detail, ms = "✗", str(e)[:28], None
+                        checks[url] = (status, detail, ms)
+                        if status == "✓":
+                            ip_ok += 1
+                        elif status == "○":
+                            http_only += 1
+                        done += 1
+                        if done % 5 == 0 or done == total:
+                            _state["socks_proxy_checks"] = dict(checks)
+
+                            def ui_partial():
+                                self._rebuild_proxy_popups(preserve_selection=True)
+
+                            NSOperationQueue.mainQueue().addOperationWithBlock_(ui_partial)
+            finally:
+                _state["socks_proxy_checks"] = checks
+                _state["socks_proxy_checking"] = False
+
+                def finish():
+                    self._rebuild_proxy_popups(preserve_selection=True)
+                    self._rebuild_fp_profile_popup(preserve_selection=True)
+                    self._set_btn(self.verify_proxy_btn, True, "检验")
+                    if log:
+                        # 汇总最快几条
+                        ranked = []
+                        for u, chk in checks.items():
+                            st, detail, ms = self._unpack_proxy_check(chk)
+                            if st in ("✓", "○") and ms is not None:
+                                ranked.append((ms, st, detail, u))
+                        ranked.sort()
+                        self._log(
+                            f"✅ 代理检验完成：{ip_ok}/{total} 可 IP 核验（✓）；"
+                            f"{http_only}/{total} 仅 HTTP 通（○）；"
+                            f"其余不可用（✗）")
+                        if ranked:
+                            top = ranked[:5]
+                            parts = [
+                                f"{st} {detail} {self._format_proxy_speed(ms)}"
+                                for ms, st, detail, _u in top
+                            ]
+                            self._log("   最快: " + " | ".join(parts))
+
+                NSOperationQueue.mainQueue().addOperationWithBlock_(finish)
+
+        threading.Thread(target=run, daemon=True).start()
 
     @objc.python_method
     def _refresh_socks_proxy_list(self, log=True):
@@ -4542,12 +5519,429 @@ class AppDelegate(NSObject):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def verifyProxyList_(self, sender):
+        entries = _state.get("socks_proxy_entries") or []
+        if not entries:
+            self._log("❌ 请先点「刷新」加载 proxifly 代理列表")
+            return
+        self._set_btn(self.verify_proxy_btn, False, "…")
+        self._verify_all_socks_proxies(log=True)
+
     def proxyListPopupChanged_(self, sender):
         idx = self.cfg_proxy_popup.indexOfSelectedItem()
         urls = _state.get("socks_proxy_urls") or []
         if idx <= 0 or idx - 1 >= len(urls):
             return
         self.cfg_proxy_field.setStringValue_(urls[idx - 1])
+
+    # ── Fingerprint browsers (Camoufox) ──
+
+    @objc.python_method
+    def _fp_app_dir(self):
+        return os.path.dirname(APP_PY_PATH)
+
+    @objc.python_method
+    def _fp_runner(self):
+        import importlib.util
+        path = os.path.join(self._fp_app_dir(), "fpbrowser_runner.py")
+        spec = importlib.util.spec_from_file_location("fpbrowser_runner", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @objc.python_method
+    def _fp_selected_name(self):
+        idx = self.fp_profile_popup.indexOfSelectedItem()
+        if idx <= 0:
+            return None
+        names = _state.get("fp_profile_names") or []
+        if 0 <= idx - 1 < len(names):
+            return names[idx - 1]
+        title = str(self.fp_profile_popup.titleOfSelectedItem() or "").strip()
+        if " · " in title:
+            return title.split(" · ", 1)[0].strip()
+        return title or None
+
+    @objc.python_method
+    def _parse_proxy_host(self, url):
+        import re
+
+        m = re.search(r"://([^:/]+)", url or "")
+        return m.group(1) if m else ""
+
+    @objc.python_method
+    def _fp_profile_ip_for_url(self, proxy_url):
+        if not proxy_url:
+            return None
+        chk = (_state.get("socks_proxy_checks") or {}).get(proxy_url)
+        if chk:
+            status, detail, _ms = self._unpack_proxy_check(chk)
+            if status in ("✓", "○") and detail:
+                # detail 可能是 "1.2.3.4" 或 "1.2.3.4 仅HTTP"
+                import re
+                m = re.search(r"\d{1,3}(?:\.\d{1,3}){3}", str(detail))
+                if m:
+                    return m.group(0)
+                return str(detail).split()[0]
+        cached = (_state.get("fp_profile_ip_cache") or {}).get(proxy_url)
+        if cached:
+            return str(cached)
+        host = self._parse_proxy_host(proxy_url)
+        return host or None
+
+    @objc.python_method
+    def _fp_profile_menu_label(self, name, proxy_url):
+        ip = self._fp_profile_ip_for_url(proxy_url)
+        if ip:
+            label = f"{name} · {ip}"
+        else:
+            label = name
+        chk = (_state.get("socks_proxy_checks") or {}).get(proxy_url or "")
+        _st, _d, ms = self._unpack_proxy_check(chk)
+        speed = self._format_proxy_speed(ms)
+        if speed:
+            label = f"{label} · {speed}"
+        if len(label) > 48:
+            label = label[:45] + "..."
+        return label
+
+    @objc.python_method
+    def _fp_update_profile_status(self, name, proxy_url):
+        if not name:
+            self.fp_status.setStringValue_("请选择身份")
+            return
+        ip = self._fp_profile_ip_for_url(proxy_url)
+        chk = (_state.get("socks_proxy_checks") or {}).get(proxy_url or "")
+        status, _detail, ms = self._unpack_proxy_check(chk)
+        speed = self._format_proxy_speed(ms)
+        speed_s = f" · {speed}" if speed else ""
+        if not ip:
+            self.fp_status.setStringValue_(f"{name} · 查询 IP…")
+            return
+        if status == "✓":
+            self.fp_status.setStringValue_(f"{name} · 出口 IP {ip}（HTTPS ✓）{speed_s}")
+        elif status == "○":
+            self.fp_status.setStringValue_(f"{name} · 出口 IP {ip}（仅 HTTP）{speed_s}")
+        else:
+            self.fp_status.setStringValue_(f"{name} · IP {ip}{speed_s}")
+
+    @objc.python_method
+    def _rebuild_fp_profile_popup(self, preserve_selection=True):
+        profiles = []
+        try:
+            sys.path.insert(0, self._fp_app_dir())
+            from fpbrowser.config import load_config
+            profiles = load_config().profiles
+        except Exception as e:
+            self._log(f"⚠ 读取指纹浏览器身份失败: {e}")
+
+        sel_name = self._fp_selected_name() if preserve_selection else None
+        popup = self.fp_profile_popup
+        popup.removeAllItems()
+        popup.addItemWithTitle_("— 选择身份 —")
+        names_list = []
+        proxies = {}
+        for p in profiles:
+            url = (p.proxy.server if p.proxy else "").strip()
+            proxies[p.name] = url
+            popup.addItemWithTitle_(self._fp_profile_menu_label(p.name, url))
+            names_list.append(p.name)
+        _state["fp_profile_names"] = names_list
+        _state["fp_profile_proxies"] = proxies
+        if sel_name and sel_name in names_list:
+            popup.selectItemAtIndex_(names_list.index(sel_name) + 1)
+        elif not names_list:
+            self.fp_status.setStringValue_("尚无身份")
+        elif preserve_selection and sel_name:
+            self._fp_update_profile_status(
+                sel_name, proxies.get(sel_name, ""))
+
+    @objc.python_method
+    def _fp_fetch_ip_for_profile(self, name, proxy_url):
+        if not proxy_url:
+            return
+        chk = (_state.get("socks_proxy_checks") or {}).get(proxy_url)
+        if chk and chk[0] in ("✓", "○") and chk[1]:
+            return
+        ok, body, err = self._proxy_check_curl(proxy_url, PROXY_CHECK_HTTP_URL)
+        cache = _state.setdefault("fp_profile_ip_cache", {})
+        if ok:
+            ip = self._proxy_check_parse_ip(body)
+            if ip:
+                cache[proxy_url] = ip
+        elif proxy_url not in cache:
+            host = self._parse_proxy_host(proxy_url)
+            if host:
+                cache[proxy_url] = host
+
+        def ui():
+            if self._fp_selected_name() == name:
+                self._fp_update_profile_status(name, proxy_url)
+            self._rebuild_fp_profile_popup(preserve_selection=True)
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(ui)
+
+    def fpProfilePopupChanged_(self, sender):
+        name = self._fp_selected_name()
+        if not name:
+            self.fp_status.setStringValue_("请选择身份")
+            return
+        proxy_url = (_state.get("fp_profile_proxies") or {}).get(name, "")
+        self.fp_proxy_field.setStringValue_(proxy_url)
+        self._fp_update_profile_status(name, proxy_url)
+        threading.Thread(
+            target=self._fp_fetch_ip_for_profile, args=(name, proxy_url), daemon=True
+        ).start()
+
+    @objc.python_method
+    def _fp_selected_engine(self):
+        title = str(self.fp_engine_popup.titleOfSelectedItem() or "Camoufox").strip().lower()
+        return "camoufox" if title == "camoufox" else "chrome"
+
+    @objc.python_method
+    def _fp_runner_ready(self, runner, engine):
+        if engine == "chrome":
+            return runner.is_chrome_ready()
+        return runner.is_ready()
+
+    @objc.python_method
+    def _fp_runner_ready_hint(self, engine):
+        if engine == "chrome":
+            return "❌ 未找到 Google Chrome，请先安装 Chrome"
+        return "❌ 请先点「安装依赖」下载 Camoufox"
+
+    @objc.python_method
+    def _refresh_fp_profile_popup(self):
+        self._rebuild_fp_profile_popup(preserve_selection=False)
+        names = _state.get("fp_profile_names") or []
+        if names:
+            self.fp_status.setStringValue_(f"{len(names)} 个身份")
+        else:
+            self.fp_status.setStringValue_("尚无身份")
+
+    def refreshFpProfiles_(self, sender):
+        self._refresh_fp_profile_popup()
+        self._log("✅ 已刷新指纹浏览器身份列表")
+
+    @objc.python_method
+    def _apply_fp_proxy_popup_entries(self, entries):
+        self._store_proxy_entries(entries)
+        self._rebuild_proxy_popups(preserve_selection=False)
+
+    @objc.python_method
+    def _refresh_fp_proxy_list(self, log=True):
+        entries, err = self._fetch_proxifly_us_proxies()
+
+        def finish():
+            if err:
+                if log:
+                    self._log(f"❌ 指纹浏览器代理列表失败: {err}")
+                return
+            self._apply_fp_proxy_popup_entries(entries)
+            if log:
+                self._log(f"✅ 指纹浏览器已加载 {len(entries)} 个 US socks5 代理")
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(finish)
+
+    def refreshFpProxyList_(self, sender):
+        threading.Thread(
+            target=self._refresh_fp_proxy_list, kwargs={"log": True}, daemon=True).start()
+
+    def fpProxyPopupChanged_(self, sender):
+        idx = self.fp_proxy_popup.indexOfSelectedItem()
+        urls = _state.get("fp_proxy_urls") or []
+        if idx <= 0 or idx - 1 >= len(urls):
+            return
+        self.fp_proxy_field.setStringValue_(urls[idx - 1])
+
+    def installFpDeps_(self, sender):
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+        _state["is_running"] = True
+        self._set_btn(self.fp_install_btn, False, "安装中…")
+        self.fp_status.setStringValue_("安装 Camoufox…")
+
+        def run():
+            try:
+                runner = self._fp_runner()
+                ok = runner.install(log_fn=self._log)
+                if ok:
+                    self._log("✅ Camoufox 依赖安装完成，可添加身份并打开浏览器")
+                    NSOperationQueue.mainQueue().addOperationWithBlock_(
+                        lambda: self.fp_status.setStringValue_("依赖已就绪"))
+                else:
+                    self._log("❌ Camoufox 依赖安装失败，请查看上方日志")
+                    NSOperationQueue.mainQueue().addOperationWithBlock_(
+                        lambda: self.fp_status.setStringValue_("安装失败"))
+            finally:
+                _state["is_running"] = False
+                NSOperationQueue.mainQueue().addOperationWithBlock_(
+                    lambda: self._set_btn(self.fp_install_btn, True, "安装依赖"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def addFpProfile_(self, sender):
+        name = str(self.fp_name_field.stringValue()).strip()
+        proxy = str(self.fp_proxy_field.stringValue()).strip()
+        if not name:
+            self._log("❌ 请填写身份名称"); return
+        if not proxy:
+            self._log("❌ 请填写该身份的 SOCKS5 代理"); return
+        os_name = str(self.fp_os_popup.titleOfSelectedItem() or "macos").strip()
+        locale = str(self.fp_locale_field.stringValue()).strip() or "en-US"
+        try:
+            sys.path.insert(0, self._fp_app_dir())
+            from fpbrowser.config import Profile, Proxy, load_config, save_config
+            cfg = load_config()
+            if name in cfg.names():
+                self._log(f"❌ 已存在同名身份: {name}"); return
+            p = Profile(name=name, os=os_name, locale=locale, proxy=Proxy(server=proxy))
+            p.validate()
+            cfg.profiles.append(p)
+            save_config(cfg)
+            self._log(f"✅ 已添加指纹浏览器身份: {name}（{os_name} / {proxy}）")
+            self._refresh_fp_profile_popup()
+            for i, t in enumerate(cfg.names()):
+                if t == name:
+                    self.fp_profile_popup.selectItemAtIndex_(i + 1)
+                    break
+        except Exception as e:
+            self._log(f"❌ 添加身份失败: {e}")
+
+    def updateFpProxy_(self, sender):
+        name = self._fp_selected_name()
+        if not name:
+            self._log("❌ 请先在「身份」下拉中选择要换 IP 的身份"); return
+        proxy = str(self.fp_proxy_field.stringValue()).strip()
+        if not proxy:
+            self._log("❌ 请填写或从代理下拉选择新的 SOCKS5 地址"); return
+        old_url = (_state.get("fp_profile_proxies") or {}).get(name, "")
+        try:
+            sys.path.insert(0, self._fp_app_dir())
+            from fpbrowser.config import Profile, Proxy, load_config, save_config
+            cfg = load_config()
+            profile = cfg.get(name)
+            new_proxy = Proxy(server=proxy).normalized()
+            old_display = profile.proxy.server if profile.proxy else "（无）"
+            profile.proxy = new_proxy
+            save_config(cfg)
+            cache = _state.setdefault("fp_profile_ip_cache", {})
+            if old_url:
+                cache.pop(old_url, None)
+            cache.pop(new_proxy.server, None)
+            _state.setdefault("fp_profile_proxies", {})[name] = new_proxy.server
+            self._log(f"✅ 已更换 {name} 的出口 IP 代理")
+            self._log(f"   旧: {old_display}")
+            self._log(f"   新: {new_proxy.server}")
+            self._log("   指纹未改动（同一身份指纹保持不变）")
+            self._rebuild_fp_profile_popup(preserve_selection=True)
+            self._fp_update_profile_status(name, new_proxy.server)
+            threading.Thread(
+                target=self._fp_fetch_ip_for_profile,
+                args=(name, new_proxy.server),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            self._log(f"❌ 更换代理失败: {e}")
+
+    def stopFpSession_(self, sender):
+        proc = _state.get("fp_proc")
+        if proc and proc.poll() is None:
+            self._log("▶ 手动结束指纹浏览器会话…")
+            _state["fp_stop_requested"] = True
+            self._kill_fp_proc(proc)
+        _state["fp_proc"] = None
+        _state["is_running"] = False
+        self._reset_fp_launch_ui()
+
+    def launchFpBrowser_(self, sender):
+        name = self._fp_selected_name()
+        if not name:
+            self._log("❌ 请先选择或添加一个身份"); return
+        engine = self._fp_selected_engine()
+        runner = self._fp_runner()
+        if not self._fp_runner_ready(runner, engine):
+            self._log(self._fp_runner_ready_hint(engine)); return
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+        _state["is_running"] = True
+        _state["fp_stop_requested"] = False
+        self._set_btn(self.fp_launch_btn, False, "启动中…")
+        self.fp_status.setStringValue_(f"启动 {name}…")
+        cli_args = ["launch", name, "--engine", engine]
+
+        def run():
+            proc = None
+            try:
+                label = "Chrome" if engine == "chrome" else "Camoufox"
+                self._log(f"▶ 打开 {label}: {name}")
+                proc = runner.start_cli(cli_args, silent=True)
+                _state["fp_proc"] = proc
+                threading.Thread(
+                    target=self._watch_fp_launch_proc, args=(proc, name), daemon=True
+                ).start()
+                rc, err_text = runner.wait_cli_silent(proc)
+                stopped = bool(_state.get("fp_stop_requested"))
+                # SIGTERM(-15) / SIGKILL(-9)：用户点「结束会话」或关窗后的正常清理
+                if rc == 0 or stopped or rc in (-15, -9, 15, 9, 143, 137):
+                    self._log(f"✅ {name} 会话已结束（AB 包工厂仍在运行）")
+                else:
+                    self._log(f"❌ 浏览器进程异常退出 (exit {rc})")
+                    self._log_fp_stderr(err_text)
+            except Exception as e:
+                self._log(f"❌ 打开浏览器失败: {e}")
+            finally:
+                _state["fp_proc"] = None
+                _state["fp_stop_requested"] = False
+                _state["is_running"] = False
+                self._schedule_on_main(self._reset_fp_launch_ui)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def verifyFpBrowser_(self, sender):
+        name = self._fp_selected_name()
+        if not name:
+            self._log("❌ 请先选择身份"); return
+        engine = self._fp_selected_engine()
+        runner = self._fp_runner()
+        if not self._fp_runner_ready(runner, engine):
+            self._log(self._fp_runner_ready_hint(engine)); return
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+        _state["is_running"] = True
+        self._set_btn(self.fp_verify_btn, False, "核验中…")
+
+        def run():
+            try:
+                self._log(f"▶ 核验 {name}（{engine}）的出口 IP…")
+                rc = runner.run_cli(["verify", name, "--engine", engine], log_fn=self._log)
+                if rc != 0:
+                    self._log(f"❌ 核验失败 (exit {rc})")
+                else:
+                    self._log("✅ 核验完成（若 HTTPS 失败会标注 HTTP 回落）")
+            finally:
+                _state["is_running"] = False
+                self._schedule_on_main(self._reset_fp_verify_ui)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def regenFpFingerprint_(self, sender):
+        name = self._fp_selected_name()
+        if not name:
+            self._log("❌ 请先选择身份"); return
+        if self._fp_selected_engine() == "chrome":
+            self._log("ℹ Chrome 使用系统浏览器环境，「换新指纹」仅对 Camoufox 有效")
+            return
+        runner = self._fp_runner()
+        if not runner.is_ready():
+            self._log("❌ 请先点「安装依赖」"); return
+
+        def run():
+            rc = runner.run_cli(["regen", name], log_fn=self._log)
+            if rc == 0:
+                self._log(f"✅ 已为 {name} 重新生成指纹")
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── Step 1: Create project ──
 
@@ -4590,13 +5984,6 @@ class AppDelegate(NSObject):
             self._log("❌ 无法读取本机系统英语词典（已尝试 /usr/share/dict/words、web2、web2a）")
             return
         self.bundle_id_field.setStringValue_(bid)
-
-    def randomBundleIdCfg_(self, sender):
-        bid = generate_random_bundle_id()
-        if not bid:
-            self._log("❌ 无法读取本机系统英语词典（已尝试 /usr/share/dict/words、web2、web2a）")
-            return
-        self.cfg_bundle_field.setStringValue_(bid)
 
     # ── Step 2: Sync secondary ──
 
@@ -5653,12 +7040,21 @@ class AppDelegate(NSObject):
             self._log(f"  [{tag}] 未发现「{src}」（已扫描 {res['scanned']} 个文本文件）")
             return
         arrow = f" → 「{dst}」" if dst else ""
+        extra = ""
+        if res.get("protocol_urls"):
+            extra += f" · 协议 URL 本地化 {res['protocol_urls']} 处"
+        if res.get("webview_paths"):
+            extra += f" · WebView 路径修正 {res['webview_paths']} 个文件"
         self._log(
             f"  [{tag}] 命中 {res['files_changed']} 个文件 · "
-            f"charcode 编码块 {res['cc_blocks']} · 明文 {res['plain_count']} 处{arrow}"
+            f"charcode 编码块 {res['cc_blocks']} · 明文 {res['plain_count']} 处{arrow}{extra}"
         )
-        for rel, cc, plain in res["details"][:60]:
-            self._log(f"     {rel}  (charcode {cc} / 明文 {plain})")
+        for item in res["details"][:60]:
+            rel = item[0]
+            cc, plain = item[1], item[2]
+            urls = item[3] if len(item) > 3 else 0
+            url_note = f" / 协议URL {urls}" if urls else ""
+            self._log(f"     {rel}  (charcode {cc} / 明文 {plain}{url_note})")
         if len(res["details"]) > 60:
             self._log(f"     … 其余 {len(res['details']) - 60} 个文件略")
         if dry_run:
@@ -6184,6 +7580,17 @@ class AppDelegate(NSObject):
         if not silent_str.isdigit():
             self._log("❌ 静默期天数必须是非负整数"); return
 
+        # 打包前：把 build_config.json 的 Bundle ID / 描述文件写入 Xcode 工程，
+        # 避免还要手动打开 Xcode 填 Signing & Capabilities。
+        self._log("写入 Xcode 签名配置（Bundle ID / mobileprovision）…")
+        ok_sign, sign_logs = _apply_build_config_signing(project, workdir)
+        for line in sign_logs:
+            self._log(f"  {line}")
+        if not ok_sign:
+            self._log("❌ 签名配置写入失败，已中止打包")
+            self._set_status(self.step5_status, "❌ 签名写入失败", success=False)
+            return
+
         self._save_b_side_prefs()
         _state["is_running"] = True
         self._set_btn(self.build_ipa_btn, False, "打包中…")
@@ -6297,10 +7704,21 @@ class AppDelegate(NSObject):
             self._set_btn(btn, True, btn_title)
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, app):
-        return True
+        # 关闭指纹浏览器/Camoufox 窗口不应连带退出工厂主界面
+        return False
 
     @objc.python_method
     def _terminate_child_processes(self):
+        proc = _state.get("fp_proc")
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            _state["fp_proc"] = None
         proc = _state.get("flutter_proc")
         if proc:
             try:

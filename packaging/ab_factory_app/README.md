@@ -18,6 +18,37 @@ packaging/ab_factory_app/app.py
 AB包工厂.app/Contents/Resources/app.py
 ```
 
+## 运行项目 · 高级侧栏（v6.10+）
+
+「运行项目」区主界面保留：项目路径、设备、运行/停止/热更新等常用操作。
+
+以下功能收进右侧滑出栏，点 **「高级」** 展开，再点 **「收起」** 或侧栏内 **「收起」** 关闭：
+
+- 运行模式（Debug / Release）
+- 修复模型（Cursor Agent 模型选择）
+- **截屏修Bug** / **一键修Bug**
+- 自动探查（模拟器巡检）
+- 多图说明 / 截一张 / 多图提交修 Bug
+- **修正导入** / **还原**（pubspec 与混淆 import 修复，使用步骤 2 目标工程路径）
+
+## 指纹浏览器 · 防跟踪隔离（v6.9+）
+
+步骤区新增 **「指纹浏览器 · 防跟踪隔离」**（基于 Camoufox）：
+
+- 每个**身份**绑定独立 SOCKS5 代理 + 固化浏览器指纹，互不关联
+- **添加身份**：名称 + 系统伪装（macOS/Windows/Linux）+ 语言 + 代理
+- **打开浏览器**：手动操作窗口，关闭即结束会话；cookies 持久化
+- **核验 IP/指纹**：无头检查出口 IP、时区、UA、屏幕等是否符合预期
+- **换新指纹**：为当前身份重新生成一套指纹
+- **安装依赖**（首次）：在 `~/Library/Application Support/ABFactory/camoufox-venv` 创建专用 venv 并下载 Camoufox（约 300MB）
+
+数据目录：`~/Library/Application Support/ABFactory/fingerprint-browsers/`
+
+实现文件：
+
+- `packaging/ab_factory_app/fpbrowser/` — 指纹/代理/启动逻辑
+- `packaging/ab_factory_app/fpbrowser_runner.py` — venv 与子进程封装
+
 ## 一键混淆（v6.8+）
 
 对应脚本 `scripts/full_obfuscate.sh`（sync → obfuscate_code --all → obfuscate_frameworks run），拆成两个按钮：

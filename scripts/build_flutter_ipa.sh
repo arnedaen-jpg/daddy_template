@@ -232,16 +232,61 @@ PYEOF
     fi
     
     # 5. 更新 Provisioning Profile Specifier (仅手动签名时)
+    # 注意：Xcode Manual 签名常同时存在
+    #   PROVISIONING_PROFILE_SPECIFIER = "";
+    #   "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "旧名";
+    # 后者才是真机打包真正生效的键，必须一并更新。
     if [[ "$signing_style" == "manual" && -n "$profile_specifier" ]]; then
         echo "  - Profile Specifier: $profile_specifier"
-        # 如果存在则替换，否则添加
-        if grep -q "PROVISIONING_PROFILE_SPECIFIER" "$project_file"; then
-            sed -i '' "s/PROVISIONING_PROFILE_SPECIFIER = [^;]*;/PROVISIONING_PROFILE_SPECIFIER = \"$profile_specifier\";/g" "$project_file"
-        else
-            # 在每个 DEVELOPMENT_TEAM 后添加 PROVISIONING_PROFILE_SPECIFIER
-            sed -i '' "s/DEVELOPMENT_TEAM = $team_id;/DEVELOPMENT_TEAM = $team_id;\\
-				PROVISIONING_PROFILE_SPECIFIER = \"$profile_specifier\";/g" "$project_file"
-        fi
+        python3 - "$project_file" "$profile_specifier" "$team_id" <<'PYEOF'
+import re
+import sys
+
+filepath, specifier, team_id = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+
+# 普通键
+if re.search(r"(?<!\")PROVISIONING_PROFILE_SPECIFIER\s*=", content):
+    content = re.sub(
+        r'(?<!")PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]*;',
+        f'PROVISIONING_PROFILE_SPECIFIER = "{specifier}";',
+        content,
+    )
+else:
+    content = re.sub(
+        rf"(DEVELOPMENT_TEAM\s*=\s*{re.escape(team_id)}\s*;)",
+        rf'\1\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{specifier}";',
+        content,
+    )
+
+# sdk 后缀键（真机生效）
+sdk_key = '"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]"'
+if sdk_key in content or "PROVISIONING_PROFILE_SPECIFIER[sdk=" in content:
+    content = re.sub(
+        r'"PROVISIONING_PROFILE_SPECIFIER\[[^\]]+\]"\s*=\s*[^;]*;',
+        f'{sdk_key} = "{specifier}";',
+        content,
+    )
+else:
+    content = re.sub(
+        r'(PROVISIONING_PROFILE_SPECIFIER\s*=\s*"[^"]*"\s*;)',
+        rf'\1\n\t\t\t\t{sdk_key} = "{specifier}";',
+        content,
+        count=6,
+    )
+
+# Team 的 sdk 后缀键一并同步
+if team_id:
+    content = re.sub(
+        r'"DEVELOPMENT_TEAM\[[^\]]+\]"\s*=\s*[^;]*;',
+        f'"DEVELOPMENT_TEAM[sdk=iphoneos*]" = {team_id};',
+        content,
+    )
+
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
     fi
     
     echo "  ✅ 签名配置已更新"
