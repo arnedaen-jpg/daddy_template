@@ -132,6 +132,7 @@ else
     warn "未提供 --profile：输出为未签名 IPA，需自行 resign 后才能安装"
     bash "$SCRIPT_DIR/obfuscate_ipa.sh" --ipa "$IPA_IN" --out "$IPA_OUT" --seed "$SEED" \
         $([[ "$DO_RESOURCES" == "true" ]] && echo --resources) \
+        $([[ "${ZT_RENAME_FW:-1}" != "0" ]] && echo --rename-frameworks) \
         $([[ "$DO_MACHO" == "true" ]] && echo --macho)
 fi
 

@@ -36,6 +36,9 @@ IPA_OUT=""
 SEED=""
 DO_RESOURCES=false
 DO_MACHO=false
+DO_RENAME_FW=false
+# 需要中和的 vendored framework 指纹（按 CFBundleIdentifier 匹配，忽略大小写）
+FW_FINGERPRINT="${ZT_FW_FINGERPRINT:-rongcloud|umeng|tencent|mob\.com|bugly|jpush|getui|aliyun}"
 DRY_RUN=false
 MACHO_MIN_LEN=5
 METHODS_ALLOWLIST=""
@@ -51,6 +54,8 @@ while [[ $# -gt 0 ]]; do
         --seed) SEED="$2"; shift 2 ;;
         --resources) DO_RESOURCES=true; _explicit_mode=true; shift ;;
         --macho) DO_MACHO=true; _explicit_mode=true; shift ;;
+        --rename-frameworks) DO_RENAME_FW=true; _explicit_mode=true; shift ;;
+        --fw-fingerprint) FW_FINGERPRINT="$2"; shift 2 ;;
         --min-len) MACHO_MIN_LEN="$2"; shift 2 ;;
         --methods-allowlist) METHODS_ALLOWLIST="$2"; shift 2 ;;
         --protect-file) PROTECT_FILE="$2"; shift 2 ;;
@@ -93,7 +98,7 @@ differentiate_resources() {
         [[ -z "$f" ]] && continue
         # 跳过 Assets.car（编译后的资源目录，追加字节可能损坏），只处理散图
         local marker
-        marker="$(_seed_hex "${SEED}_$(basename "$f")_$img_count")"
+        marker="$(_seed_hex "${SEED}_$(basename "$f")_${img_count}")"
         if [[ "$DRY_RUN" == "true" ]]; then
             img_count=$((img_count + 1))
         else
@@ -119,7 +124,7 @@ differentiate_resources() {
         fi
     done
 
-    ok "资源差异化完成: 图片改指纹 $img_count，注入惰性文件 $bundle_touch"
+    ok "资源差异化完成: 图片改指纹 ${img_count}，注入惰性文件 $bundle_touch"
 }
 
 # ---- Mach-O 符号混淆：主可执行文件 + Frameworks ---- 
@@ -164,12 +169,102 @@ obfuscate_macho() {
     ok "Mach-O 处理二进制数: $n（改写后必须重签名）"
 }
 
+# 生成与旧名【等长】的中性 framework 名（确定性、可复现，首字母，仅 [A-Za-z0-9]）。
+# 等长很关键：install_name_tool 改写 @rpath 路径时，同长不需要额外 header padding，
+# 对闭源预编译 framework 也稳。
+_neutral_fw_name() {
+    local old="$1" len="${#1}"
+    local h; h="$(_seed_hex "${SEED}::fw::$old")"
+    printf '%s' "K${h}" | cut -c1-"$len"
+}
+
+# 折中方案：只重命名 vendored 闭源 framework 的【目录名 + 二进制名 + install_name +
+# LC_LOAD_DYLIB 引用 + CFBundleIdentifier/Executable】，绝不改内部符号。
+# 目的：抹掉 IPA 里一眼可辨的 SDK 指纹（如 RongIMLibCore.framework / cn.rongcloud.im），
+# 同时保持 dyld 加载图与运行时行为不变。
+rename_vendored_frameworks() {
+    local app="$1"
+    local fw_dir="$app/Frameworks"
+    [[ -d "$fw_dir" ]] || { warn "无 Frameworks 目录，跳过 framework 重命名"; return 0; }
+
+    local int_tool="/usr/bin/install_name_tool"
+    local pb="/usr/libexec/PlistBuddy"
+    [[ -x "$int_tool" ]] || { err "缺少 install_name_tool"; return 1; }
+
+    # ---- Pass 1: 按 bundle-id 指纹挑出目标，建立 旧名→新名 映射 ----
+    local -a OLDS=() NEWS=()
+    local d name plist bid
+    for d in "$fw_dir"/*.framework; do
+        [[ -d "$d" ]] || continue
+        name="$(basename "$d" .framework)"
+        plist="$d/Info.plist"
+        [[ -f "$plist" ]] || continue
+        bid="$($pb -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null || true)"
+        # 指纹匹配 bundle-id 或 framework 名本身
+        if printf '%s\n%s' "$bid" "$name" | grep -qiE "$FW_FINGERPRINT"; then
+            OLDS+=("$name")
+            NEWS+=("$(_neutral_fw_name "$name")")
+        fi
+    done
+
+    if [[ ${#OLDS[@]} -eq 0 ]]; then
+        log "未发现匹配指纹（$FW_FINGERPRINT）的 vendored framework，跳过"
+        return 0
+    fi
+
+    log "framework 重命名目标 ${#OLDS[@]} 个:"
+    local i
+    for i in "${!OLDS[@]}"; do log "    ${OLDS[$i]}  →  ${NEWS[$i]}"; done
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY-RUN] 仅预览，不改动"
+        return 0
+    fi
+
+    # ---- Pass 2: 物理重命名 + 改 install_name(-id) + 改 Info.plist ----
+    for i in "${!OLDS[@]}"; do
+        local old="${OLDS[$i]}" new="${NEWS[$i]}"
+        local od="$fw_dir/$old.framework" nd="$fw_dir/$new.framework"
+        [[ -d "$od" ]] || { warn "  $old.framework 不存在，跳过"; continue; }
+        # 二进制改名（先在旧目录里改，再改目录名）
+        [[ -f "$od/$old" ]] && mv "$od/$old" "$od/$new"
+        mv "$od" "$nd"
+        # install_name 自指
+        $int_tool -id "@rpath/$new.framework/$new" "$nd/$new" 2>/dev/null \
+            || warn "  -id 改写失败: $new"
+        # Info.plist：可执行名 + bundle id 中性化
+        $pb -c "Set :CFBundleExecutable $new" "$nd/Info.plist" 2>/dev/null || true
+        local newbid="com.$(printf '%s' "${SEED_HEX:0:8}").$new"
+        $pb -c "Set :CFBundleIdentifier $newbid" "$nd/Info.plist" 2>/dev/null || true
+        $pb -c "Set :CFBundleName $new" "$nd/Info.plist" 2>/dev/null || true
+    done
+
+    # ---- Pass 3: 全 app 的 Mach-O 改写 LC_LOAD_DYLIB 交叉引用 ----
+    # （主可执行 + 所有 framework 二进制 + dylib，凡是引用了旧 @rpath 路径都要改）
+    local bin patched=0
+    while IFS= read -r bin; do
+        [[ -z "$bin" ]] && continue
+        local changed=false
+        for i in "${!OLDS[@]}"; do
+            local old="${OLDS[$i]}" new="${NEWS[$i]}"
+            if otool -L "$bin" 2>/dev/null | grep -q "@rpath/$old.framework/$old"; then
+                $int_tool -change "@rpath/$old.framework/$old" "@rpath/$new.framework/$new" "$bin" 2>/dev/null \
+                    && changed=true || warn "  -change 失败于 $(basename "$bin"): $old"
+            fi
+        done
+        [[ "$changed" == "true" ]] && patched=$((patched + 1))
+    done < <(list_macho_binaries "$app")
+
+    ok "framework 重命名完成：${#OLDS[@]} 个 framework，改写 $patched 个二进制的依赖引用（须重签名）"
+}
+
 process_app() {
     local app="$1"
     [[ -d "$app" ]] || { err "不是有效的 .app 目录: $app"; exit 1; }
-    log "seed=$SEED (hex ${SEED_HEX:0:12})  resources=$DO_RESOURCES  macho=$DO_MACHO  dry_run=$DRY_RUN"
-    [[ "$DO_RESOURCES" == "true" ]] && differentiate_resources "$app"
-    [[ "$DO_MACHO" == "true" ]] && obfuscate_macho "$app"
+    log "seed=$SEED (hex ${SEED_HEX:0:12})  resources=$DO_RESOURCES  macho=$DO_MACHO  rename_fw=$DO_RENAME_FW  dry_run=$DRY_RUN"
+    if [[ "$DO_RESOURCES" == "true" ]]; then differentiate_resources "$app"; fi
+    # framework 重命名须在 macho 符号混淆【之前】：先稳定加载图，再做符号级改写。
+    if [[ "$DO_RENAME_FW" == "true" ]]; then rename_vendored_frameworks "$app"; fi
+    if [[ "$DO_MACHO" == "true" ]]; then obfuscate_macho "$app"; fi
 }
 
 # ---- 主流程 ----

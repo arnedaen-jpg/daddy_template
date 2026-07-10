@@ -31,11 +31,16 @@ harden_app_bundle() {
     local do_resources="${3:-true}"
     local do_macho="${4:-false}"
     local script_dir="${5:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    # vendored 闭源 framework 目录名/bundleid 中和（折中方案，默认开；ZT_RENAME_FW=0 可关）
+    local do_rename_fw="${6:-true}"
+    [[ "${ZT_RENAME_FW:-}" == "0" ]] && do_rename_fw=false
+    [[ "${ZT_RENAME_FW:-}" == "1" ]] && do_rename_fw=true
     local obf="$script_dir/obfuscate_ipa.sh"
     [[ -d "$app_dir" ]] || return 1
     [[ -f "$obf" ]] || { echo "[ipa-harden] 未找到 $obf" >&2; return 1; }
     local args=(--app "$app_dir" --seed "$seed")
     [[ "$do_resources" == "true" ]] && args+=(--resources)
+    [[ "$do_rename_fw" == "true" ]] && args+=(--rename-frameworks)
     [[ "$do_macho" == "true" ]] && args+=(--macho)
     bash "$obf" "${args[@]}"
 }
