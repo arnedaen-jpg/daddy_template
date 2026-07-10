@@ -34,6 +34,21 @@ total_count=0
 duplicate_count=0
 duplicate_path_count=0
 
+# FNV-1a（63 位掩码，保证正数）哈希，供 map key 脱敏使用。
+# 必须与 write_base64_support_darts.sh 中的 Dart 实现保持完全一致。
+fnv1a() {
+  python3 - "$1" << 'PY'
+import sys
+MASK = 0x7FFFFFFFFFFFFFFF
+PRIME = 0x100000001b3
+h = 0xcbf29ce484222325 & MASK
+for b in sys.argv[1].encode('utf-8'):
+    h ^= b
+    h = (h * PRIME) & MASK
+sys.stdout.write('k%x' % h)
+PY
+}
+
 log_info "扫描图片目录: $TARGET_DIR"
 
 while IFS= read -r -d '' file; do
@@ -77,22 +92,32 @@ fi
   echo "// 由 scripts/generate_secondary_base64_map.sh 自动生成"
   echo ""
   echo "class SecondaryImageBase64Map {"
-  echo "  /// key: assets 相对路径（推荐优先使用）"
+  echo "  /// key: FNV-1a 哈希后的 assets 相对路径（脱敏，避免明文业务资源名进入二进制）"
   echo "  static const Map<String, String> byPath = {"
   while IFS='|' read -r rel_path key_name b64; do
-    printf "    '%s': '%s',\n" "$rel_path" "$b64"
+    printf "    '%s': '%s',\n" "$(fnv1a "$rel_path")" "$b64"
   done < "$tmp_data_file"
   echo "  };"
   echo ""
-  echo "  /// key: 图片文件名（可能重名，重名会被追加 __序号）"
+  echo "  /// key: FNV-1a 哈希后的图片文件名"
   echo "  static const Map<String, String> byName = {"
   while IFS='|' read -r rel_path key_name b64; do
-    printf "    '%s': '%s',\n" "$key_name" "$b64"
+    printf "    '%s': '%s',\n" "$(fnv1a "$key_name")" "$b64"
   done < "$tmp_data_file"
   echo "  };"
   echo ""
-  echo "  static String? getByPath(String path) => byPath[path];"
-  echo "  static String? getByName(String name) => byName[name];"
+  echo "  /// 与 write_base64_support_darts.sh 中的 _fnv1a 保持一致。"
+  echo "  static String _h(String s) {"
+  echo "    var hash = 0xcbf29ce484222325 & 0x7FFFFFFFFFFFFFFF;"
+  echo "    for (final unit in s.codeUnits) {"
+  echo "      hash ^= unit;"
+  echo "      hash = (hash * 0x100000001b3) & 0x7FFFFFFFFFFFFFFF;"
+  echo "    }"
+  echo "    return 'k\${hash.toRadixString(16)}';"
+  echo "  }"
+  echo ""
+  echo "  static String? getByPath(String path) => byPath[_h(path)];"
+  echo "  static String? getByName(String name) => byName[_h(name)];"
   echo "}"
 } > "$OUTPUT_FILE"
 

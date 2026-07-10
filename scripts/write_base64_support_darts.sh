@@ -37,6 +37,7 @@ String? _resolveSecondaryImageBase64(String path) {
   final newPath = _normalizeSecondaryImagePath(path);
   return _secondaryImageBase64Cache.putIfAbsent(newPath, () {
     final name = newPath.split('/').isNotEmpty ? newPath.split('/').last : newPath;
+    // 映射表的 key 已按 FNV-1a 脱敏，查表由 getByPath/getByName 内部完成哈希。
     return SecondaryImageBase64Map.getByPath(newPath) ??
         SecondaryImageBase64Map.getByName(newPath) ??
         SecondaryImageBase64Map.getByName(name);

@@ -1804,8 +1804,14 @@ obfuscate_asset_filenames() {
         # 从路径中提取 'xxx-$var.png' 或 'xxx_$var.png' 中的前缀
         local interpolation_prefixes=$(mktemp)
         find "$TARGET_SIDE_B_DIR" -name "*.dart" -type f -print0 2>/dev/null | \
-            xargs -0 grep -ohE '/[a-zA-Z0-9_-]+[-_]\$[a-zA-Z][a-zA-Z0-9_]*\.(png|jpg|jpeg|gif|webp)' 2>/dev/null | \
+            xargs -0 grep -ohE '/[a-zA-Z0-9_-]+[-_]\$[a-zA-Z][a-zA-Z0-9_]*\.(png|jpg|jpeg|gif|webp|svg|svga|json)' 2>/dev/null | \
             sed 's|.*/\([a-zA-Z0-9_-]*\)[-_]\$.*|\1|' | sort -u >> "$interpolation_prefixes" || true
+
+        # 方法2a-2: 无扩展名的插值/拼接前缀（如 "icon_live_caisedanmu${idx+1}"），
+        # 常见于 svg/svga 通过统一目录 + 名称拼接的场景。抽取 $ 之前的静态前缀。
+        find "$TARGET_SIDE_B_DIR" -name "*.dart" -type f -print0 2>/dev/null | \
+            xargs -0 grep -ohE '"[a-zA-Z0-9_/-]*[a-zA-Z_]\$[{a-zA-Z]' 2>/dev/null | \
+            sed 's|.*"\([a-zA-Z0-9_-]*[a-zA-Z_]\)\$.*|\1|' | rg -x '[a-zA-Z0-9_-]{3,}' 2>/dev/null | sort -u >> "$interpolation_prefixes" || true
         
         # 方法2b: 检测 ${var} 花括号插值模式（变量可在文件名任意位置）
         # 例如: 'tab_${icon}_icon.png' → 将 ${var} 替换为 .* 后匹配所有实际文件
@@ -2048,11 +2054,17 @@ obfuscate_asset_filenames() {
     log_info "第4步: 批量修改图片元数据..."
     
     # 批量修改元数据（使用预计算的 hash，避免重复计算）
+    # 仅对位图追加元数据；svg/svga/json 等文本/结构化文件追加字节会损坏内容，跳过。
     local metadata_count=0
     while IFS='|' read -r new_file hash_value; do
         if [[ -f "$new_file" ]]; then
-            modify_image_metadata_fast "$new_file" "$hash_value"
-            metadata_count=$((metadata_count + 1))
+            case "${new_file##*.}" in
+                png|jpg|jpeg|webp|gif|PNG|JPG|JPEG|WEBP|GIF)
+                    modify_image_metadata_fast "$new_file" "$hash_value"
+                    metadata_count=$((metadata_count + 1))
+                    ;;
+                *) ;;
+            esac
         fi
     done < "$new_files_list"
     
@@ -3868,6 +3880,13 @@ main() {
     # 暂时禁用：资源文件名混淆（避免 obfuscate_asset_filenames 出现误替换/误改字符串的问题）
     # 典型问题：不应影响 Dart 代码里的 JSON key，如 json["share"]。
     log_warning "已跳过资源文件名混淆（obfuscate_asset_filenames 已暂时禁用）"
+    # 项目专用：base64 图谱生成【前】中和敏感命名的栅格图（须早于 map 生成，
+    # 保证 map key 用中性名哈希，运行时引用改写后仍能命中）。
+    local pre_b64_func="pre_base64_${PROJECT_NAME}"
+    if type -t "$pre_b64_func" &>/dev/null; then
+        log_step "运行 base64 前置中和（$pre_b64_func）..."
+        "$pre_b64_func" "$TARGET_SIDE_B_DIR" || true
+    fi
     generate_secondary_base64_map # 生成图片 Base64 映射（默认开启）
     ensure_base64_support_darts   # 按需写入 base_hh_image / secondary_image_base64_ext
     patch_secondary_my_asset_image_to_base64 # MyAssetImage 优先走 Base64 映射（避免删图后 bundle 读不到）

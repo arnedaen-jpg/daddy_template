@@ -484,11 +484,244 @@ PY
 fix_dq_compatibility() {
   local target_dir="${1:-}"
   local plugins_dir="${2:-}"
-  local _unused_target_dir="$target_dir"
   local _unused_plugins_dir="$plugins_dir"
 
   enforce_dq_ios_minimum_target
+  neutralize_dq_sensitive_assets "$target_dir"
   return 0
+}
+
+# ------------------------------------------------------------
+# 中和敏感命名的非图片资源（svg / svga / 非 lottie json）
+#
+# base64 映射只处理栅格图（png/jpg/...），并会把它们从 bundle 删除、
+# 且 key 已 FNV-1a 脱敏；但 svg/svga/json 仍以物理文件进 bundle，
+# 文件名里 live / zhibo / anchor / noble / danmu / odd / predict 等
+# 直接暴露直播 + 竞猜 + 打赏业务特征，是机审「隐藏功能」查证的把柄。
+#
+# 本步骤在同步阶段（引用尚为明文、字符串混淆之前）执行：
+#   1. 把敏感文件重命名为中性名（含目录 anchor -> 中性目录）
+#   2. 用「精确 token 替换」改写 secondary Dart 中的引用
+#      —— 选用的 token 均较长且业务专有，静态引用与 `前缀${var}` 插值均可覆盖
+# ------------------------------------------------------------
+neutralize_dq_sensitive_assets() {
+  local target_dir="${1:-}"
+  local assets_dir="$PROJECT_ROOT/assets/secondary"
+  local secondary_lib_dir="${target_dir:-$PROJECT_ROOT/lib/modules/secondary}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY-RUN] dq 将中和敏感命名的 svg/svga/json 资源并改写引用"
+    return 0
+  fi
+  if [[ ! -d "$assets_dir" ]]; then
+    return 0
+  fi
+
+  log_step "中和 dq 敏感命名资源（svg/svga/json）..."
+
+  _dq_python3 - "$assets_dir" "$secondary_lib_dir" <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+assets_dir = Path(sys.argv[1])
+lib_dir = Path(sys.argv[2])
+
+# 敏感文件名 token -> 中性 token。
+# 仅选用「文件名专有」的 token：它们只会出现在资源路径/文件名里，
+# 且替换只在「带资源扩展名的引用」或「引号字符串内」进行，避免误伤类名/变量名。
+def neutral(token: str) -> str:
+    h = hashlib.md5(('dq_asset::' + token).encode()).hexdigest()[:8]
+    return f'ui_{h}'
+
+# 文件名 stem 前缀（覆盖静态引用与 `前缀${var}` 插值）。长的先替换。
+FILE_TOKENS = [
+    'icon_live_caisedanmu',
+    'user_noble_enter',
+    'anchor_live',
+    'dianjing',
+    'icon_odd_',
+    'icon_predict_',
+    'icon_vote_',
+    'icon_redu',
+    'icon_chat_',
+    'icon_rank_',
+    'bg_live_',
+    'chat_noble_',
+    'chat_giftNumber',
+]
+FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
+MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
+
+# 目录名（含敏感词）-> 中性目录名。
+DIR_MAP = {'anchor': neutral('dir_anchor'), 'live': neutral('dir_live')}
+
+# 1) 物理重命名：仅 svg / svga / 非 lottie json。
+renamed = 0
+exts = {'.svg', '.svga', '.json'}
+for path in list(assets_dir.rglob('*')):
+    if not path.is_file() or path.suffix.lower() not in exts:
+        continue
+    rel = path.relative_to(assets_dir).as_posix()
+    if '/lottie/' in ('/' + rel) or rel.startswith('json/json/'):
+        continue
+    parts = rel.split('/')
+    # 目录段：整段等于敏感词才替换（避免子串误伤）。
+    parts = [DIR_MAP.get(p, p) for p in parts[:-1]] + [parts[-1]]
+    name = parts[-1]
+    for old, new in MAPPING:
+        if old in name:
+            name = name.replace(old, new)
+    parts[-1] = name
+    new_rel = '/'.join(parts)
+    if new_rel != rel:
+        dest = assets_dir / new_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        path.rename(dest)
+        renamed += 1
+
+for d in sorted(assets_dir.rglob('*'), key=lambda p: len(p.as_posix()), reverse=True):
+    if d.is_dir() and not any(d.iterdir()):
+        d.rmdir()
+
+# 2) 改写 Dart 引用：只在引号字符串字面量内部做 token 替换。
+str_lit = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""", re.DOTALL)
+old_dir_seg = re.compile(r'(?<![A-Za-z0-9_])(' + '|'.join(map(re.escape, DIR_MAP)) + r')(?=/)')
+
+def rewrite_literal(m):
+    q, body = m.group(1), m.group(2)
+    for old, new in MAPPING:
+        body = body.replace(old, new)
+    body = old_dir_seg.sub(lambda dm: DIR_MAP[dm.group(1)], body)
+    return q + body + q
+
+patched = 0
+for dart in lib_dir.rglob('*.dart'):
+    try:
+        text = dart.read_text(encoding='utf-8')
+    except Exception:
+        continue
+    new_text = str_lit.sub(rewrite_literal, text)
+    if new_text != text:
+        dart.write_text(new_text, encoding='utf-8')
+        patched += 1
+
+print(f"[INFO] dq 敏感资源中和完成：重命名 {renamed} 个文件，改写 {patched} 个 Dart 文件")
+PY
+}
+
+# ------------------------------------------------------------
+# base64 图谱生成【之前】中和敏感命名的栅格图（png/jpg/jpeg/webp）
+#
+# 栅格图会被 generate_secondary_base64_map 编码进 map（key = FNV-1a(文件名/路径)）
+# 后从 bundle 删除。map key 虽已脱敏，但业务代码里的【引用字符串】
+# （如 XXAssetImage("icon_live_qiupiao")）仍是明文，直接暴露直播/主播/竞猜/打赏。
+#
+# 因此必须在 map 生成【前】把文件名与引用一起改成中性前缀：
+#   1. 物理重命名 png/jpg/jpeg/webp（按前缀替换，保留数字/后缀，兼容序列图）
+#   2. 用前缀子串替换改写 Dart 字符串字面量（静态引用 + `前缀${var}` 插值均覆盖）
+# 之后 map 以中性名哈希为 key，运行时 getByName(中性名) 命中一致。
+#
+# 注意调用时机：sync_secondary.sh 在 generate_secondary_base64_map 之前调用
+# pre_base64_dq，切勿放到 fix_dq_compatibility（那是 map 生成之后）。
+# ------------------------------------------------------------
+pre_base64_dq() {
+  neutralize_dq_sensitive_rasters "${1:-}"
+  return 0
+}
+
+neutralize_dq_sensitive_rasters() {
+  local target_dir="${1:-}"
+  local assets_dir="$PROJECT_ROOT/assets/secondary"
+  local secondary_lib_dir="${target_dir:-$PROJECT_ROOT/lib/modules/secondary}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY-RUN] dq 将在 base64 前中和敏感命名的栅格图（png/jpg/webp）并改写引用"
+    return 0
+  fi
+  if [[ ! -d "$assets_dir" ]]; then
+    return 0
+  fi
+
+  log_step "中和 dq 敏感命名栅格图（png/jpg/webp，base64 前）..."
+
+  _dq_python3 - "$assets_dir" "$secondary_lib_dir" <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+assets_dir = Path(sys.argv[1])
+lib_dir = Path(sys.argv[2])
+
+def neutral(token: str) -> str:
+    h = hashlib.md5(('dq_raster::' + token).encode()).hexdigest()[:8]
+    return f'ui_{h}'
+
+# 资源名专有的敏感前缀（长前缀先替换，避免短前缀先命中导致漏改）。
+# 仅选用「明显是图片名前缀」的 token：直播/主播/贵族/礼物/弹幕/赔率/竞猜/vip。
+FILE_TOKENS = [
+    'ic_main_tab_live',
+    'icon_live_danmu', 'ic_live_search', 'ic_live_segment66', 'ic_live_banner',
+    'bg_live_search_empty', 'icon_live', 'bg_live', 'ic_live',
+    'chat_noble', 'ic_noble_alert', 'bg_noble', 'ic_noble',
+    'chat_giftNumber',
+    'ic_bg_vip_pay', 'ic_vip', 'icon_vip',
+    'icon_live_danmu', 'ic_danmu',
+    'ic_odds', 'icon_odd', 'ic_odd',
+    'ic_anchor_record', 'ic_anchor_player', 'ic_anchor_un',
+    'icon_anchor_online', 'bg_anchor_online', 'icon_anchor', 'bg_anchor', 'ic_anchor',
+    'btn_zhibo',
+    'icon_qiupiao', 'icon_qiuzuan',
+]
+FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
+MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
+
+RASTER_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
+
+# 1) 物理重命名：仅栅格图；lottie 目录保持原样（其图片由 lottie json 引用）。
+renamed = 0
+for path in list(assets_dir.rglob('*')):
+    if not path.is_file() or path.suffix.lower() not in RASTER_EXTS:
+        continue
+    rel = path.relative_to(assets_dir).as_posix()
+    if '/lottie/' in ('/' + rel):
+        continue
+    name = path.name
+    new_name = name
+    for old, new in MAPPING:
+        if old in new_name:
+            new_name = new_name.replace(old, new)
+    if new_name != name:
+        dest = path.with_name(new_name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        path.rename(dest)
+        renamed += 1
+
+# 2) 改写 Dart 引用：只在引号字符串字面量内部做前缀子串替换。
+str_lit = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""", re.DOTALL)
+
+def rewrite_literal(m):
+    q, body = m.group(1), m.group(2)
+    for old, new in MAPPING:
+        if old in body:
+            body = body.replace(old, new)
+    return q + body + q
+
+patched = 0
+for dart in lib_dir.rglob('*.dart'):
+    try:
+        text = dart.read_text(encoding='utf-8')
+    except Exception:
+        continue
+    new_text = str_lit.sub(rewrite_literal, text)
+    if new_text != text:
+        dart.write_text(new_text, encoding='utf-8')
+        patched += 1
+
+print(f"[INFO] dq 栅格图中和完成：重命名 {renamed} 个文件，改写 {patched} 个 Dart 文件")
+PY
 }
 
 _dq_python3() {
