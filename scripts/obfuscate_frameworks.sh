@@ -2118,6 +2118,147 @@ if changed:
 PY
 }
 
+# 把「依赖图不可达的 app 面向原生插件」从 dependency_overrides 提升到 dependencies。
+# 背景：dependency_overrides 只替换已有依赖的来源，不会创建依赖边。Flutter 生成
+#   GeneratedPluginRegistrant 时走 package_graph.json 的依赖边（findPlugins →
+#   computeTransitiveDependencies），只有从 app 根可达的插件才会注册。若某个 app 面向
+#   原生插件（无 implements、带 pluginClass/default_package）localize 进 plugins/ 后
+#   只出现在 dependency_overrides、且没有任何依赖边指向它，则它及其联邦实现都不会注册
+#   → 运行时 MissingPluginException。
+#   典型案例：闭包重命名后的 audioplayers→invoice_frame（其 iOS 实现 canvas_group 经
+#   invoice_frame 的传递依赖解析），过去只落在 overrides，导致游戏音效 channel
+#   xyz.luan/audioplayers 未注册。
+# 判据用真实依赖图可达性（需先 pub get 生成 package_graph.json），避免误伤 sqflite_darwin
+# 这类「只在 overrides 但经门面包 sqflite 传递可达」的实现包。实现包（带 implements:）本身
+# 也不提升，由门面包传递解析。返回时若有提升，调用方需再跑一次 pub get。
+ensure_appfacing_native_plugins_in_dependencies() {
+    local pubspec="$PROJECT_ROOT/pubspec.yaml"
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ -f "$pubspec" ]] || return 0
+    [[ -f "$PROJECT_ROOT/.dart_tool/package_graph.json" ]] || return 0
+
+    python3 - "$pubspec" "$PLUGINS_DIR" "$PROJECT_ROOT/.dart_tool/package_graph.json" <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+
+pubspec = Path(sys.argv[1])
+plugins_dir = Path(sys.argv[2])
+graph_file = Path(sys.argv[3])
+lines = pubspec.read_text().splitlines()
+
+# 应用名
+app_name = None
+for ln in lines:
+    m = re.match(r"^name:\s*(\S+)", ln)
+    if m:
+        app_name = m.group(1)
+        break
+
+# 依赖图可达集（从 app 根 BFS）
+try:
+    graph = json.loads(graph_file.read_text())
+except Exception:
+    sys.exit(0)
+pkgs = {p["name"]: p.get("dependencies", []) for p in graph.get("packages", [])}
+reachable = set()
+stack = [app_name] if app_name in pkgs else list(graph.get("roots", []))
+while stack:
+    cur = stack.pop()
+    for dep in pkgs.get(cur, []):
+        if dep not in reachable:
+            reachable.add(dep)
+            stack.append(dep)
+
+def section_bounds(name):
+    start = None
+    for idx, line in enumerate(lines):
+        if line.rstrip() == f"{name}:" and not line.startswith(" "):
+            start = idx
+            break
+    if start is None:
+        return None, None
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        ln = lines[idx]
+        if ln and not ln.startswith(" ") and re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", ln):
+            end = idx
+            break
+    return start, end
+
+def top_level_names(name):
+    start, end = section_bounds(name)
+    names = set()
+    if start is None:
+        return names
+    for ln in lines[start + 1:end]:
+        m = re.match(r"^  ([A-Za-z_][A-Za-z0-9_]*):", ln)
+        if m:
+            names.add(m.group(1))
+    return names
+
+def is_appfacing_native_plugin(plugin_pubspec):
+    try:
+        txt = plugin_pubspec.read_text()
+    except OSError:
+        return False
+    if not re.search(r"^\s*plugin:\s*$", txt, re.M):
+        return False
+    if re.search(r"^\s*implements:\s*\S", txt, re.M):
+        return False
+    if re.search(r"^\s*(pluginClass|default_package):\s*\S", txt, re.M):
+        return True
+    return False
+
+# app 代码（含 lib/modules/secondary 的 B 面）实际 import 的 package 名集合。
+# 只提升「被真实 import 但依赖图不可达」的插件，避免误拉入未使用/纯 android 的插件
+# （它们被强行加入 dependencies 会牵连 pod install，可能破坏 iOS 构建）。
+imported = set()
+lib_dir = pubspec.parent / "lib"
+imp_re = re.compile(r"package:([A-Za-z_][A-Za-z0-9_]*)/")
+if lib_dir.is_dir():
+    for dart in lib_dir.rglob("*.dart"):
+        try:
+            for m in imp_re.finditer(dart.read_text(errors="ignore")):
+                imported.add(m.group(1))
+        except OSError:
+            pass
+
+dep_names = top_level_names("dependencies")
+
+promote = []
+for plugin_pubspec in sorted(plugins_dir.glob("*/pubspec.yaml")):
+    name = plugin_pubspec.parent.name
+    if name in dep_names:
+        continue
+    if name in reachable:
+        continue
+    if name not in imported:
+        continue
+    if is_appfacing_native_plugin(plugin_pubspec):
+        promote.append(name)
+
+if not promote:
+    sys.exit(0)
+
+start, end = section_bounds("dependencies")
+if start is None:
+    raise SystemExit("pubspec.yaml 缺少 dependencies 段")
+
+seg = lines[start + 1:end]
+while seg and seg[-1].strip() == "":
+    seg.pop()
+for name in promote:
+    seg.append(f"  {name}:")
+    seg.append(f"    path: plugins/{name}")
+lines[start + 1:end] = seg
+
+pubspec.write_text("\n".join(lines).rstrip() + "\n")
+print("PROMOTED:" + ",".join(promote))
+PY
+}
+
 rewrite_package_pubspec_dependency_path() {
     local pubspec="$1"
     local old_name="$2"
@@ -6043,6 +6184,19 @@ run_all() {
         exit 1
     fi
     log_success "主工程 pub get 完成"
+
+    # 依赖图生成后，检查是否有「不可达的 app 面向原生插件」被落在 dependency_overrides
+    # （典型：重命名后的 audioplayers→invoice_frame），提升到 dependencies 并重跑 pub get，
+    # 否则其原生实现不会写入 GeneratedPluginRegistrant → 运行时 MissingPluginException。
+    _promoted=$(ensure_appfacing_native_plugins_in_dependencies)
+    if [[ -n "$_promoted" ]]; then
+        log_success "已将不可达的 app 面向原生插件提升到 dependencies: ${_promoted#PROMOTED:}"
+        if ! fvm flutter pub get 2>&1; then
+            log_error "提升插件依赖后 fvm flutter pub get 失败"
+            exit 1
+        fi
+        log_success "提升后 pub get 完成"
+    fi
     record_phase_timing "4. fvm flutter pub get" "$_phase_start"
     
     # Step 5: pod install
