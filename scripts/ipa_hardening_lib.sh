@@ -43,6 +43,45 @@ harden_app_bundle() {
     [[ "$do_rename_fw" == "true" ]] && args+=(--rename-frameworks)
     [[ "$do_macho" == "true" ]] && args+=(--macho)
     bash "$obf" "${args[@]}"
+
+    # 成品包二进制指纹中和（须在 obfuscate_ipa 之后、重签名之前执行）：
+    #   1) 开发者路径抹除（/Users/... → /dev/null）——ZT_NEUTRALIZE_PATHS=0 可关
+    #   2) 业务枚举名中和（装饰性成员名 → 中性等长串）——ZT_NEUTRALIZE_ENUMS=0 可关
+    neutralize_bundle_binaries "$app_dir" "$script_dir"
+}
+
+# 收集 .app 内的 Mach-O 二进制并做同长度指纹中和
+neutralize_bundle_binaries() {
+    local app_dir="$1"
+    local script_dir="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    local do_paths="${ZT_NEUTRALIZE_PATHS:-1}"
+    local do_enums="${ZT_NEUTRALIZE_ENUMS:-1}"
+    [[ "$do_paths" == "0" && "$do_enums" == "0" ]] && return 0
+
+    local paths_py="$script_dir/neutralize_macho_paths.py"
+    local enums_py="$script_dir/neutralize_enum_names.py"
+
+    # 枚举所有 Mach-O 二进制（主可执行 + framework/dylib + Flutter App/Dart 快照）
+    local -a bins=()
+    local f
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        if file "$f" 2>/dev/null | grep -q "Mach-O"; then
+            bins+=("$f")
+        fi
+    done < <(find "$app_dir" -type f \
+        \( -perm -u+x -o -name '*.dylib' -o -path '*/Frameworks/*' \) 2>/dev/null)
+
+    [[ ${#bins[@]} -eq 0 ]] && { echo "[ipa-harden] 未发现 Mach-O 二进制，跳过中和"; return 0; }
+
+    if [[ "$do_paths" != "0" && -f "$paths_py" ]]; then
+        echo "[ipa-harden] 开发者路径抹除（${#bins[@]} 个二进制）..."
+        python3 "$paths_py" "${bins[@]}" | tail -1 || echo "[ipa-harden] 路径抹除部分失败" >&2
+    fi
+    if [[ "$do_enums" != "0" && -f "$enums_py" ]]; then
+        echo "[ipa-harden] 业务枚举名中和（${#bins[@]} 个二进制）..."
+        python3 "$enums_py" "${bins[@]}" | tail -1 || echo "[ipa-harden] 枚举中和部分失败" >&2
+    fi
 }
 
 # 重签名 .app（profile + identity + entitlements）
