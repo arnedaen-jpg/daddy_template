@@ -2465,7 +2465,73 @@ apply_plugin_specific_rename_fixups() {
         photo_manager)
             apply_photo_manager_rename_fixups "$new_name" "$target_path"
             ;;
+        rongcloud_im_wrapper_plugin)
+            apply_rongcloud_runtime_channels "$target_path"
+            ;;
     esac
+}
+
+# 融云 MethodChannel / engine* / engine_cb*：编译期双边混淆（Dart↔ObjC↔Java）
+# 与 fijkplayer「恢复原文」相反——这里主动改成 seed 派生字面量。
+apply_rongcloud_runtime_channels() {
+    local target_path="${1:-}"
+    local script="$SCRIPT_DIR/rongcloud_channel_obfuscate.py"
+    [[ -f "$script" ]] || { log_warning "缺少 $script"; return 0; }
+
+    if [[ -z "$target_path" ]]; then
+        # 已重命名插件：按 RCIMWrapperEngine.m 定位
+        target_path="$(find "$PLUGINS_DIR" -maxdepth 3 -path '*/ios/Classes/RCIMWrapperEngine.m' 2>/dev/null | head -1 | sed 's|/ios/Classes/RCIMWrapperEngine.m||')"
+    fi
+    [[ -n "$target_path" && -d "$target_path" ]] || return 0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] 将对 $target_path 做融云 channel/engine_cb 编译期混淆"
+        return 0
+    fi
+
+    # SEED 未就绪时临时推导
+    if [[ -z "$SEED" ]]; then
+        resolve_seed 2>/dev/null || true
+        [[ -z "$SEED" ]] && derive_seed
+        [[ -z "$SEED" ]] && SEED="com.app.haixing202502"
+    fi
+
+    local map_dir="$PROJECT_ROOT/backups"
+    mkdir -p "$map_dir"
+    local map_out="$map_dir/rongcloud_channel_map.${SEED}.json"
+
+    log_step "融云 runtime channel 混淆 (seed=$SEED)…"
+    if python3 "$script" apply --plugin "$target_path" --seed "$SEED" --map-out "$map_out"; then
+        log_success "融云 channel 混淆完成 → $map_out"
+    else
+        log_warning "融云 channel 混淆失败（exit $?），请检查 plugins 内 Dart/ObjC 是否仍匹配"
+        return 1
+    fi
+}
+
+verify_rongcloud_runtime_channels_after_obfuscation() {
+    local script="$SCRIPT_DIR/rongcloud_channel_obfuscate.py"
+    [[ -f "$script" ]] || return 0
+    local target_path
+    target_path="$(find "$PLUGINS_DIR" -maxdepth 3 -path '*/ios/Classes/RCIMWrapperEngine.m' 2>/dev/null | head -1 | sed 's|/ios/Classes/RCIMWrapperEngine.m||')"
+    [[ -n "$target_path" && -d "$target_path" ]] || {
+        log_info "未找到融云插件，跳过 channel 校验"
+        return 0
+    }
+    local map=""
+    [[ -n "$SEED" && -f "$PROJECT_ROOT/backups/rongcloud_channel_map.${SEED}.json" ]] \
+        && map="$PROJECT_ROOT/backups/rongcloud_channel_map.${SEED}.json"
+    [[ -z "$map" && -f "$target_path/.zt_rc_channel_map.json" ]] \
+        && map="$target_path/.zt_rc_channel_map.json"
+
+    local args=(verify --plugin "$target_path")
+    [[ -n "$map" ]] && args+=(--map "$map")
+    if python3 "$script" "${args[@]}"; then
+        log_success "融云 runtime channel 校验通过"
+        return 0
+    fi
+    log_error "融云 runtime channel 校验失败"
+    return 1
 }
 
 restore_fijkplayer_runtime_channels() {
@@ -6151,6 +6217,16 @@ run_all() {
     prune_generated_dependency_non_runtime_files
     dedupe_pubspec_dependency_overrides
     record_phase_timing "2.5 传递依赖本地化" "$_phase_start"
+
+    # Step 2.6: 融云 MethodChannel / engine_cb 编译期混淆（须在 mutate/dep-strings 前，幂等）
+    echo ""
+    echo "--------------------------------------------"
+    log_step "[2.6/$total_steps] 融云 runtime channel 混淆..."
+    echo ""
+    _phase_start=$(timer_start)
+    [[ -z "$SEED" ]] && derive_seed
+    apply_rongcloud_runtime_channels || log_warning "融云 channel 混淆未完全成功，后续 verify 会拦截"
+    record_phase_timing "2.6 融云 channel 混淆" "$_phase_start"
     
     # Step 3: 原生代码变异
     echo ""
@@ -6288,14 +6364,18 @@ run_all() {
 
     echo ""
     echo "--------------------------------------------"
-    log_step "[$total_steps/$total_steps] fijkplayer runtime channel 校验..."
+    log_step "[$total_steps/$total_steps] runtime channel 校验 (fijkplayer + 融云)..."
     echo ""
     _phase_start=$(timer_start)
     if ! verify_fijkplayer_runtime_channels_after_obfuscation; then
         log_error "fijkplayer runtime channel 校验失败"
         exit 1
     fi
-    record_phase_timing "$total_steps. fijkplayer channel 校验" "$_phase_start"
+    if ! verify_rongcloud_runtime_channels_after_obfuscation; then
+        log_error "融云 runtime channel 校验失败"
+        exit 1
+    fi
+    record_phase_timing "$total_steps. runtime channel 校验" "$_phase_start"
 
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))

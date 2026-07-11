@@ -43,6 +43,19 @@ DRY_RUN=false
 MACHO_MIN_LEN=5
 METHODS_ALLOWLIST=""
 PROTECT_FILE=""
+# --macho 默认（整包 apply-app）：只改类名 + sync-cstring
+# 方法改名 / cstring 擦除 / 整文件盲替换仍可能导致启动闪退，默认关；
+# 调试时显式：ZT_MACHO_SDK_METHODS=1  ZT_MACHO_SCRUB_CSTRING=1
+# --macho 默认 = L2.6.3：
+#   L2.6.2 + 仅 __LINKEDIT 内改 _OBJC_CLASS_$_* 类符号（不开 -[Class / 非整文件）
+MACHO_SDK_PREFIXES="${ZT_MACHO_SDK_PREFIXES:-RCIMIW,RCIMWrapper,IRCIMIW,RC,Rong}"
+MACHO_SYNC_CSTRING="${ZT_MACHO_SYNC_CSTRING:-1}"
+MACHO_SCRUB_CSTRING="${ZT_MACHO_SCRUB_CSTRING:-0}"
+MACHO_SDK_METHODS="${ZT_MACHO_SDK_METHODS:-1}"
+MACHO_SDK_CLASSES_ONLY="${ZT_MACHO_SDK_CLASSES_ONLY:-1}"
+# L2.6.3 LINKEDIT-only CLASS 别名实测启动打不开 → 默认关；勿再默认开启
+MACHO_SYMBOL_ALIASES="${ZT_MACHO_SYMBOL_ALIASES:-0}"
+MACHO_PATCH_METHTYPE="${ZT_MACHO_PATCH_METHTYPE:-1}"
 # 未显式选择手段时，默认只开启低风险的资源差异化
 _explicit_mode=false
 
@@ -59,6 +72,19 @@ while [[ $# -gt 0 ]]; do
         --min-len) MACHO_MIN_LEN="$2"; shift 2 ;;
         --methods-allowlist) METHODS_ALLOWLIST="$2"; shift 2 ;;
         --protect-file) PROTECT_FILE="$2"; shift 2 ;;
+        --sdk-prefixes) MACHO_SDK_PREFIXES="$2"; shift 2 ;;
+        --no-sdk-selectors) MACHO_SDK_PREFIXES=""; MACHO_SDK_METHODS=0; shift ;;
+        --sdk-methods) MACHO_SDK_METHODS=1; shift ;;
+        --sync-cstring) MACHO_SYNC_CSTRING=1; shift ;;
+        --no-sync-cstring) MACHO_SYNC_CSTRING=0; shift ;;
+        --scrub-cstring) MACHO_SCRUB_CSTRING=1; shift ;;
+        --no-scrub-cstring) MACHO_SCRUB_CSTRING=0; shift ;;
+        --sdk-classes-only) MACHO_SDK_CLASSES_ONLY=1; shift ;;
+        --all-classes) MACHO_SDK_CLASSES_ONLY=0; shift ;;
+        --symbol-aliases) MACHO_SYMBOL_ALIASES=1; shift ;;
+        --no-symbol-aliases) MACHO_SYMBOL_ALIASES=0; shift ;;
+        --patch-methtype) MACHO_PATCH_METHTYPE=1; shift ;;
+        --no-patch-methtype) MACHO_PATCH_METHTYPE=0; shift ;;
         -d|--dry-run) DRY_RUN=true; shift ;;
         -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
         *) err "未知参数: $1"; exit 2 ;;
@@ -107,11 +133,25 @@ differentiate_resources() {
         fi
     done < <(find "$app" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' -o -iname '*.gif' \) ! -path '*/Assets.car' 2>/dev/null)
 
-    # 2) 向 .app 根与各 .bundle 注入 seed 派生惰性资源文件（改包内文件集合指纹）
+    # 1b) 音频/字体/SVG 追加尾部标记（播放器/渲染通常忽略尾部冗余）
+    local media_count=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        local marker
+        marker="$(_seed_hex "${SEED}_media_$(basename "$f")_${media_count}")"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            media_count=$((media_count + 1))
+        else
+            printf '\nzt%s\n' "${marker:0:24}" >> "$f" 2>/dev/null || true
+            media_count=$((media_count + 1))
+        fi
+    done < <(find "$app" -type f \( -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.svg' -o -iname '*.ttf' -o -iname '*.otf' \) 2>/dev/null)
+
+    # 2) 向 .app 根 / .bundle / flutter_assets / 各 .framework 注入惰性文件
     local bundle_touch=0
     local targets=("$app")
     while IFS= read -r b; do [[ -n "$b" ]] && targets+=("$b"); done \
-        < <(find "$app" -type d -name '*.bundle' 2>/dev/null)
+        < <(find "$app" -type d \( -name '*.bundle' -o -name 'flutter_assets' -o -name '*.framework' \) 2>/dev/null)
     local t
     for t in "${targets[@]}"; do
         local h fname
@@ -119,12 +159,55 @@ differentiate_resources() {
         fname=".zt_${h:0:12}.dat"
         if [[ "$DRY_RUN" == "true" ]]; then
             bundle_touch=$((bundle_touch + 1))
-        elif printf '%s%s\n' "$h" "$h" > "$t/$fname" 2>/dev/null; then
-            bundle_touch=$((bundle_touch + 1))
+        else
+            # 变长内容：同一 seed 下不同目录体积也不同，增强文件集合指纹
+            local pad_n=$(( 16 + (0x${h:12:2}) ))
+            if dd if=/dev/zero bs=1 count="$pad_n" 2>/dev/null | \
+               { printf '%s' "$h"; cat; } > "$t/$fname" 2>/dev/null; then
+                bundle_touch=$((bundle_touch + 1))
+            elif printf '%s%s\n' "$h" "$h" > "$t/$fname" 2>/dev/null; then
+                bundle_touch=$((bundle_touch + 1))
+            fi
+        fi
+        # L277：每目录额外一枚惰性文件（不同 seed 槽），扩大文件集合差异
+        if [[ "${ZT_EXTRA_JUNK:-1}" != "0" ]]; then
+            local h2 fname2 pad2
+            h2="$(_seed_hex "${SEED}_junk2_$(basename "$t")")"
+            fname2=".zt2_${h2:0:12}.dat"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                bundle_touch=$((bundle_touch + 1))
+            else
+                pad2=$(( 24 + (0x${h2:12:2}) ))
+                if dd if=/dev/zero bs=1 count="$pad2" 2>/dev/null | \
+                   { printf '%s' "$h2"; cat; } > "$t/$fname2" 2>/dev/null; then
+                    bundle_touch=$((bundle_touch + 1))
+                fi
+            fi
+            # L284：第三枚惰性文件（再扩文件集合指纹，仍全 DEFLATE 打包）
+            local h3 fname3 pad3
+            h3="$(_seed_hex "${SEED}_junk3_$(basename "$t")")"
+            fname3=".zt3_${h3:0:12}.bin"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                bundle_touch=$((bundle_touch + 1))
+            else
+                pad3=$(( 32 + (0x${h3:12:2}) ))
+                if dd if=/dev/zero bs=1 count="$pad3" 2>/dev/null | \
+                   { printf '%s' "$h3"; cat; } > "$t/$fname3" 2>/dev/null; then
+                    bundle_touch=$((bundle_touch + 1))
+                fi
+            fi
         fi
     done
 
-    ok "资源差异化完成: 图片改指纹 ${img_count}，注入惰性文件 $bundle_touch"
+    # 3) 文本资源品牌擦除（独立 py，避免 shell 内嵌中文导致 nounset 误解析）
+    local text_scrub=0
+    local scrub_py
+    scrub_py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scrub_text_brand_strings.py"
+    if [[ "$DRY_RUN" != "true" && -f "$scrub_py" ]]; then
+        text_scrub="$(python3 "$scrub_py" "$app" "$SEED" 2>/dev/null || echo 0)"
+    fi
+
+    ok "资源差异化完成: 图片改指纹 ${img_count}, 媒体改指纹 ${media_count:-0}, 注入惰性文件 ${bundle_touch}, 文本品牌擦除 ${text_scrub}"
 }
 
 # ---- Mach-O 符号混淆：主可执行文件 + Frameworks ---- 
@@ -150,23 +233,53 @@ obfuscate_macho() {
         err "找不到 Mach-O 工具: $MACHO_TOOL"; return 1
     fi
     warn "Mach-O 符号混淆为中高风险操作，务必真机回归后再进产线。"
-    local args_common=(--seed "$SEED" --min-len "$MACHO_MIN_LEN" --classes)
-    [[ -n "$METHODS_ALLOWLIST" ]] && args_common+=(--methods --methods-allowlist "$METHODS_ALLOWLIST")
-    [[ -n "$PROTECT_FILE" ]] && args_common+=(--protect-file "$PROTECT_FILE")
+    warn "使用整包 apply-app（全局映射），避免跨二进制 selector/channel 不一致。"
 
-    local n=0
-    while IFS= read -r bin; do
-        [[ -z "$bin" ]] && continue
-        n=$((n + 1))
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log "[DRY-RUN] scan $bin"
-            python3 "$MACHO_TOOL" scan "$bin" "${args_common[@]}" 2>&1 | sed 's/^/    /' || true
-        else
-            log "apply $bin"
-            python3 "$MACHO_TOOL" apply "$bin" "${args_common[@]}" 2>&1 | sed 's/^/    /' || warn "  处理失败，跳过: $bin"
-        fi
-    done < <(list_macho_binaries "$app")
-    ok "Mach-O 处理二进制数: $n（改写后必须重签名）"
+    # 整包模式：默认开类名+sync；scrub/methods 由开关控制（调试阶段可开）
+    local args_common=(--seed "$SEED" --min-len "$MACHO_MIN_LEN" --classes)
+    if [[ "$MACHO_SYNC_CSTRING" == "1" || "$MACHO_SYNC_CSTRING" == "true" ]]; then
+        args_common+=(--sync-cstring)
+    fi
+    if [[ -n "$MACHO_SDK_PREFIXES" ]]; then
+        args_common+=(--sdk-prefixes "$MACHO_SDK_PREFIXES")
+    fi
+    if [[ "$MACHO_SCRUB_CSTRING" == "1" || "$MACHO_SCRUB_CSTRING" == "true" ]]; then
+        args_common+=(--scrub-cstring)
+    fi
+    if [[ "$MACHO_SDK_METHODS" == "1" || "$MACHO_SDK_METHODS" == "true" ]]; then
+        args_common+=(--methods)
+    fi
+    if [[ "$MACHO_SDK_CLASSES_ONLY" == "1" || "$MACHO_SDK_CLASSES_ONLY" == "true" ]]; then
+        args_common+=(--sdk-classes-only)
+    fi
+    if [[ "$MACHO_SYMBOL_ALIASES" == "1" || "$MACHO_SYMBOL_ALIASES" == "true" ]]; then
+        args_common+=(--symbol-aliases)
+    fi
+    # methtype：L2.5 默认开；符号别名开启时强制开；可用 --no-patch-methtype / ZT_MACHO_PATCH_METHTYPE=0 关
+    if [[ "$MACHO_PATCH_METHTYPE" == "1" || "$MACHO_PATCH_METHTYPE" == "true" || "$MACHO_SYMBOL_ALIASES" == "1" ]]; then
+        args_common+=(--patch-methtype)
+        MACHO_PATCH_METHTYPE=1
+    fi
+    if [[ -n "$METHODS_ALLOWLIST" ]]; then
+        args_common+=(--methods --methods-allowlist "$METHODS_ALLOWLIST")
+    fi
+    [[ -n "$PROTECT_FILE" ]] && args_common+=(--protect-file "$PROTECT_FILE")
+    log "Mach-O apply-app classes sync=$MACHO_SYNC_CSTRING scrub=$MACHO_SCRUB_CSTRING methods=$MACHO_SDK_METHODS sdk-classes-only=$MACHO_SDK_CLASSES_ONLY aliases=$MACHO_SYMBOL_ALIASES methtype=$MACHO_PATCH_METHTYPE"
+
+    local map_dir map_out=""
+    map_dir="$(dirname "$app")/../ab_factory_macho_maps"
+    # app 可能在临时 Payload 下；映射写到 /tmp
+    map_out="$(mktemp -t macho_map).json"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY-RUN] scan-app $app"
+        python3 "$MACHO_TOOL" scan-app "$app" "${args_common[@]}" --map-out "$map_out" 2>&1 | sed 's/^/    /' || true
+    else
+        python3 "$MACHO_TOOL" apply-app "$app" "${args_common[@]}" --map-out "$map_out" 2>&1 | sed 's/^/    /' \
+            || warn "  apply-app 失败"
+        log "映射已写: $map_out"
+    fi
+    ok "Mach-O 整包处理完成（改写后必须重签名）"
 }
 
 # 生成与旧名【等长】的中性 framework 名（确定性、可复现，首字母，仅 [A-Za-z0-9]）。
@@ -261,10 +374,16 @@ process_app() {
     local app="$1"
     [[ -d "$app" ]] || { err "不是有效的 .app 目录: $app"; exit 1; }
     log "seed=$SEED (hex ${SEED_HEX:0:12})  resources=$DO_RESOURCES  macho=$DO_MACHO  rename_fw=$DO_RENAME_FW  dry_run=$DRY_RUN"
-    if [[ "$DO_RESOURCES" == "true" ]]; then differentiate_resources "$app"; fi
-    # framework 重命名须在 macho 符号混淆【之前】：先稳定加载图，再做符号级改写。
-    if [[ "$DO_RENAME_FW" == "true" ]]; then rename_vendored_frameworks "$app"; fi
-    if [[ "$DO_MACHO" == "true" ]]; then obfuscate_macho "$app"; fi
+    # 不用 if-then 包住关键步骤：set -e 在 if 体里不会因失败退出，易静默跳过后续 macho
+    if [[ "$DO_RESOURCES" == "true" ]]; then
+        differentiate_resources "$app"
+    fi
+    if [[ "$DO_RENAME_FW" == "true" ]]; then
+        rename_vendored_frameworks "$app" || err "framework 重命名失败"
+    fi
+    if [[ "$DO_MACHO" == "true" ]]; then
+        obfuscate_macho "$app" || err "Mach-O 混淆失败"
+    fi
 }
 
 # ---- 主流程 ----
@@ -282,8 +401,14 @@ elif [[ -n "$IPA_IN" ]]; then
     [[ -d "$APP" ]] || { err "IPA 内未找到 .app"; exit 1; }
     process_app "$APP"
     if [[ "$DRY_RUN" != "true" ]]; then
-        log "重打包 → $IPA_OUT（未签名）"
-        ( cd "$TMP" && zip -qr "$IPA_OUT" Payload )
+        log "重打包 → ${IPA_OUT}（未签名）"
+        _pack_py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pack_ipa_seeded.py"
+        if [[ -f "$_pack_py" ]]; then
+            python3 "$_pack_py" --seed "$SEED" --out "$IPA_OUT" "$TMP" \
+                || ( cd "$TMP" && zip -qr "$IPA_OUT" Payload )
+        else
+            ( cd "$TMP" && zip -qr "$IPA_OUT" Payload )
+        fi
         ok "输出: $IPA_OUT （⚠️ 未签名，需 resign_ipa.sh 重签名后才能安装/上传）"
     fi
 else

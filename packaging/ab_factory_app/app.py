@@ -34,7 +34,7 @@ from AppKit import (
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
     NSAnimationContext,
 )
-from Foundation import NSObject, NSMakeRect, NSMakeSize, NSURL, NSAttributedString, NSDictionary, NSUserDefaults
+from Foundation import NSObject, NSMakeRect, NSMakeSize, NSMakePoint, NSURL, NSAttributedString, NSDictionary, NSUserDefaults
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -938,6 +938,86 @@ def _mobileprovision_meta(profile_path):
     return name, uuid, None
 
 
+def _mobileprovision_signing_info(profile_path):
+    """
+    解析测试/正式描述文件，返回 dict:
+      name, uuid, team_id, export_method, code_sign_identity, err
+    export_method: development / ad-hoc / enterprise / app-store
+    """
+    info = {
+        "name": "", "uuid": "", "team_id": "",
+        "export_method": "ad-hoc",
+        "code_sign_identity": "Apple Distribution",
+        "err": None,
+    }
+    if not profile_path or not os.path.isfile(profile_path):
+        info["err"] = f"描述文件不存在: {profile_path or '(空)'}"
+        return info
+    try:
+        r = subprocess.run(
+            ["security", "cms", "-D", "-i", profile_path],
+            capture_output=True, text=True, timeout=30, env=get_env(),
+        )
+    except Exception as e:
+        info["err"] = f"解析描述文件失败: {e}"
+        return info
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+        info["err"] = f"无效的 mobileprovision: {err[:200]}"
+        return info
+    xml = r.stdout or ""
+    info["name"] = _plist_string_after_key(xml, "Name") or os.path.splitext(
+        os.path.basename(profile_path))[0]
+    info["uuid"] = _plist_string_after_key(xml, "UUID")
+    # TeamIdentifier 可能是数组
+    m_team = re.search(
+        r"<key>\s*TeamIdentifier\s*</key>\s*<array>\s*<string>([^<]+)</string>",
+        xml, re.I | re.S)
+    if m_team:
+        info["team_id"] = m_team.group(1).strip()
+    else:
+        info["team_id"] = _plist_string_after_key(xml, "TeamIdentifier")
+    if not info["uuid"]:
+        info["err"] = "描述文件缺少 UUID"
+        return info
+    if not info["team_id"]:
+        info["err"] = "描述文件缺少 TeamIdentifier"
+        return info
+
+    has_devices = bool(re.search(r"<key>\s*ProvisionedDevices\s*</key>", xml, re.I))
+    all_devices = bool(re.search(r"<key>\s*ProvisionsAllDevices\s*</key>\s*<true\s*/>", xml, re.I))
+    get_task = bool(re.search(
+        r"<key>\s*get-task-allow\s*</key>\s*<true\s*/>", xml, re.I))
+
+    if all_devices:
+        info["export_method"] = "enterprise"
+        info["code_sign_identity"] = "Apple Distribution"
+    elif has_devices and get_task:
+        info["export_method"] = "development"
+        info["code_sign_identity"] = "Apple Development"
+    elif has_devices:
+        info["export_method"] = "ad-hoc"
+        info["code_sign_identity"] = "Apple Distribution"
+    else:
+        info["export_method"] = "app-store"
+        info["code_sign_identity"] = "Apple Distribution"
+    return info
+
+
+def _export_options_method(export_method):
+    """build_config export_method → ExportOptions.plist method。"""
+    m = (export_method or "app-store").strip().lower().replace("_", "-")
+    if m in ("app-store", "appstore", "app-store-connect"):
+        return "app-store-connect"
+    if m in ("ad-hoc", "adhoc"):
+        return "ad-hoc"
+    if m in ("development", "dev"):
+        return "development"
+    if m in ("enterprise",):
+        return "enterprise"
+    return m
+
+
 def _install_mobileprovision(profile_path, uuid):
     """安装到 ~/Library/MobileDevice/Provisioning Profiles/<UUID>.mobileprovision。"""
     dest_dir = os.path.expanduser(
@@ -1792,8 +1872,24 @@ def section_inner_h(outer_h):
 
 
 def fit_section_box(box, x, y, w, top_y, lowest_y):
-    """按内容收紧 NSBox 外框，去掉底部空白。"""
-    fitted_inner = max(40, int(top_y - lowest_y + SECTION_BOTTOM_PAD))
+    """按内容收紧 NSBox 外框。
+
+    子视图按「初始外框」的坐标系摆放；收紧高度前必须先整体平移，
+    让最低边贴 SECTION_BOTTOM_PAD，否则：
+    - 初始偏高 → 缩框后顶部被裁、底部留白
+    - 初始偏矮 → 负 y 画出灰底外与下一节重叠
+    """
+    cv = box.contentView()
+    lowest_y = int(lowest_y)
+    top_y = int(top_y)
+    shift = SECTION_BOTTOM_PAD - lowest_y
+    if shift != 0:
+        for sub in list(cv.subviews() or []):
+            f = sub.frame()
+            sub.setFrameOrigin_(NSMakePoint(f.origin.x, f.origin.y + shift))
+        top_y += shift
+        lowest_y += shift
+    fitted_inner = max(40, top_y - lowest_y + SECTION_BOTTOM_PAD)
     fitted_outer = SECTION_CHROME_V + fitted_inner
     box.setFrame_(NSMakeRect(x, y, w, fitted_outer))
     return fitted_outer
@@ -2263,6 +2359,9 @@ class AppDelegate(NSObject):
     ipa_workdir_field = objc.ivar()
     ipa_silent_days_field = objc.ivar()
     build_ipa_btn = objc.ivar()
+    test_bundle_field = objc.ivar()
+    test_profile_field = objc.ivar()
+    build_test_ipa_btn = objc.ivar()
 
     cfg_bundle_field = objc.ivar()
     cfg_team_field = objc.ivar()
@@ -2667,18 +2766,19 @@ class AppDelegate(NSObject):
         y += 30
 
         doc_view.addSubview_(make_label(
-            "B面 ENVIRONMENT（▶ 运行；打包固定 release）",
-            pad, y, 280, row_h, size=11))
+            "B面 ENVIRONMENT（▶ 运行 / 打测试包；上架打包固定 release）",
+            pad, y, 380, row_h, size=11))
         self.app_environment_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(pad + 286, y, 110, row_h), False)
+            NSMakeRect(pad + 386, y, 110, row_h), False)
         self.app_environment_popup.setFont_(NSFont.systemFontOfSize_(11))
         for _env_title in ("test", "beta", "release"):
             self.app_environment_popup.addItemWithTitle_(_env_title)
         self.app_environment_popup.setToolTip_(
             "注入 --dart-define=ENVIRONMENT=…，B 面 config.dart 与壳工程 EnvConfig（AB 状态查询域名）共用。"
-            "test/beta/release → 测试/预发/正式。仅影响「▶ 运行」；「打包 IPA」固定 ENVIRONMENT=release。")
+            "test/beta/release → 测试/预发/正式。"
+            "「▶ 运行」与「打测试包」使用此处选择；「打包 IPA」（上架）固定 ENVIRONMENT=release。")
         doc_view.addSubview_(self.app_environment_popup)
-        _dev_sw_x = pad + 286 + 110 + 14
+        _dev_sw_x = pad + 386 + 110 + 14
         self.show_dev_float_switch = NSButton.alloc().initWithFrame_(
             NSMakeRect(_dev_sw_x, y, 220, row_h))
         self.show_dev_float_switch.setButtonType_(3)
@@ -2915,9 +3015,12 @@ class AppDelegate(NSObject):
         y += step4_h + gap
 
         # ── Step 5: Build IPA ──
-        step5_h = 424
+        # 含测试包区，初始外框需够高，避免子视图落到负 y
+        step5_h = 560
         box5 = make_section_box("步骤 5 · 打包 IPA", pad, y, inner_w, step5_h)
         cv5 = box5.contentView()
+        cv5.setWantsLayer_(True)
+        cv5.layer().setMasksToBounds_(True)
         lw = 72
         col2 = mid_x
         _s5_inner = section_inner_h(step5_h)
@@ -3036,6 +3139,35 @@ class AppDelegate(NSObject):
             "上传 IPA", bw - _px_up_w, by, _px_up_w, 26, self, self.uploadIpa_, bold=True)
         cv5.addSubview_(self.upload_ipa_btn)
 
+        # 测试包：两行紧凑布局（不读 build_config）
+        by -= sp + 4
+        cv5.addSubview_(make_label(
+            "── 测试包（不读 build_config）──", 0, by + 2, 220, 16, size=10,
+            color=NSColor.secondaryLabelColor()))
+        by -= 22
+        _tb_lbl = 72
+        cv5.addSubview_(make_label("测试Bundle:", 0, by, _tb_lbl, row_h, size=11))
+        self.test_bundle_field = make_input(
+            _tb_lbl, by, bw - _tb_lbl - 108, row_h, "com.example.app.dev", mono=True)
+        cv5.addSubview_(self.test_bundle_field)
+        self.build_test_ipa_btn = make_button(
+            "打测试包", bw - 100, by, 100, 26, self, self.buildTestIpa_, bold=True)
+        self.build_test_ipa_btn.setToolTip_(
+            "不使用工作目录 build_config.json；按测试 Bundle ID + 描述文件签名导出"
+            "（Ad Hoc / Development / Enterprise 由描述文件自动判断；证书需已在钥匙串；"
+            "产物在工程 ab_factory_test_ipa/ipa/；"
+            "B面 ENVIRONMENT 取顶部下拉，与 ▶ 运行一致）")
+        cv5.addSubview_(self.build_test_ipa_btn)
+        by -= sp
+        _tp_lbl = 88
+        cv5.addSubview_(make_label("测试描述文件:", 0, by, _tp_lbl, row_h, size=11))
+        self.test_profile_field = make_input(
+            _tp_lbl, by, bw - _tp_lbl - 58, row_h,
+            "Ad Hoc / Development .mobileprovision 绝对路径", mono=True)
+        cv5.addSubview_(self.test_profile_field)
+        cv5.addSubview_(make_button(
+            "选择…", bw - 54, by, 54, row_h, self, self.browseTestProfile_))
+
         by -= sp + 4
         cv5.addSubview_(make_label(
             "── 成品包混淆（独立）──", 0, by + 2, 200, 16, size=10,
@@ -3053,7 +3185,7 @@ class AppDelegate(NSObject):
         self.ipa_harden_macho_switch.setTitle_("Mach-O")
         self.ipa_harden_macho_switch.setState_(0)
         self.ipa_harden_macho_switch.setToolTip_(
-            "启用 Mach-O 类名混淆（中高风险，提审前需真机回归）。默认仅资源指纹差异化。")
+            "启用 Mach-O 符号混淆：类名 + RCIMIW/RC 方法 + cstring/const 擦除（中高风险，提审前需真机回归）。默认仅资源指纹差异化。")
         cv5.addSubview_(self.ipa_harden_macho_switch)
         by -= sp
         cv5.addSubview_(make_label(
@@ -3701,6 +3833,20 @@ class AppDelegate(NSObject):
     def browseIpaProject_(self, sender): self._browse_folder(self.ipa_project_field)
     def browseIpaWorkdir_(self, sender): self._browse_folder(self.ipa_workdir_field)
     def browseIpaHarden_(self, sender): self._browse_ipa_file(self.ipa_harden_path_field)
+
+    def browseTestProfile_(self, sender):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseDirectories_(False)
+        panel.setCanChooseFiles_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setAllowedFileTypes_(["mobileprovision"])
+        current = str(self.test_profile_field.stringValue()).strip()
+        if current and os.path.isfile(current):
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(os.path.dirname(current)))
+        elif current and os.path.isdir(current):
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(current))
+        if panel.runModal() == 1:
+            self.test_profile_field.setStringValue_(str(panel.URLs()[0].path()))
 
     @objc.python_method
     def _browse_ipa_file(self, field):
@@ -7090,10 +7236,36 @@ class AppDelegate(NSObject):
         bundle_id = str(self.cfg_bundle_field.stringValue()).strip()
         profile_name = str(self.cfg_profile_field.stringValue()).strip() or "appstore.mobileprovision"
         profile_path = ""
-        if workdir and os.path.isdir(workdir):
+        # 1) 工作目录相对/绝对描述文件
+        if profile_name and os.path.isabs(profile_name) and os.path.isfile(profile_name):
+            profile_path = profile_name
+        elif workdir and os.path.isdir(workdir):
             candidate = os.path.join(workdir, profile_name)
             if os.path.isfile(candidate):
                 profile_path = candidate
+        # 2) 测试包描述文件（步骤5「打测试包」区）
+        if not profile_path and hasattr(self, "test_profile_field"):
+            test_prof = str(self.test_profile_field.stringValue()).strip()
+            if test_prof and os.path.isfile(test_prof):
+                profile_path = test_prof
+                if not bundle_id and hasattr(self, "test_bundle_field"):
+                    bundle_id = str(self.test_bundle_field.stringValue()).strip()
+        # 3) 工程 ab_factory_test_ipa/build_config.json
+        if not profile_path and project:
+            test_cfg = os.path.join(project, "ab_factory_test_ipa", "build_config.json")
+            if os.path.isfile(test_cfg):
+                try:
+                    with open(test_cfg, "r", encoding="utf-8") as f:
+                        tcfg = json.load(f)
+                    p = str(tcfg.get("profile") or "").strip()
+                    if p and not os.path.isabs(p):
+                        p = os.path.join(project, "ab_factory_test_ipa", p)
+                    if p and os.path.isfile(p):
+                        profile_path = p
+                    if not bundle_id:
+                        bundle_id = str(tcfg.get("bundle_id") or "").strip()
+                except Exception:
+                    pass
 
         macho = bool(self.ipa_harden_macho_switch.state())
         cmd = [script, "--ipa", ipa_path, "--resources"]
@@ -7111,6 +7283,7 @@ class AppDelegate(NSObject):
         _state["is_running"] = True
         self._set_btn(self.harden_ipa_btn, False, "混淆中…")
         self._set_btn(self.build_ipa_btn, False)
+        self._set_btn(self.build_test_ipa_btn, False)
         self._set_status(self.ipa_harden_status, "混淆中…")
         self._log(f"▶ {' '.join(cmd)}")
 
@@ -7157,6 +7330,7 @@ class AppDelegate(NSObject):
             _state["is_running"] = False
             self._set_btn(self.harden_ipa_btn, True, "混淆 IPA")
             self._set_btn(self.build_ipa_btn, True, "打包 IPA")
+            self._set_btn(self.build_test_ipa_btn, True, "打测试包")
 
     # ── Step 5: Build IPA ──
 
@@ -7480,6 +7654,7 @@ class AppDelegate(NSObject):
         _state["is_running"] = True
         self._set_btn(self.upload_ipa_btn, False, "上传中…")
         self._set_btn(self.build_ipa_btn, False)
+        self._set_btn(self.build_test_ipa_btn, False)
         self._set_status(self.step5_status, "正在上传…")
 
         cmd = [script, workdir]
@@ -7524,6 +7699,7 @@ class AppDelegate(NSObject):
             _state["is_running"] = False
             self._set_btn(self.upload_ipa_btn, True, "上传 IPA")
             self._set_btn(self.build_ipa_btn, True)
+            self._set_btn(self.build_test_ipa_btn, True)
 
     def buildIpa_(self, sender):
         if _state["is_running"]:
@@ -7594,6 +7770,7 @@ class AppDelegate(NSObject):
         self._save_b_side_prefs()
         _state["is_running"] = True
         self._set_btn(self.build_ipa_btn, False, "打包中…")
+        self._set_btn(self.build_test_ipa_btn, False)
         self._set_status(self.step5_status, "正在打包…")
 
         cmd = [script, workdir, f"--silent={silent_str}"]
@@ -7610,11 +7787,128 @@ class AppDelegate(NSObject):
         self._log("  打包过程可能需要 10-20 分钟，请耐心等待…")
 
         threading.Thread(target=self._run_build_ipa,
-            args=(cmd, project, workdir),
+            args=(cmd, project, workdir, "IPA 打包"),
+            daemon=True).start()
+
+    def buildTestIpa_(self, sender):
+        """打测试包：只用测试 Bundle ID + 描述文件，不读工作目录 build_config.json。"""
+        if _state["is_running"]:
+            self._log("⚠ 有任务正在执行中"); return
+
+        project = str(self.ipa_project_field.stringValue()).strip()
+        bundle_id = str(self.test_bundle_field.stringValue()).strip()
+        profile_path = str(self.test_profile_field.stringValue()).strip()
+        ver_input = str(self.ipa_version_field.stringValue()).strip()
+
+        if not project or not os.path.isdir(project):
+            self._log("❌ 请选择 Flutter 工程目录"); return
+        pubspec_path = os.path.join(project, "pubspec.yaml")
+        if not os.path.isfile(pubspec_path):
+            self._log(f"❌ 不是 Flutter 项目: {project}"); return
+        if not bundle_id:
+            self._log("❌ 请填写测试 Bundle ID"); return
+        if not profile_path or not os.path.isfile(profile_path):
+            self._log("❌ 请选择有效的测试描述文件（.mobileprovision）"); return
+        if not profile_path.lower().endswith(".mobileprovision"):
+            self._log("❌ 测试描述文件须为 .mobileprovision"); return
+
+        info = _mobileprovision_signing_info(profile_path)
+        if info.get("err"):
+            self._log(f"❌ {info['err']}"); return
+
+        script = os.path.join(project, "scripts", "build_flutter_ipa.sh")
+        if not os.path.isfile(script):
+            self._log(f"❌ 打包脚本不存在: {script}"); return
+
+        if ver_input:
+            try:
+                _apply_pubspec_version(pubspec_path, ver_input)
+                self._log(f"  已设置 pubspec version: {ver_input}（打包将使用该版本）")
+            except Exception as e:
+                self._log(f"❌ 版本号无效: {e}")
+                return
+            try:
+                updated, _unchanged, dver, found = _apply_app_data_version(project, ver_input)
+                for p in updated:
+                    self._log(
+                        f"  已同步 app_data_manager.dart version: {dver}  "
+                        f"({os.path.relpath(p, project)})"
+                    )
+                if found and not updated:
+                    self._log(f"  dart version 已是 {dver}")
+            except Exception as e:
+                self._log(f"⚠ dart 版本同步失败（不阻断打包）: {e}")
+
+        # 独立临时工作目录（勿放在 build/ 下：flutter clean 会删掉）
+        test_workdir = os.path.join(project, "ab_factory_test_ipa")
+        try:
+            os.makedirs(test_workdir, exist_ok=True)
+        except Exception as e:
+            self._log(f"❌ 无法创建测试包工作目录: {e}"); return
+
+        export_method = info["export_method"]
+        code_sign_identity = info["code_sign_identity"]
+        team_id = info["team_id"]
+        profile_name = info["name"]
+        cfg = {
+            "bundle_id": bundle_id,
+            "team_id": team_id,
+            "profile": os.path.abspath(profile_path),
+            "profile_specifier": profile_name,
+            "export_dir": "ipa",
+            "export_method": export_method,
+            "code_sign_identity": code_sign_identity,
+            "signing_style": "manual",
+            "flutter_build_mode": "release",
+            "flutter_project": os.path.abspath(project),
+        }
+        config_path = os.path.join(test_workdir, "build_config.json")
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self._log(f"❌ 写入测试包配置失败: {e}"); return
+
+        self._log("── 打测试包（不读工作目录 build_config）──")
+        self._log(f"  临时配置: {config_path}")
+        self._log(f"  Bundle ID: {bundle_id}")
+        self._log(f"  Team ID: {team_id}（来自描述文件）")
+        self._log(f"  Profile: {profile_name}")
+        self._log(f"  导出方式: {export_method} → {_export_options_method(export_method)}")
+        self._log(f"  签名身份: {code_sign_identity}（证书需已在钥匙串）")
+        self._log(f"  描述文件: {profile_path}")
+
+        self._log("写入 Xcode 签名配置（测试 Bundle ID / mobileprovision）…")
+        ok_sign, sign_logs = _apply_build_config_signing(project, test_workdir, cfg=cfg)
+        for line in sign_logs:
+            self._log(f"  {line}")
+        if not ok_sign:
+            self._log("❌ 签名配置写入失败，已中止测试打包")
+            self._set_status(self.step5_status, "❌ 签名写入失败", success=False)
+            return
+
+        self._save_b_side_prefs()
+        _state["is_running"] = True
+        self._set_btn(self.build_test_ipa_btn, False, "测试打包中…")
+        self._set_btn(self.build_ipa_btn, False)
+        self._set_status(self.step5_status, "正在打测试包…")
+
+        # 测试包默认静默期 0，避免影响真机验证；ENVIRONMENT 跟随顶部 B 面下拉
+        env_name = self._selected_app_environment()
+        cmd = [script, test_workdir, "--silent=0", f"--environment={env_name}"]
+        self._log(f"▶ {' '.join(cmd)}")
+        self._log(f"  Flutter 工程: {project}")
+        self._log(f"  测试工作目录: {test_workdir}")
+        self._log("  静默期: 0 天（测试包固定）")
+        self._log(f"  B面 dart-define: ENVIRONMENT={env_name}（取自顶部下拉，与 ▶ 运行一致）")
+        self._log("  打包过程可能需要 10-20 分钟，请耐心等待…")
+
+        threading.Thread(target=self._run_build_ipa,
+            args=(cmd, project, test_workdir, "测试包打包"),
             daemon=True).start()
 
     @objc.python_method
-    def _run_build_ipa(self, cmd, cwd, workdir=None):
+    def _run_build_ipa(self, cmd, cwd, workdir=None, notify_title="IPA 打包"):
         try:
             env = get_env()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -7631,9 +7925,9 @@ class AppDelegate(NSObject):
             proc.wait()
 
             if proc.returncode == 0:
-                self._log("✅ IPA 打包完成")
+                self._log(f"✅ {notify_title}完成")
                 self._set_status(self.step5_status, "✅ 打包完成", success=True)
-                self._notify_telegram("IPA 打包", ok=True)
+                self._notify_telegram(notify_title, ok=True)
                 latest = self._guess_latest_ipa(workdir)
                 if latest:
                     def _fill_ipa(p=latest):
@@ -7641,18 +7935,19 @@ class AppDelegate(NSObject):
                     NSOperationQueue.mainQueue().addOperationWithBlock_(_fill_ipa)
                     self._log(f"  → 已填入「IPA 路径」供成品包混淆: {latest}")
             else:
-                self._log(f"❌ IPA 打包失败 (exit {proc.returncode})")
+                self._log(f"❌ {notify_title}失败 (exit {proc.returncode})")
                 self._set_status(self.step5_status, "❌ 打包失败", success=False)
-                self._notify_telegram("IPA 打包", ok=False,
+                self._notify_telegram(notify_title, ok=False,
                                       detail=f"exit={proc.returncode}")
         except Exception as e:
             self._log(f"❌ 打包异常: {e}")
             self._set_status(self.step5_status, f"❌ {e}", success=False)
-            self._notify_telegram("IPA 打包", ok=False, detail=str(e))
+            self._notify_telegram(notify_title, ok=False, detail=str(e))
         finally:
             _state["is_running"] = False
             _state.pop("build_proc", None)
             self._set_btn(self.build_ipa_btn, True, "打包 IPA")
+            self._set_btn(self.build_test_ipa_btn, True, "打测试包")
 
     # ── Generic runner ──
 

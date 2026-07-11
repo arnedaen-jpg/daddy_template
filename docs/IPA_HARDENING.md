@@ -31,20 +31,41 @@
 
 - 等长、NUL 结尾保留 → 不动 string table / load command / section 偏移，指针引用仍有效，
   调用点 selref 与方法定义共享同一字符串，改后仍一致，运行时可正常派发。
-- **只改类名**（`--classes`，默认）。**方法名默认不动**：selector 全局 unique，
-  自动改方法名极易崩（如改到系统也实现的 `containsObject:`）。仅在显式提供
-  `--methods-allowlist <file>` 时才改白名单内方法名。
-- **自动保护**：出现在 `__cstring` 的名字（可能被 `NSClassFromString`/`NSSelectorFromString`/KVC/Codable
-  按字面量查找）、系统类前缀（NS/UI/CA/…/Flutter/FLT）、下划线开头、含类型编码的属性串等一律跳过。
+- **整包 `apply-app`（推荐）**：先对 `.app` 内所有 Mach-O **收集全局映射**，再统一写入。
+- **`--macho` 默认（L2.6）**：`RCIMIW`/`RCIMWrapper`/`IRCIMIW` 类名
+  + SDK 方法（selector）+ `--sync-cstring` + `--patch-methtype`
+  + 从 `App.framework` `__const` 采集 Dart 枚举/类型名并等长同步。
+  **不要**裸前缀 `RC`。
+- **禁止对 `App.framework`（Dart AOT）做 channel/`engine_cb` scrub**：就地改字面量会破坏
+  编译期 string switch hash；只 scrub 原生、留下 Dart 也会因双边不一致闪退。
+  检测到 `App.framework` 时脚本会**自动关闭** scrub。
+- **正确做法**：用 `scripts/rongcloud_channel_obfuscate.py` 在 **源码/Framework 混淆阶段**
+  同步改 Dart + ObjC(+Java) 的 MethodChannel / `engine:` / `engine_cb:`（seed 派生，可 restore）。
+  `obfuscate_frameworks.sh run` 已接入 apply + verify。
+- **注意**：终端里残留的 `ZT_MACHO_SCRUB_CSTRING=1` 等会覆盖脚本默认值；调试后请 `unset ZT_MACHO_*`。
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `ZT_MACHO_SDK_PREFIXES` | `RCIMIW,RCIMWrapper,IRCIMIW` | 类名前缀白名单 |
+| `ZT_MACHO_SYNC_CSTRING` | `1` | 同步 `__cstring` 与类名映射 |
+| `ZT_MACHO_PATCH_METHTYPE` | `1`（L2.5+） | 补丁 `__objc_methtype` 嵌入类名 |
+| `ZT_MACHO_SDK_CLASSES_ONLY` | `1` | 只改 SDK 前缀类 |
+| `ZT_MACHO_SCRUB_CSTRING` | `0` | channel/`engine_cb` 擦除（勿对 Dart AOT） |
+| `ZT_MACHO_SDK_METHODS` | `1`（L2.6） | SDK selector 改名 |
+| `ZT_MACHO_SYMBOL_ALIASES` | `0` | LINKEDIT ObjC 符号别名 |
+| `ZT_RENAME_FW` | `1`（standalone） | 重命名融云等 framework |
+| `ZT_NEUTRALIZE_PATHS` / `ZT_NEUTRALIZE_ENUMS` | `1` | 抹构建路径 / 枚举名 |
 
 ### 单独试跑
 
 ```bash
-# 先 dry-run 审阅候选（务必人工过一遍要改哪些类名）
-python3 scripts/macho_symbol_obfuscator.py scan <path/to/App.app/App> --seed com.your.bundle
+python3 scripts/macho_symbol_obfuscator.py scan <path/to/App.app/App> --seed com.your.bundle \
+  --classes --methods --sdk-prefixes RCIMIW,RCIMWrapper,IRCIMIW,RC \
+  --sync-cstring --scrub-cstring
 
-# 应用（等长改写，随后必须重签名）
-python3 scripts/macho_symbol_obfuscator.py apply <binary> --seed com.your.bundle --classes --map-out map.json
+python3 scripts/macho_symbol_obfuscator.py apply <binary> --seed com.your.bundle \
+  --classes --methods --sdk-prefixes RCIMIW,RCIMWrapper,IRCIMIW,RC \
+  --sync-cstring --scrub-cstring --map-out map.json
 ```
 
 无法感知的风险场景：storyboard/xib 按类名实例化、跨二进制按名字调用。**提审前必须真机回归。**

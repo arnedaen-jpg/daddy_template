@@ -40,6 +40,7 @@ SILENT_PERIOD_DAYS=3  # 默认 3 天静默期
 
 # 先扫描所有参数，提取可选 flag
 ARGS=()
+BUILD_ENVIRONMENT="${AB_BUILD_ENVIRONMENT:-release}"
 for arg in "$@"; do
   case "$arg" in
     --cooldown=*|--silent=*)
@@ -55,6 +56,22 @@ for arg in "$@"; do
       fi
       echo ">>> 静默期 silentPeriodDays 将设为 ${SILENT_PERIOD_DAYS} 天"
       ;;
+    --environment=*|--env=*)
+      if [[ "$arg" == --environment=* ]]; then
+        BUILD_ENVIRONMENT="${arg#--environment=}"
+      else
+        BUILD_ENVIRONMENT="${arg#--env=}"
+      fi
+      BUILD_ENVIRONMENT="$(echo "$BUILD_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')"
+      case "$BUILD_ENVIRONMENT" in
+        test|beta|release) ;;
+        *)
+          echo "❌ --environment 须为 test / beta / release，当前: $BUILD_ENVIRONMENT"
+          exit 1
+          ;;
+      esac
+      echo ">>> B面 ENVIRONMENT 将设为: ${BUILD_ENVIRONMENT}"
+      ;;
     *)
       ARGS+=("$arg")
       ;;
@@ -62,11 +79,12 @@ for arg in "$@"; do
 done
 
 if [ ${#ARGS[@]} -lt 1 ]; then
-  echo "用法: $0 <工作目录，包含 build_config.json> [--silent=N] [--cooldown=N]"
+  echo "用法: $0 <工作目录，包含 build_config.json> [--silent=N] [--cooldown=N] [--environment=test|beta|release]"
   echo "示例: $0 /Users/dagou/Desktop/appstore/MyFlutterApp"
   echo "  --silent=3 或 --cooldown=3   默认，静默期 3 天（打包后 3 天内不请求 AB 接口）"
   echo "  --silent=1   静默期 1 天"
   echo "  --silent=0   禁用静默期（AB 接口可直接请求）"
+  echo "  --environment=beta   B面 ENVIRONMENT（默认 release；也可设环境变量 AB_BUILD_ENVIRONMENT）"
   exit 1
 fi
 WORK_DIR="${ARGS[0]%/}"
@@ -415,11 +433,19 @@ if [[ -n "${CUSTOM_EXPORT_PLIST:-}" && -f "$CUSTOM_EXPORT_PLIST" ]]; then
   cp -f "$CUSTOM_EXPORT_PLIST" "$EXPORT_PLIST"
 else
   echo ">>> 生成 ExportOptions.plist"
+  # export_method → ExportOptions method
+  case "${EXPORT_METHOD}" in
+    app-store|appstore|app-store-connect) EXPORT_PLIST_METHOD="app-store-connect" ;;
+    ad-hoc|adhoc) EXPORT_PLIST_METHOD="ad-hoc" ;;
+    development|dev) EXPORT_PLIST_METHOD="development" ;;
+    enterprise) EXPORT_PLIST_METHOD="enterprise" ;;
+    *) EXPORT_PLIST_METHOD="${EXPORT_METHOD}" ;;
+  esac
   {
     echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
     echo '<plist version="1.0"><dict>'
-    echo '  <key>method</key><string>app-store-connect</string>'
+    echo '  <key>method</key><string>'"$EXPORT_PLIST_METHOD"'</string>'
     echo '  <key>signingStyle</key><string>'"$SIGNING_STYLE"'</string>'
     echo '  <key>teamID</key><string>'"$TEAM_ID"'</string>'
     if [[ "$SIGNING_STYLE" == "manual" && -n "${BUNDLE_ID:-}" && -n "${PROFILE_SPECIFIER:-}" ]]; then
@@ -450,6 +476,9 @@ echo ""
 echo "📦 获取依赖..."
 echo "=============="
 fvm flutter pub get
+
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-$LANG}"
 
 # ========== Pod Install ==========
 echo ""
@@ -553,14 +582,15 @@ cd "$FLUTTER_PROJECT_DIR"
 SYMBOLS_DIR="$FLUTTER_PROJECT_DIR/build/symbols"
 mkdir -p "$SYMBOLS_DIR"
 
-# AB 包工厂 / 上架：B 面 String.fromEnvironment('ENVIRONMENT') 固定为 release（与 dq 等模板一致）
+# B 面 String.fromEnvironment('ENVIRONMENT')：默认 release（上架包）；
+# 可通过 --environment= / AB_BUILD_ENVIRONMENT 覆盖（测试包用 test/beta）
 # 可选：AB_BUILD_APP_CHANNEL 传入后同时设置 APP_CHANNEL（与 xxChannel 一致）
-EXTRA_DEFS=(--dart-define=ENVIRONMENT=release)
+EXTRA_DEFS=(--dart-define=ENVIRONMENT="${BUILD_ENVIRONMENT}")
 if [[ -n "${AB_BUILD_APP_CHANNEL:-}" ]]; then
   EXTRA_DEFS+=(--dart-define=APP_CHANNEL="${AB_BUILD_APP_CHANNEL}")
-  echo ">>> dart-define: ENVIRONMENT=release APP_CHANNEL=${AB_BUILD_APP_CHANNEL}"
+  echo ">>> dart-define: ENVIRONMENT=${BUILD_ENVIRONMENT} APP_CHANNEL=${AB_BUILD_APP_CHANNEL}"
 else
-  echo ">>> dart-define: ENVIRONMENT=release（未设置 AB_BUILD_APP_CHANNEL 则沿用源码 defaultValue）"
+  echo ">>> dart-define: ENVIRONMENT=${BUILD_ENVIRONMENT}（未设置 AB_BUILD_APP_CHANNEL 则沿用源码 defaultValue）"
 fi
 
 fvm flutter build ipa \

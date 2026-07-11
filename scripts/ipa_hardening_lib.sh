@@ -3,7 +3,10 @@
 # 被 build_flutter_ipa.sh / resign_ipa.sh 等 source 使用。
 set -euo pipefail
 
-# 解析签名身份：优先用传入值，否则按 Team ID 在钥匙串查找
+# 解析签名身份：优先用传入值；否则按 Team + 用途选择。
+# 真机直装需要 Development / Ad Hoc；默认优先 Development，避免误用 Distribution
+# 导致 0xe8008015（valid provisioning profile not found）。
+# 导出上架包时显式传 --identity "Apple Distribution: …"。
 resolve_codesign_identity() {
     local team_id="${1:-}"
     local override="${2:-}"
@@ -11,16 +14,34 @@ resolve_codesign_identity() {
         printf '%s' "$override"
         return 0
     fi
-    local id=""
-    if [[ -n "$team_id" ]]; then
-        id="$(security find-identity -v -p codesigning 2>/dev/null \
-            | grep "Apple Distribution" | grep "$team_id" | head -1 \
-            | sed 's/.*"\(.*\)"/\1/' || true)"
+    # ZT_CODESIGN_IDENTITY 可强制指定（含 Distribution）
+    if [[ -n "${ZT_CODESIGN_IDENTITY:-}" ]]; then
+        printf '%s' "$ZT_CODESIGN_IDENTITY"
+        return 0
     fi
-    [[ -z "$id" ]] && id="$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep "Apple Distribution" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)"
-    [[ -z "$id" ]] && id="$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep "iPhone Distribution" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)"
+    local prefer="${ZT_CODESIGN_PREFER:-development}"  # development | distribution
+    local id=""
+    local list
+    list="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    _pick() {
+        local pat="$1"
+        if [[ -n "$team_id" ]]; then
+            printf '%s\n' "$list" | grep "$pat" | grep "$team_id" | head -1 \
+                | sed 's/.*"\(.*\)"/\1/' || true
+        else
+            printf '%s\n' "$list" | grep "$pat" | head -1 \
+                | sed 's/.*"\(.*\)"/\1/' || true
+        fi
+    }
+    if [[ "$prefer" == "distribution" ]]; then
+        id="$(_pick "Apple Distribution")"
+        [[ -z "$id" ]] && id="$(_pick "iPhone Distribution")"
+        [[ -z "$id" ]] && id="$(_pick "Apple Development")"
+    else
+        id="$(_pick "Apple Development")"
+        [[ -z "$id" ]] && id="$(_pick "iPhone Developer")"
+        [[ -z "$id" ]] && id="$(_pick "Apple Distribution")"
+    fi
     printf '%s' "$id"
 }
 
@@ -47,7 +68,122 @@ harden_app_bundle() {
     # 成品包二进制指纹中和（须在 obfuscate_ipa 之后、重签名之前执行）：
     #   1) 开发者路径抹除（/Users/... → /dev/null）——ZT_NEUTRALIZE_PATHS=0 可关
     #   2) 业务枚举名中和（装饰性成员名 → 中性等长串）——ZT_NEUTRALIZE_ENUMS=0 可关
-    neutralize_bundle_binaries "$app_dir" "$script_dir"
+    #   3) SDK what-string 品牌中和——ZT_NEUTRALIZE_BRANDS=0 可关
+    #   4) LC_UUID 重写——ZT_REWRITE_UUIDS=0 可关
+    #   5) LC_SOURCE_VERSION 重写——ZT_REWRITE_SOURCE_VERSION=0 可关
+    #   6) LC SDK 版本字段扰动——ZT_REWRITE_SDK_VERSION=0 可关
+    SEED="$seed" neutralize_bundle_binaries "$app_dir" "$script_dir"
+
+    # Info.plist 构建元数据抹除（DTXcode 等）——ZT_NEUTRALIZE_PLIST_META=0 可关
+    if [[ "${ZT_NEUTRALIZE_PLIST_META:-1}" != "0" ]]; then
+        local plist_py="$script_dir/neutralize_info_plist_meta.py"
+        if [[ -f "$plist_py" ]]; then
+            echo "[ipa-harden] Info.plist 构建元数据抹除..."
+            python3 "$plist_py" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] plist 元数据抹除部分失败" >&2
+        fi
+    fi
+
+    # PrivacyInfo 键序扰动——ZT_NEUTRALIZE_PRIVACY=0 可关
+    if [[ "${ZT_NEUTRALIZE_PRIVACY:-1}" != "0" ]]; then
+        local priv_py="$script_dir/neutralize_privacy_manifests.py"
+        if [[ -f "$priv_py" ]]; then
+            echo "[ipa-harden] PrivacyInfo 键序扰动..."
+            python3 "$priv_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] PrivacyInfo 扰动部分失败" >&2
+        fi
+    fi
+
+    # Assets.car 尾部填充扰动——ZT_PERTURB_ASSETS_CAR=0 可关
+    if [[ "${ZT_PERTURB_ASSETS_CAR:-1}" != "0" ]]; then
+        local car_py="$script_dir/perturb_assets_car.py"
+        if [[ -f "$car_py" ]]; then
+            echo "[ipa-harden] Assets.car 尾部填充扰动..."
+            python3 "$car_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] Assets.car 扰动部分失败" >&2
+        fi
+    fi
+
+    # gzip 头扰动（NOTICES.Z 等）——ZT_PERTURB_GZIP=0 可关
+    if [[ "${ZT_PERTURB_GZIP:-1}" != "0" ]]; then
+        local gz_py="$script_dir/perturb_gzip_headers.py"
+        if [[ -f "$gz_py" ]]; then
+            echo "[ipa-harden] gzip 头扰动..."
+            python3 "$gz_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] gzip 头扰动部分失败" >&2
+        fi
+    fi
+
+    # PkgInfo / gitkeep / html / js 标记扰动——ZT_PERTURB_MARKERS=0 可关
+    if [[ "${ZT_PERTURB_MARKERS:-1}" != "0" ]]; then
+        local mark_py="$script_dir/perturb_bundle_markers.py"
+        if [[ -f "$mark_py" ]]; then
+            echo "[ipa-harden] 包内标记扰动..."
+            python3 "$mark_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] 包内标记扰动部分失败" >&2
+        fi
+    fi
+
+    # L292：文本资源品牌擦除（隐私政策 HTML 等）——ZT_SCRUB_TEXT_BRANDS=0 可关
+    if [[ "${ZT_SCRUB_TEXT_BRANDS:-1}" != "0" ]]; then
+        local scrub_py="$script_dir/scrub_text_brand_strings.py"
+        if [[ -f "$scrub_py" ]]; then
+            echo "[ipa-harden] 文本资源 SDK 品牌擦除..."
+            python3 "$scrub_py" "$app_dir" "$seed" | tail -1 \
+                || echo "[ipa-harden] 文本品牌擦除部分失败" >&2
+        fi
+    fi
+
+    # JSON seed 标记（NativeAssets / Lottie）——ZT_PERTURB_JSON=0 可关
+    if [[ "${ZT_PERTURB_JSON:-1}" != "0" ]]; then
+        local json_py="$script_dir/perturb_json_markers.py"
+        if [[ -f "$json_py" ]]; then
+            echo "[ipa-harden] JSON 标记扰动..."
+            python3 "$json_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] JSON 标记扰动部分失败" >&2
+        fi
+    fi
+
+    # framework 版本号 / cocoapods bid 中和——ZT_NEUTRALIZE_FW_PLIST=0 可关
+    if [[ "${ZT_NEUTRALIZE_FW_PLIST:-1}" != "0" ]]; then
+        local fwpl_py="$script_dir/neutralize_framework_plist_versions.py"
+        if [[ -f "$fwpl_py" ]]; then
+            echo "[ipa-harden] framework Info.plist 版本中和..."
+            python3 "$fwpl_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] framework plist 版本中和部分失败" >&2
+        fi
+    fi
+
+    # Info.plist 指纹扰动（须在 fw plist 版本中和之后，避免被覆盖）
+    # ——ZT_NEUTRALIZE_PLIST_ORDER=0 可关
+    if [[ "${ZT_NEUTRALIZE_PLIST_ORDER:-1}" != "0" ]]; then
+        local order_py="$script_dir/neutralize_info_plist_order.py"
+        if [[ -f "$order_py" ]]; then
+            echo "[ipa-harden] Info.plist 指纹扰动..."
+            python3 "$order_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] Info.plist 指纹扰动部分失败" >&2
+        fi
+    fi
+
+    # 剥离 Headers/Modules——ZT_STRIP_FW_HEADERS=0 可关
+    if [[ "${ZT_STRIP_FW_HEADERS:-1}" != "0" ]]; then
+        local strip_py="$script_dir/strip_framework_headers.py"
+        if [[ -f "$strip_py" ]]; then
+            echo "[ipa-harden] 剥离 framework Headers/Modules..."
+            python3 "$strip_py" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] Headers 剥离部分失败" >&2
+        fi
+    fi
+
+    # RCConfig.plist 等长改名 + cstring 同步——ZT_RENAME_RCCONFIG=0 可关
+    if [[ "${ZT_RENAME_RCCONFIG:-1}" != "0" ]]; then
+        local rcc_py="$script_dir/rename_rcconfig_plist.py"
+        if [[ -f "$rcc_py" ]]; then
+            echo "[ipa-harden] RCConfig.plist 改名..."
+            python3 "$rcc_py" --seed "$seed" "$app_dir" | tail -1 \
+                || echo "[ipa-harden] RCConfig 改名部分失败" >&2
+        fi
+    fi
 }
 
 # 收集 .app 内的 Mach-O 二进制并做同长度指纹中和
@@ -56,10 +192,18 @@ neutralize_bundle_binaries() {
     local script_dir="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
     local do_paths="${ZT_NEUTRALIZE_PATHS:-1}"
     local do_enums="${ZT_NEUTRALIZE_ENUMS:-1}"
-    [[ "$do_paths" == "0" && "$do_enums" == "0" ]] && return 0
+    local do_brands="${ZT_NEUTRALIZE_BRANDS:-1}"
+    local do_uuids="${ZT_REWRITE_UUIDS:-1}"
+    local do_srcver="${ZT_REWRITE_SOURCE_VERSION:-1}"
+    local do_sdkver="${ZT_REWRITE_SDK_VERSION:-1}"
+    [[ "$do_paths" == "0" && "$do_enums" == "0" && "$do_brands" == "0" && "$do_uuids" == "0" && "$do_srcver" == "0" && "$do_sdkver" == "0" ]] && return 0
 
     local paths_py="$script_dir/neutralize_macho_paths.py"
     local enums_py="$script_dir/neutralize_enum_names.py"
+    local brands_py="$script_dir/neutralize_sdk_brand_strings.py"
+    local uuids_py="$script_dir/rewrite_macho_uuids.py"
+    local srcver_py="$script_dir/rewrite_macho_source_versions.py"
+    local sdkver_py="$script_dir/rewrite_macho_sdk_versions.py"
 
     # 枚举所有 Mach-O 二进制（主可执行 + framework/dylib + Flutter App/Dart 快照）
     local -a bins=()
@@ -81,6 +225,30 @@ neutralize_bundle_binaries() {
     if [[ "$do_enums" != "0" && -f "$enums_py" ]]; then
         echo "[ipa-harden] 业务枚举名中和（${#bins[@]} 个二进制）..."
         python3 "$enums_py" "${bins[@]}" | tail -1 || echo "[ipa-harden] 枚举中和部分失败" >&2
+    fi
+    if [[ "$do_brands" != "0" && -f "$brands_py" ]]; then
+        local brand_seed="${ZT_SEED:-${SEED:-com.app.brand}}"
+        echo "[ipa-harden] SDK what-string 品牌中和（${#bins[@]} 个二进制）..."
+        python3 "$brands_py" --seed "$brand_seed" "${bins[@]}" | tail -1 \
+            || echo "[ipa-harden] 品牌中和部分失败" >&2
+    fi
+    if [[ "$do_uuids" != "0" && -f "$uuids_py" ]]; then
+        local uuid_seed="${ZT_SEED:-${SEED:-com.app.brand}}"
+        echo "[ipa-harden] LC_UUID 重写（${#bins[@]} 个二进制）..."
+        python3 "$uuids_py" --seed "$uuid_seed" "${bins[@]}" | tail -1 \
+            || echo "[ipa-harden] UUID 重写部分失败" >&2
+    fi
+    if [[ "$do_srcver" != "0" && -f "$srcver_py" ]]; then
+        local srcver_seed="${ZT_SEED:-${SEED:-com.app.brand}}"
+        echo "[ipa-harden] LC_SOURCE_VERSION 重写（${#bins[@]} 个二进制）..."
+        python3 "$srcver_py" --seed "$srcver_seed" "${bins[@]}" | tail -1 \
+            || echo "[ipa-harden] SOURCE_VERSION 重写部分失败" >&2
+    fi
+    if [[ "$do_sdkver" != "0" && -f "$sdkver_py" ]]; then
+        local sdkver_seed="${ZT_SEED:-${SEED:-com.app.brand}}"
+        echo "[ipa-harden] LC SDK 版本字段扰动（${#bins[@]} 个二进制）..."
+        python3 "$sdkver_py" --seed "$sdkver_seed" "${bins[@]}" | tail -1 \
+            || echo "[ipa-harden] SDK 版本扰动部分失败" >&2
     fi
 }
 
@@ -161,7 +329,13 @@ harden_and_resign_ipa() {
     resign_app_bundle "$app_dir" "$profile_path" "$identity" "$bundle_id" \
         || { rm -rf "$work"; return 1; }
 
-    ( cd "$work" && zip -qr "hardened.ipa" Payload )
+    local pack_py="$script_dir/pack_ipa_seeded.py"
+    if [[ -f "$pack_py" && "${ZT_SEED_ZIP_DATE:-1}" != "0" ]]; then
+        python3 "$pack_py" --seed "$seed" --out "$work/hardened.ipa" "$work" \
+            || ( cd "$work" && zip -qr "hardened.ipa" Payload )
+    else
+        ( cd "$work" && zip -qr "hardened.ipa" Payload )
+    fi
     mv "$work/hardened.ipa" "$orig_dir/$ipa_name"
     rm -rf "$work"
     echo "[ipa-harden] 已加固并重签: $orig_dir/$ipa_name"
