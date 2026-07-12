@@ -141,6 +141,13 @@ bt_rename_static_functions() {
         done
         [[ "$skip" == "true" ]] && continue
 
+        # 跨端契约保护：若名字以带引号字符串出现（如 isEqualToString:@"xxx"），
+        # 它同时是 MethodChannel 方法名，改掉字符串会导致运行时 MissingPluginException。
+        if grep -qF "\"${func}\"" "$file" 2>/dev/null; then
+            [[ "$VERBOSE" == "true" ]] && log_info "    [L1] 跳过跨端方法名 static: $func" || true
+            continue
+        fi
+
         local per_func_hash
         per_func_hash=$(hash_derive "${SEED}:rename:$(basename "$file"):${func}:${func_idx}")
         local new_func="${prefix}${per_func_hash:0:4}_${func}"
@@ -207,6 +214,16 @@ bt_rename_swift_privates() {
             done <<< "$public_labels"
         fi
         [[ "$skip" == "true" ]] && continue
+
+        # 跨端契约保护：若该名字在文件里以带引号字符串出现（如
+        #   call.method == "getTrackingAuthorizationStatus" / case "xxx":），
+        # 说明它同时是 MethodChannel 方法名。word-boundary sed 会把字符串里的
+        # 同名一起改掉，而 Dart 侧方法名不变 → 分派 FlutterMethodNotImplemented
+        # → 运行时 MissingPluginException。这类名字一律跳过不改。
+        if grep -qF "\"${name}\"" "$file" 2>/dev/null; then
+            [[ "$VERBOSE" == "true" ]] && log_info "    [L1] 跳过跨端方法名 private func: $name" || true
+            continue
+        fi
 
         local per_func_hash
         per_func_hash=$(hash_derive "${SEED}:rename:$(basename "$file"):${name}:${func_idx}")
