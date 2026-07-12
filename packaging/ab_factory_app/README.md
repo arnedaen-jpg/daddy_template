@@ -65,7 +65,7 @@ v6.7+ 在「步骤 5 · 打包 IPA」内增加独立区块：
 
 - **IPA 路径**：工厂打包产物或任意外部 `.ipa`
 - **混淆 IPA**：调用工程/模板内 `scripts/harden_ipa_standalone.sh`
-- **Mach-O**：可选勾选
+- **Mach-O**：默认勾选（可手动关闭，关闭则仅资源指纹差异化）
 - 与 **打包 IPA** 分离；打包不再自动做成品包加固
 
 依赖脚本（需在工程或 `daddy_template/scripts/` 内）：

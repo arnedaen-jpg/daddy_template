@@ -3183,9 +3183,9 @@ class AppDelegate(NSObject):
             NSMakeRect(bw - 100, by + 2, 96, row_h))
         self.ipa_harden_macho_switch.setButtonType_(3)
         self.ipa_harden_macho_switch.setTitle_("Mach-O")
-        self.ipa_harden_macho_switch.setState_(0)
+        self.ipa_harden_macho_switch.setState_(1)  # 默认开启
         self.ipa_harden_macho_switch.setToolTip_(
-            "启用 Mach-O 符号混淆：类名 + RCIMIW/RC 方法 + cstring/const 擦除（中高风险，提审前需真机回归）。默认仅资源指纹差异化。")
+            "启用 Mach-O 符号混淆：类名 + RCIMIW/RC 方法 + cstring/const 擦除（中高风险，提审前需真机回归）。默认开启；关闭则仅资源指纹差异化。")
         cv5.addSubview_(self.ipa_harden_macho_switch)
         by -= sp
         cv5.addSubview_(make_label(
