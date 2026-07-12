@@ -23,15 +23,37 @@ resolve_codesign_identity() {
     local id=""
     local list
     list="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    # 从显示名取证书 subject 的 OU（Team ID）。
+    # Apple Development 显示名括号内是个人 ID，不是 Team ID，不能靠 grep team_id。
+    _identity_team_ou() {
+        local name="$1"
+        security find-certificate -c "$name" -p 2>/dev/null \
+            | openssl x509 -noout -subject 2>/dev/null \
+            | sed -n 's/.*OU=\([^/,]*\).*/\1/p' | head -1 || true
+    }
     _pick() {
         local pat="$1"
-        if [[ -n "$team_id" ]]; then
-            printf '%s\n' "$list" | grep "$pat" | grep "$team_id" | head -1 \
-                | sed 's/.*"\(.*\)"/\1/' || true
-        else
-            printf '%s\n' "$list" | grep "$pat" | head -1 \
-                | sed 's/.*"\(.*\)"/\1/' || true
-        fi
+        local line name ou
+        while IFS= read -r line; do
+            [[ "$line" == *"$pat"* ]] || continue
+            name="$(printf '%s\n' "$line" | sed 's/.*"\(.*\)"/\1/')"
+            [[ -n "$name" ]] || continue
+            if [[ -z "$team_id" ]]; then
+                printf '%s' "$name"
+                return 0
+            fi
+            # 显示名含 Team ID（Distribution 常见）或证书 OU 匹配
+            if [[ "$name" == *"$team_id"* ]]; then
+                printf '%s' "$name"
+                return 0
+            fi
+            ou="$(_identity_team_ou "$name")"
+            if [[ "$ou" == "$team_id" ]]; then
+                printf '%s' "$name"
+                return 0
+            fi
+        done < <(printf '%s\n' "$list")
+        return 0
     }
     if [[ "$prefer" == "distribution" ]]; then
         id="$(_pick "Apple Distribution")"
@@ -40,6 +62,7 @@ resolve_codesign_identity() {
     else
         id="$(_pick "Apple Development")"
         [[ -z "$id" ]] && id="$(_pick "iPhone Developer")"
+        # 真机 development profile 绝不能落到 Distribution，否则 0xe8008015
         [[ -z "$id" ]] && id="$(_pick "Apple Distribution")"
     fi
     printf '%s' "$id"
@@ -269,11 +292,27 @@ resign_app_bundle() {
     security cms -D -i "$profile_path" > "$tmp/profile.plist"
     /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' "$tmp/profile.plist" > "$tmp/entitlements.plist"
 
+    # 描述文件 application-identifier 决定可安装的 Bundle ID。
+    # 若加固/UI 把 CFBundleIdentifier 改成随机值却仍嵌旧 profile，会触发 0xe8008015。
+    local prof_app_id expected_bid
+    prof_app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$tmp/profile.plist" 2>/dev/null || true)"
+    expected_bid=""
+    if [[ -n "$prof_app_id" && "$prof_app_id" != *"*"* ]]; then
+        # TEAMID.bundle.id → bundle.id
+        expected_bid="${prof_app_id#*.}"
+    fi
+    if [[ -n "$expected_bid" ]]; then
+        if [[ -n "$bundle_id" && "$bundle_id" != "$expected_bid" ]]; then
+            echo "[ipa-harden] 警告: --bundle-id=$bundle_id 与 profile($expected_bid) 不一致，以 profile 为准" >&2
+        fi
+        bundle_id="$expected_bid"
+    fi
     if [[ -n "$bundle_id" ]]; then
         local cur
         cur="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_dir/Info.plist" 2>/dev/null || true)"
         if [[ -n "$cur" && "$cur" != "$bundle_id" ]]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$app_dir/Info.plist"
+            echo "[ipa-harden] CFBundleIdentifier: $cur → $bundle_id" >&2
         fi
     fi
 
