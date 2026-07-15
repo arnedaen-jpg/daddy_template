@@ -5,7 +5,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
 import '../config/env_config.dart';
 import '../utils/s.dart';
-import 'network/capture_proxy.dart';
 import 'network/device_info_manager.dart';
 
 /// 域名管理服务
@@ -124,7 +123,6 @@ class DomainManager {
         'Accept': 'application/json',
       },
     ));
-    CaptureProxy.applyToDio(_probeDio!);
 
     if (kDebugMode) {
       _debugForceFailDefault = _prefs?.getBool(_debugForceFailDefaultKey) ?? false;
@@ -145,11 +143,6 @@ class DomainManager {
     required String configPath,
     required Map<String, dynamic> queryParameters,
   }) async {
-    // 每次拉取前重新挂代理（用户可能刚在 B 面改完代理未杀进程）
-    if (_probeDio != null) {
-      CaptureProxy.applyToDio(_probeDio!);
-    }
-
     _fallbackLog.clear();
     final triedDomains = <String>{};
 
@@ -342,7 +335,6 @@ class DomainManager {
       connectTimeout: _cdnTimeout,
       receiveTimeout: _cdnTimeout,
     ));
-    CaptureProxy.applyToDio(cdnDio);
 
     for (int i = 0; i < S.cdnArticleUrlBytes.length; i++) {
       final url = utf8.decode(S.cdnArticleUrlBytes[i]);
