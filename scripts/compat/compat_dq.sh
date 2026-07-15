@@ -536,20 +536,17 @@ def neutral(token: str) -> str:
     return f'ui_{h}'
 
 # 文件名 stem 前缀（覆盖静态引用与 `前缀${var}` 插值）。长的先替换。
+# 注意：仅保留「主要是 svg/svga/json」的 token。
+# png/jpg/webp 前缀必须放进 neutralize_dq_sensitive_rasters（base64 生成前），
+# 否则会在 map 生成后改 Dart 引用、却未改 map key，运行时必缺图。
 FILE_TOKENS = [
     'icon_live_caisedanmu',
     'user_noble_enter',
     'anchor_live',
     'dianjing',
-    'icon_odd_',
-    'icon_predict_',
-    'icon_vote_',
-    'icon_redu',
-    'icon_chat_',
-    'icon_rank_',
-    'bg_live_',
-    'chat_noble_',
-    'chat_giftNumber',
+    # 下列为栅格图前缀，已迁移到 neutralize_dq_sensitive_rasters：
+    # icon_odd_ / icon_predict_ / icon_vote_ / icon_redu /
+    # icon_chat_ / icon_rank_ / bg_live_ / chat_noble_ / chat_giftNumber
 ]
 FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
 MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
@@ -660,7 +657,8 @@ def neutral(token: str) -> str:
     return f'ui_{h}'
 
 # 资源名专有的敏感前缀（长前缀先替换，避免短前缀先命中导致漏改）。
-# 仅选用「明显是图片名前缀」的 token：直播/主播/贵族/礼物/弹幕/赔率/竞猜/vip。
+# 仅选用「明显是图片名前缀」的 token：直播/主播/贵族/礼物/弹幕/赔率/竞猜/vip/排行/聊天图标。
+# 必须在 generate_secondary_base64_map 之前执行，保证 map key 与 Dart 引用一致。
 FILE_TOKENS = [
     'ic_main_tab_live',
     'icon_live_danmu', 'ic_live_search', 'ic_live_segment66', 'ic_live_banner',
@@ -674,6 +672,9 @@ FILE_TOKENS = [
     'icon_anchor_online', 'bg_anchor_online', 'icon_anchor', 'bg_anchor', 'ic_anchor',
     'btn_zhibo',
     'icon_qiupiao', 'icon_qiuzuan',
+    # 原误放在 neutralize_dq_sensitive_assets（svg 步骤）的栅格前缀：
+    'icon_predict_', 'icon_vote_', 'icon_redu',
+    'icon_chat_', 'icon_rank_', 'bg_live_',
 ]
 FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
 MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
