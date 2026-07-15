@@ -30,7 +30,23 @@ Mach-O 符号混淆器（成品包层，无需源码）。
   # 整包（推荐）：先全局收集映射，再写入每个 Mach-O —— 避免「framework 改了、Runner 没改」启动崩
   python3 macho_symbol_obfuscator.py scan-app|apply-app <Payload/Xxx.app> --seed S
       [--classes] [--methods] [--sdk-prefixes RCIMIW,RCIMWrapper,IRCIMIW,RC]
-      [--sync-cstring] [--scrub-cstring] [--map-out m.json]
+      [--sync-cstring] [--scrub-cstring] [--scrub-swift] [--strategy sym.json]
+      [--map-out m.json]
+  # 符号策略文件（对齐 Ipa Guard 的 parse → 编辑 → protect 流程）：
+  #   1) 先导出候选符号 + 元数据（confuse 默认按现有启发式给出）
+  python3 macho_symbol_obfuscator.py export-app <Payload/Xxx.app> --seed S \
+      [--classes] [--methods] [--sdk-prefixes ...] --strategy-out sym.json
+  #   2) 人工编辑 sym.json 里的 confuse 字段（true=改写 / false=跳过）
+  #   3) 用 --strategy sym.json 重跑 scan-app/apply-app：
+  #      confuse:false 强制跳过；confuse:true 尝试放行（硬保护项仍不可覆盖，如
+  #      非标识符字面量、Flutter 启动关键类）
+
+新增（对齐业界工具 MachObfuscator / Ipa Guard 常见能力）：
+  --scrub-swift   整段填 0：__swift{3,4,5}_typeref / __swift{3,4,5}_reflstr
+                  （不改长度/偏移；默认关；对 Dart AOT/App.framework 自动跳过）
+  --strategy      加载 export-app 产出、人工编辑过的符号策略 JSON
+  包间差异化：等长改写使用的字符集按 seed 派生风格位选择（同 seed 确定性一致，
+  不同 seed 风格不同），无需额外参数。
 """
 
 import argparse
@@ -101,7 +117,28 @@ PROTECTED_CLASSES = {
     "SceneDelegate",
 }
 
-_RENAME_CHARSET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+# 包间策略分化：等长改写用的字符集按 seed 派生风格位选择，使不同包（不同
+# seed/bundleId）产出的改名风格可观察不同（长度约束不变），同 seed 仍确定性一致。
+# style 1 与旧版单一字符集等价（默认行为的延续）。
+_RENAME_CHARSETS = {
+    0: ("abcdefghijklmnopqrstuvwxyz" * 3
+        + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        + "0123456789" + "_"),
+    1: ("abcdefghijklmnopqrstuvwxyz"
+        + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        + "0123456789" + "_"),
+    2: ("abcdefghijklmnopqrstuvwxyz"
+        + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        + "0123456789" * 3 + "_"),
+}
+
+
+def _seed_style(seed):
+    """由 seed 派生风格位（0/1/2），与逐名改写的哈希空间独立（前缀区分）。"""
+    if not seed:
+        return 1
+    h = hashlib.sha1(("style::" + seed).encode("utf-8")).digest()
+    return h[0] % len(_RENAME_CHARSETS)
 
 # SDK 前缀 RC 易误伤 OpenSSL RC2·RC4·RC5。
 # 注意：不能用 startswith("RCT")——会误伤 RCTextMessage / RCTyping*（RC+Text…）。
@@ -257,6 +294,49 @@ def _parse_prefixes(s):
     return out
 
 
+# 策略文件（export-app 产出、可人工编辑）里 confuse:true 也不可覆盖的硬保护项：
+# 一旦放行会破坏运行时元数据或必然崩溃，与是否是 SDK 符号无关。
+_HARD_PROTECT_REASONS = {"non-identifier(type-encoding/attr)", "protected-class"}
+
+
+def _load_strategy(path):
+    """加载符号策略 JSON（export-app 产出，人工编辑 confuse 字段后使用）。
+
+    返回 {(kind, name): confuse_bool}；kind ∈ {"class", "method"}。
+    """
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    out = {}
+    for e in data.get("entries", []):
+        name = e.get("name")
+        kind = e.get("kind")
+        if not name or kind not in ("class", "method"):
+            continue
+        out[(kind, name)] = bool(e.get("confuse", False))
+    return out
+
+
+def _strategy_override(name, kind, reason, strategy):
+    """策略文件优先于默认启发式判断（硬保护项除外）。
+
+    - strategy 中 confuse:false → 强制跳过（即便默认判定可改写）。
+    - strategy 中 confuse:true  → 尝试放行（除非属于 `_HARD_PROTECT_REASONS`）。
+    - 名字不在策略里 → 不受影响，沿用默认 reason。
+    """
+    if strategy is None:
+        return reason
+    confuse = strategy.get((kind, name))
+    if confuse is None:
+        return reason
+    if confuse is False:
+        return reason or "strategy-skip"
+    if reason in _HARD_PROTECT_REASONS:
+        return reason
+    return None
+
+
 def _matches_sdk_prefix(name, prefixes):
     if not prefixes:
         return False
@@ -401,7 +481,11 @@ def _is_protected(name, is_class, cstring_names, min_len, aggressive, extra,
 
 
 def _rename_same_length(name, seed):
-    """就地等长改写：只扰动 [A-Za-z0-9_]，保留其它结构字符；确定性。"""
+    """就地等长改写：只扰动 [A-Za-z0-9_]，保留其它结构字符；确定性。
+
+    字符集按 seed 派生风格位选择（见 `_seed_style`），实现包间改名风格差异化。
+    """
+    charset = _RENAME_CHARSETS[_seed_style(seed)]
     h = hashlib.sha1((seed + "|" + name).encode("utf-8")).digest()
     out = []
     hi = 0
@@ -410,11 +494,11 @@ def _rename_same_length(name, seed):
         if ch.isalnum() or ch == "_":
             b = h[hi % len(h)]
             hi += 1
-            idx = b % len(_RENAME_CHARSET)
-            c = _RENAME_CHARSET[idx]
+            idx = b % len(charset)
+            c = charset[idx]
             # 标识符首字符避免数字（纯美观，非运行时要求）
             if first_ident and c.isdigit():
-                c = _RENAME_CHARSET[(idx + 10) % len(_RENAME_CHARSET)]
+                c = charset[(idx + 10) % len(charset)]
             out.append(c)
             first_ident = False
         else:
@@ -536,6 +620,29 @@ def _is_dart_aot_macho(path):
     """Flutter Dart AOT 在 App.framework/App；禁止对其做 channel scrub。"""
     p = path.replace("\\", "/")
     return "/App.framework/" in p or p.endswith("/Frameworks/App.framework/App")
+
+
+# 对齐 MachObfuscator：Swift 类型元数据/反射字符串整段填 0（不改长度/偏移）。
+# 这些 section 只被 Swift runtime 反射/镜像使用，正常业务调用不依赖其内容，
+# 但擦除会削弱 `Mirror`/`String(reflecting:)`/某些 Codable 场景，混合大量
+# Swift 反射的 SDK 需真机回归。对 Dart AOT（App.framework）跳过——那里没有
+# 真正的 Swift 元数据，误判命中也应保持保守。
+_SWIFT_SCRUB_SECTS = {
+    b"__swift3_typeref", b"__swift4_typeref", b"__swift5_typeref",
+    b"__swift3_reflstr", b"__swift4_reflstr", b"__swift5_reflstr",
+}
+
+
+def _scrub_swift_sections(buf, slices):
+    """整段填 0：Swift typeref/reflstr。返回命中的 section 数。"""
+    n = 0
+    for (slice_off, is64, be) in slices:
+        for (_seg, sect, off, size) in _sections(buf, slice_off, is64, be):
+            if sect not in _SWIFT_SCRUB_SECTS or size <= 0:
+                continue
+            buf[off:off + size] = b"\x00" * size
+            n += 1
+    return n
 
 
 def _patch_embedded_classnames(buf, slices, mapping, seed, sdk_prefixes, min_len):
@@ -836,10 +943,100 @@ def list_app_machos(app_path):
     return uniq
 
 
+def export_app_strategy(app_path, min_len, aggressive, do_classes, do_methods,
+                        extra, method_allowlist, sync_cstring, sdk_prefixes,
+                        sdk_classes_only, strategy_out):
+    """导出符号策略候选（对齐 Ipa Guard 的 parse 阶段）。
+
+    遍历 .app 内全部 Mach-O，对每个类名/方法名给出 `confuse` 默认建议：
+    - 默认判定为「可改写」→ confuse:true（SDK 前缀命中额外标注 reason）
+    - 默认判定为「受保护」→ confuse:false，reason 为具体保护原因
+    人工编辑 confuse 字段后，用 --strategy 传回 scan-app/apply-app。
+    """
+    sdk_prefixes = sdk_prefixes or []
+    bins = list_app_machos(app_path)
+    if not bins:
+        print("  [skip] .app 内无 Mach-O: %s" % app_path)
+        return 0
+
+    allow = set(method_allowlist) if method_allowlist is not None else None
+    if do_methods and sdk_prefixes:
+        if allow is None:
+            allow = set()
+        for p in bins:
+            buf = _read(p)
+            slices = _slices(buf)
+            if not slices:
+                continue
+            allow |= _collect_sdk_methnames(buf, slices, sdk_prefixes, min_len)
+    method_allowlist = allow
+
+    entries = {}
+
+    for p in bins:
+        buf = _read(p)
+        slices = _slices(buf)
+        if not slices:
+            continue
+        cstring_names = _collect_cstring_names(buf, slices)
+        for (_so, is64, be) in slices:
+            for (_seg, sect, off, size) in _sections(buf, _so, is64, be):
+                is_class = sect in TARGET_CLASS_SECTS
+                is_meth = sect in TARGET_METH_SECTS
+                if not (is_class or is_meth):
+                    continue
+                if is_class and not do_classes:
+                    continue
+                if is_meth and not do_methods:
+                    continue
+                kind = "class" if is_class else "method"
+                for (_start, raw) in _iter_cstrings(buf, off, size):
+                    try:
+                        name = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    key = (kind, name)
+                    if key in entries:
+                        continue
+                    reason = _is_protected(
+                        name, is_class, cstring_names, min_len, aggressive, extra,
+                        method_allowlist, sync_cstring, sdk_prefixes,
+                        sdk_classes_only=sdk_classes_only)
+                    if reason:
+                        entries[key] = {
+                            "name": name, "kind": kind,
+                            "confuse": False, "reason": reason,
+                        }
+                    else:
+                        is_sdk = bool(sdk_prefixes and _matches_sdk_prefix(name, sdk_prefixes))
+                        entries[key] = {
+                            "name": name, "kind": kind, "confuse": True,
+                            "reason": "sdk-prefix" if is_sdk else "candidate",
+                        }
+
+    ordered = [entries[k] for k in sorted(entries, key=lambda k: (k[0], k[1]))]
+    strategy = {"version": 1, "app": app_path, "entries": ordered}
+    if strategy_out:
+        with open(strategy_out, "w", encoding="utf-8") as f:
+            json.dump(strategy, f, ensure_ascii=False, indent=2)
+    n_confuse = sum(1 for e in ordered if e["confuse"])
+    n_skip = len(ordered) - n_confuse
+    print("  ✓ export-app 完成: 共 %d 条（默认 confuse=%d, skip=%d）→ %s" %
+          (len(ordered), n_confuse, n_skip, strategy_out or "(未指定 --strategy-out，未写出)"))
+    print("  提示: 编辑 confuse 字段后用 --strategy %s 传回 scan-app/apply-app" %
+          (strategy_out or "sym.json"))
+    return len(ordered)
+
+
 def _collect_objc_candidates(buf, slices, do_classes, do_methods, method_allowlist,
                              cstring_names, min_len, aggressive, extra,
-                             sync_cstring, sdk_prefixes, sdk_classes_only=False):
-    """收集本 binary 可改写的类名/方法名 → (class_set, meth_set, protected)。"""
+                             sync_cstring, sdk_prefixes, sdk_classes_only=False,
+                             strategy=None):
+    """收集本 binary 可改写的类名/方法名 → (class_set, meth_set, protected)。
+
+    strategy: 可选 {(kind,name): confuse_bool}（见 `_load_strategy`），
+    优先于默认启发式（硬保护项除外）。
+    """
     classes, meths, protected = set(), set(), {}
     for (_so, is64, be) in slices:
         for (_seg, sect, off, size) in _sections(buf, _so, is64, be):
@@ -851,6 +1048,7 @@ def _collect_objc_candidates(buf, slices, do_classes, do_methods, method_allowli
                 continue
             if is_meth and not do_methods:
                 continue
+            kind = "class" if is_class else "method"
             for (_start, raw) in _iter_cstrings(buf, off, size):
                 try:
                     name = raw.decode("utf-8")
@@ -860,6 +1058,7 @@ def _collect_objc_candidates(buf, slices, do_classes, do_methods, method_allowli
                     name, is_class, cstring_names, min_len, aggressive, extra,
                     method_allowlist, sync_cstring, sdk_prefixes,
                     sdk_classes_only=sdk_classes_only)
+                reason = _strategy_override(name, kind, reason, strategy)
                 if reason:
                     protected[name] = reason
                     continue
@@ -1155,7 +1354,8 @@ def _patch_sdk_ivar_fingerprints(buf, slices, seed):
 
 def _apply_mapping_to_binary(path, seed, class_map, meth_map, scrub_map,
                              sync_cstring, scrub_cstring, sdk_prefixes, min_len,
-                             symbol_aliases=False, patch_methtype=False):
+                             symbol_aliases=False, patch_methtype=False,
+                             scrub_swift=False):
     """用全局映射改写单个二进制。"""
     buf = _read(path)
     slices = _slices(buf)
@@ -1226,6 +1426,10 @@ def _apply_mapping_to_binary(path, seed, class_map, meth_map, scrub_map,
         methtype_patched = _patch_embedded_classnames(
             buf, slices, all_map, seed, sdk_prefixes, min_len)
 
+    swift_scrubbed = 0
+    if scrub_swift and not _is_dart_aot_macho(path):
+        swift_scrubbed = _scrub_swift_sections(buf, slices)
+
     with open(path, "wb") as f:
         f.write(buf)
     return {
@@ -1238,6 +1442,7 @@ def _apply_mapping_to_binary(path, seed, class_map, meth_map, scrub_map,
         "debug_patched": debug_patched,
         "ivar_patched": ivar_patched,
         "whole_file_spans": linkedit_hits,
+        "swift_scrubbed": swift_scrubbed,
     }
 
 
@@ -1286,13 +1491,21 @@ def _apply_mapping_whole_file(buf, mapping):
 def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
                 do_methods, extra, map_out, method_allowlist, sync_cstring=False,
                 sdk_prefixes=None, scrub_cstring=False, sdk_classes_only=False,
-                symbol_aliases=False, patch_methtype=False):
+                symbol_aliases=False, patch_methtype=False, strategy=None,
+                strategy_path=None, scrub_swift=False):
     """整包两阶段：收集全局映射 →（可选）统一写入。"""
     sdk_prefixes = sdk_prefixes or []
     bins = list_app_machos(app_path)
     if not bins:
         print("  [skip] .app 内无 Mach-O: %s" % app_path)
         return 0, 0
+
+    print("  seed 改名风格: style=%d" % _seed_style(seed))
+    if strategy is not None:
+        n_skip = sum(1 for v in strategy.values() if v is False)
+        n_confuse = len(strategy) - n_skip
+        print("  策略文件已加载(%s): %d 条（confuse=%d, skip=%d）" %
+              (strategy_path or "?", len(strategy), n_confuse, n_skip))
 
     # 方法白名单：显式文件 ∪ 全包 SDK methname 并集
     allow = set(method_allowlist) if method_allowlist is not None else None
@@ -1312,6 +1525,7 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
     meth_names = set()
     scrub_names = set()
     protected_any = {}
+    swift_est = 0
 
     for p in bins:
         buf = _read(p)
@@ -1322,7 +1536,7 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
         cls, meth, prot = _collect_objc_candidates(
             buf, slices, do_classes, do_methods, method_allowlist,
             cstring_names, min_len, aggressive, extra, sync_cstring,
-            sdk_prefixes, sdk_classes_only=sdk_classes_only)
+            sdk_prefixes, sdk_classes_only=sdk_classes_only, strategy=strategy)
         class_names |= cls
         meth_names |= meth
         protected_any.update(prot)
@@ -1331,6 +1545,13 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
             if not _is_dart_aot_macho(p):
                 scrub_names |= _collect_scrub_strings(
                     buf, slices, sdk_prefixes, min_len)
+        if scrub_swift and not _is_dart_aot_macho(p):
+            for (_so, is64, be) in slices:
+                for (_seg, sect, off, size) in _sections(buf, _so, is64, be):
+                    if sect in _SWIFT_SCRUB_SECTS and size > 0:
+                        swift_est += 1
+    if scrub_swift:
+        print("  Swift typeref/reflstr 段候选≈%d（apply-app 时整段填 0）" % swift_est)
 
     class_map = {n: _rename_same_length(n, seed) for n in class_names}
     meth_map = {n: _rename_same_length(n, seed) for n in meth_names}
@@ -1363,13 +1584,15 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
                     "class_map": class_map,
                     "meth_map": meth_map,
                     "scrub_map": scrub_map,
+                    "strategy_path": strategy_path,
+                    "scrub_swift": scrub_swift,
                 }, f, ensure_ascii=False, indent=2)
         return len(class_map) + len(meth_map) + len(scrub_map), len(protected_any)
 
     totals = {
         "objc_sites": 0, "cstring_synced": 0, "cstring_scrubbed": 0,
         "const_scrubbed": 0, "methtype_patched": 0, "debug_patched": 0,
-        "ivar_patched": 0, "whole_file_spans": 0,
+        "ivar_patched": 0, "whole_file_spans": 0, "swift_scrubbed": 0,
     }
     for p in bins:
         rel = p
@@ -1379,23 +1602,25 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
         st = _apply_mapping_to_binary(
             p, seed, class_map, meth_map, scrub_map,
             sync_cstring, scrub_cstring, sdk_prefixes, min_len,
-            symbol_aliases=symbol_aliases, patch_methtype=patch_methtype)
+            symbol_aliases=symbol_aliases, patch_methtype=patch_methtype,
+            scrub_swift=scrub_swift)
         if st.get("skip"):
             print("    [skip]")
             continue
         for k in totals:
             totals[k] += st.get(k, 0)
-        print("    objc=%d sync=%d scrub=%d const=%d methtype=%d debug=%d ivar=%d file=%d" %
+        print("    objc=%d sync=%d scrub=%d const=%d methtype=%d debug=%d ivar=%d file=%d swift=%d" %
               (st["objc_sites"], st["cstring_synced"], st["cstring_scrubbed"],
                st["const_scrubbed"], st["methtype_patched"],
                st.get("debug_patched", 0), st.get("ivar_patched", 0),
-               st.get("whole_file_spans", 0)))
+               st.get("whole_file_spans", 0), st.get("swift_scrubbed", 0)))
 
-    print("  ✓ 全包合计 objc=%d sync=%d scrub=%d const=%d methtype=%d debug=%d ivar=%d file_spans=%d" %
+    print("  ✓ 全包合计 objc=%d sync=%d scrub=%d const=%d methtype=%d debug=%d ivar=%d file_spans=%d swift=%d" %
           (totals["objc_sites"], totals["cstring_synced"],
            totals["cstring_scrubbed"], totals["const_scrubbed"],
            totals["methtype_patched"], totals["debug_patched"],
-           totals["ivar_patched"], totals["whole_file_spans"]))
+           totals["ivar_patched"], totals["whole_file_spans"],
+           totals["swift_scrubbed"]))
 
     if map_out:
         with open(map_out, "w", encoding="utf-8") as f:
@@ -1407,14 +1632,16 @@ def process_app(app_path, do_apply, seed, min_len, aggressive, do_classes,
                 "meth_map": meth_map,
                 "scrub_map": scrub_map,
                 "totals": totals,
+                "strategy_path": strategy_path,
+                "scrub_swift": scrub_swift,
             }, f, ensure_ascii=False, indent=2)
     return totals["objc_sites"], len(protected_any)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Mach-O ObjC 符号就地等长混淆")
-    ap.add_argument("mode", choices=["scan", "apply", "scan-app", "apply-app"])
-    ap.add_argument("binary", help="Mach-O 路径，或 .app 路径（*-app 模式）")
+    ap.add_argument("mode", choices=["scan", "apply", "scan-app", "apply-app", "export-app"])
+    ap.add_argument("binary", help="Mach-O 路径，或 .app 路径（*-app / export-app 模式）")
     ap.add_argument("--seed", default="")
     ap.add_argument("--min-len", type=int, default=4)
     ap.add_argument("--aggressive", action="store_true",
@@ -1439,11 +1666,23 @@ def main():
                     help="同步改 _OBJC_CLASS_$_ / _objc_msgSend$ 符号名（易导致 dyld 闪退，默认关）")
     ap.add_argument("--patch-methtype", action="store_true",
                     help="同步改 __objc_methtype 里的 @\"Class\"（默认关）")
+    ap.add_argument("--scrub-swift", action="store_true",
+                    help="整段填 0：__swift{3,4,5}_typeref/reflstr（默认关，"
+                         "对 Dart AOT/App.framework 自动跳过；混合 Swift SDK 需真机回归）")
+    ap.add_argument("--strategy", default="",
+                    help="符号策略 JSON（export-app 产出、人工编辑 confuse 后使用；"
+                         "仅 scan-app/apply-app 生效）")
+    ap.add_argument("--strategy-out", default="",
+                    help="export-app 模式的策略文件输出路径")
     ap.add_argument("--map-out", default="")
     args = ap.parse_args()
 
-    app_mode = args.mode.endswith("-app")
-    do_apply = args.mode.startswith("apply")
+    if args.mode == "export-app" and not os.path.isdir(args.binary):
+        print("错误: export-app 需要 .app 目录", file=sys.stderr)
+        return 2
+
+    app_mode = args.mode in ("scan-app", "apply-app")
+    do_apply = args.mode == "apply-app" or args.mode == "apply"
 
     if do_apply and not args.seed:
         print("错误: apply 模式必须提供 --seed", file=sys.stderr)
@@ -1473,6 +1712,21 @@ def main():
     elif do_methods and sdk_prefixes:
         method_allowlist = set()
 
+    if args.mode == "export-app":
+        export_app_strategy(
+            args.binary, args.min_len, args.aggressive, do_classes, do_methods,
+            extra, method_allowlist, args.sync_cstring, sdk_prefixes,
+            args.sdk_classes_only, args.strategy_out)
+        return 0
+
+    strategy = None
+    if args.strategy:
+        try:
+            strategy = _load_strategy(args.strategy)
+        except (OSError, ValueError) as e:
+            print("错误: 无法读取策略文件 %s: %s" % (args.strategy, e), file=sys.stderr)
+            return 2
+
     if app_mode:
         if not os.path.isdir(args.binary):
             print("错误: apply-app/scan-app 需要 .app 目录", file=sys.stderr)
@@ -1484,7 +1738,9 @@ def main():
             sdk_prefixes=sdk_prefixes, scrub_cstring=args.scrub_cstring,
             sdk_classes_only=args.sdk_classes_only,
             symbol_aliases=args.symbol_aliases,
-            patch_methtype=args.patch_methtype)
+            patch_methtype=args.patch_methtype,
+            strategy=strategy, strategy_path=(args.strategy or None),
+            scrub_swift=args.scrub_swift)
         print("  ✓ app 模式完成: sites/candidates≈%d  protected记录=%d" %
               (changed, protected))
         return 0

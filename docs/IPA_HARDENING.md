@@ -53,8 +53,47 @@
 | `ZT_MACHO_SCRUB_CSTRING` | `0` | channel/`engine_cb` 擦除（勿对 Dart AOT） |
 | `ZT_MACHO_SDK_METHODS` | `1`（L2.6） | SDK selector 改名 |
 | `ZT_MACHO_SYMBOL_ALIASES` | `0` | LINKEDIT ObjC 符号别名 |
+| `ZT_MACHO_SCRUB_SWIFT` | `0` | 擦除 Swift typeref/reflstr（见下方「跟齐业界」） |
+| `ZT_MACHO_STRATEGY` | 空 | 符号策略 JSON 路径（见下方「跟齐业界」） |
+| `ZT_MACHO_MAP_DIR` | 空（回退 `<.app 同级>/ab_factory_macho_maps`） | 映射表落盘目录 |
 | `ZT_RENAME_FW` | `1`（standalone） | 重命名融云等 framework |
 | `ZT_NEUTRALIZE_PATHS` / `ZT_NEUTRALIZE_ENUMS` | `1` | 抹构建路径 / 枚举名 |
+
+### 2.x 跟齐业界（Ipa Guard / MachObfuscator 对照）
+
+业界成品包混淆工具（Ipa Guard、MachObfuscator 等）常见的四类能力，与本仓库现状对照：
+
+| 能力 | 业界工具 | 本仓库现状 |
+|------|----------|------------|
+| 可编辑符号策略（parse → 编辑 → protect） | Ipa Guard：导出候选 → 人工/规则勾选 → 应用 | `macho_symbol_obfuscator.py export-app --strategy-out sym.json` 导出，编辑 `confuse` 字段后用 `--strategy sym.json` 传回 `scan-app`/`apply-app` |
+| Swift 反射段擦除 | MachObfuscator：`__swift*_typeref`/`__swift*_reflstr` 整段填 0 | `--scrub-swift` / `ZT_MACHO_SCRUB_SWIFT=1`（默认关；对 `App.framework` 自动跳过） |
+| 映射表治理 | 大多落盘到工程目录，可追溯 | 不再写 `/tmp`：默认落到 `<.app 同级>/ab_factory_macho_maps/<seed>_<时间戳>.json`，附带开关快照与策略路径；`ZT_MACHO_MAP_DIR` 可覆盖 |
+| 包间改名风格分化 | 不同包/不同 seed 得到不同改名风格 | 等长改写字符集按 seed 派生风格位自动选择（偏小写 / 均衡 / 数字密度更高三种），同 seed 仍确定性一致，无需额外参数 |
+
+**明确不做**（已踩坑或与本仓库 Flutter 架构不稳定）：
+
+- **cocoapods-mangle** 继续默认关（见下文第 3 节，此前实测与现有 framework 混淆/闭源 SDK 冲突）。
+- **资源文件改名 + 自动改引用不做**：Dart/Flutter 按名引用风险高，继续用「MD5 尾部追加 + 惰性文件注入」而非改名。
+- **默认不开启** LINKEDIT symbol-aliases / 激进 cstring 擦除：已证实易导致启动闪退，仍需显式 `--symbol-aliases` 才开。
+
+#### 符号策略文件用法（`export-app` → 编辑 → `apply-app`）
+
+```bash
+# 1) 导出候选符号 + 默认建议（SDK 前缀命中/系统保护等元数据）
+python3 scripts/macho_symbol_obfuscator.py export-app <Payload/Xxx.app> --seed com.your.bundle \
+  --classes --methods --sdk-prefixes RCIMIW,RCIMWrapper,IRCIMIW,RC \
+  --strategy-out macho_strategy.json
+
+# 2) 人工编辑 macho_strategy.json 里各条目的 confuse 字段
+#    - confuse:false → 强制跳过（即便默认判定可改写）
+#    - confuse:true  → 尝试放行（非标识符字面量 / Flutter 启动关键类等硬保护项仍不可覆盖）
+
+# 3) 传回 scan-app 预览，或 apply-app 实际改写
+python3 scripts/macho_symbol_obfuscator.py apply-app <Payload/Xxx.app> --seed com.your.bundle \
+  --classes --methods --strategy macho_strategy.json --map-out map.json
+```
+
+`obfuscate_ipa.sh --macho` 也支持直接传 `--strategy <path>` 或 `ZT_MACHO_STRATEGY=<path>`；未设置时行为与之前完全一致（兼容）。
 
 ### 单独试跑
 
@@ -66,6 +105,10 @@ python3 scripts/macho_symbol_obfuscator.py scan <path/to/App.app/App> --seed com
 python3 scripts/macho_symbol_obfuscator.py apply <binary> --seed com.your.bundle \
   --classes --methods --sdk-prefixes RCIMIW,RCIMWrapper,IRCIMIW,RC \
   --sync-cstring --scrub-cstring --map-out map.json
+
+# 整包 + Swift 反射段擦除（默认关；混合 Swift SDK 需真机全量回归）
+python3 scripts/macho_symbol_obfuscator.py apply-app <Payload/Xxx.app> --seed com.your.bundle \
+  --classes --sync-cstring --scrub-swift --map-out map.json
 ```
 
 无法感知的风险场景：storyboard/xib 按类名实例化、跨二进制按名字调用。**提审前必须真机回归。**

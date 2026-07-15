@@ -3185,7 +3185,12 @@ class AppDelegate(NSObject):
         self.ipa_harden_macho_switch.setTitle_("Mach-O")
         self.ipa_harden_macho_switch.setState_(1)  # 默认开启
         self.ipa_harden_macho_switch.setToolTip_(
-            "启用 Mach-O 符号混淆：类名 + RCIMIW/RC 方法 + cstring/const 擦除（中高风险，提审前需真机回归）。默认开启；关闭则仅资源指纹差异化。")
+            "启用 Mach-O 符号混淆：类名 + RCIMIW/RC 方法 + cstring/const 擦除（中高风险，提审前需真机回归）。"
+            "默认开启；关闭则仅资源指纹差异化。\n"
+            "进阶开关（终端环境变量，本勾选不覆盖）：\n"
+            "· ZT_MACHO_SCRUB_SWIFT=1 擦除 Swift 反射段（默认关，混合 Swift SDK 需真机全量回归）\n"
+            "· ZT_MACHO_STRATEGY=<sym.json> 传入人工编辑过的符号策略（见 macho_symbol_obfuscator.py export-app）\n"
+            "· ZT_MACHO_MAP_DIR=<dir> 覆盖映射表落盘目录（默认 <.app 同级>/ab_factory_macho_maps/）")
         cv5.addSubview_(self.ipa_harden_macho_switch)
         by -= sp
         cv5.addSubview_(make_label(

@@ -50,6 +50,10 @@ PY
 }
 
 log_info "扫描图片目录: $TARGET_DIR"
+# 策略：除 SVG / SVGA 外，所有栅格图一律编入 Base64 map（与 sync_secondary.sh
+# delete_secondary_image_files 删除范围对齐）。SVG/SVGA 仍以文件形式保留在 bundle。
+# lottie/ 下图片也会进 map；是否从磁盘删除由 sync 的 delete 步骤决定（默认保留 lottie 文件，
+# 避免 Lottie JSON 按相对路径加载失败）。
 
 while IFS= read -r -d '' file; do
   rel_path="${file#$PROJECT_ROOT/}"
@@ -80,7 +84,12 @@ while IFS= read -r -d '' file; do
   # 使用分隔符保存中间数据，避免直接拼接巨量字符串
   printf '%s|%s|%s\n' "$rel_path" "$key_name" "$b64" >> "$tmp_data_file"
   total_count=$((total_count + 1))
-done < <(find "$TARGET_DIR" -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.webp" -o -iname "*.gif" \) -print0)
+done < <(find "$TARGET_DIR" -type f \( \
+  -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" \
+  -o -iname "*.webp" -o -iname "*.gif" -o -iname "*.bmp" \
+  -o -iname "*.ico" -o -iname "*.heic" \
+  -o -iname "*.tif" -o -iname "*.tiff" \
+\) -print0)
 
 if [[ "$total_count" -eq 0 ]]; then
   log_warning "未发现图片，跳过生成"

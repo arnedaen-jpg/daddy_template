@@ -10,13 +10,19 @@
 #     2) Mach-O 符号混淆（--macho，可选，中高风险，需真机回归）
 #        - 就地等长改写主可执行文件与 Frameworks 的 ObjC 类名字符串
 #        - 方法名默认不动（selector 全局 unique，改名极易崩），仅在提供白名单时改
+#        - 可选 --scrub-swift：整段填 0 擦除 Swift typeref/reflstr（默认关）
+#        - 可选 --strategy sym.json：传入 macho_symbol_obfuscator.py export-app
+#          产出、人工编辑过的符号策略（confuse:true/false 强制放行/跳过）
+#        - 映射表落盘到 <.app 同级>/ab_factory_macho_maps/（可用 --map-dir /
+#          ZT_MACHO_MAP_DIR 覆盖），文件名含 seed，附带开关快照，供事后追溯
 #     3) cocoapods-mangle（编译期，见 enable_pod_mangle.sh，不在本脚本内）
 #
 #   ⚠️ 任何 Mach-O 改写都会使已有签名失效：本脚本只改产物，**不负责签名**。
 #      必须由调用方（build_and_resign.sh / resign_ipa.sh）在其后重签名。
 #
 #   用法：
-#     obfuscate_ipa.sh --app <Payload/Xxx.app> --seed <s> [--resources] [--macho] [-d]
+#     obfuscate_ipa.sh --app <Payload/Xxx.app> --seed <s> [--resources] [--macho]
+#         [--scrub-swift] [--strategy sym.json] [--map-dir dir] [-d]
 #     obfuscate_ipa.sh --ipa <in.ipa> --out <out.ipa> --seed <s> [--macho] [-d]
 #       （--ipa 模式仅解包/处理/重打包，不重签名）
 # =============================================
@@ -56,6 +62,13 @@ MACHO_SDK_CLASSES_ONLY="${ZT_MACHO_SDK_CLASSES_ONLY:-1}"
 # L2.6.3 LINKEDIT-only CLASS 别名实测启动打不开 → 默认关；勿再默认开启
 MACHO_SYMBOL_ALIASES="${ZT_MACHO_SYMBOL_ALIASES:-0}"
 MACHO_PATCH_METHTYPE="${ZT_MACHO_PATCH_METHTYPE:-1}"
+# Swift 反射段擦除（__swift{3,4,5}_typeref/reflstr 整段填 0）：混合 Swift SDK
+# 需真机全量回归，默认关；对 Dart AOT（App.framework）自动跳过
+MACHO_SCRUB_SWIFT="${ZT_MACHO_SCRUB_SWIFT:-0}"
+# 符号策略文件（export-app 产出、人工编辑 confuse 后传回）：默认无
+MACHO_STRATEGY="${ZT_MACHO_STRATEGY:-}"
+# 映射表落盘目录：默认与 .app 同级的工程目录，可追溯；ZT_MACHO_MAP_DIR 可覆盖
+MACHO_MAP_DIR="${ZT_MACHO_MAP_DIR:-}"
 # 未显式选择手段时，默认只开启低风险的资源差异化
 _explicit_mode=false
 
@@ -85,6 +98,10 @@ while [[ $# -gt 0 ]]; do
         --no-symbol-aliases) MACHO_SYMBOL_ALIASES=0; shift ;;
         --patch-methtype) MACHO_PATCH_METHTYPE=1; shift ;;
         --no-patch-methtype) MACHO_PATCH_METHTYPE=0; shift ;;
+        --scrub-swift) MACHO_SCRUB_SWIFT=1; shift ;;
+        --no-scrub-swift) MACHO_SCRUB_SWIFT=0; shift ;;
+        --strategy) MACHO_STRATEGY="$2"; shift 2 ;;
+        --map-dir) MACHO_MAP_DIR="$2"; shift 2 ;;
         -d|--dry-run) DRY_RUN=true; shift ;;
         -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
         *) err "未知参数: $1"; exit 2 ;;
@@ -264,21 +281,82 @@ obfuscate_macho() {
         args_common+=(--methods --methods-allowlist "$METHODS_ALLOWLIST")
     fi
     [[ -n "$PROTECT_FILE" ]] && args_common+=(--protect-file "$PROTECT_FILE")
-    log "Mach-O apply-app classes sync=$MACHO_SYNC_CSTRING scrub=$MACHO_SCRUB_CSTRING methods=$MACHO_SDK_METHODS sdk-classes-only=$MACHO_SDK_CLASSES_ONLY aliases=$MACHO_SYMBOL_ALIASES methtype=$MACHO_PATCH_METHTYPE"
+    if [[ "$MACHO_SCRUB_SWIFT" == "1" || "$MACHO_SCRUB_SWIFT" == "true" ]]; then
+        args_common+=(--scrub-swift)
+    fi
+    if [[ -n "$MACHO_STRATEGY" ]]; then
+        if [[ -f "$MACHO_STRATEGY" ]]; then
+            args_common+=(--strategy "$MACHO_STRATEGY")
+        else
+            warn "  策略文件不存在，忽略: $MACHO_STRATEGY"
+        fi
+    fi
+    log "Mach-O apply-app classes sync=$MACHO_SYNC_CSTRING scrub=$MACHO_SCRUB_CSTRING methods=$MACHO_SDK_METHODS sdk-classes-only=$MACHO_SDK_CLASSES_ONLY aliases=$MACHO_SYMBOL_ALIASES methtype=$MACHO_PATCH_METHTYPE scrub-swift=$MACHO_SCRUB_SWIFT strategy=${MACHO_STRATEGY:-无}"
 
-    local map_dir map_out=""
-    map_dir="$(dirname "$app")/../ab_factory_macho_maps"
-    # app 可能在临时 Payload 下；映射写到 /tmp
-    map_out="$(mktemp -t macho_map).json"
+    # 映射表落盘：默认与 .app 同级的工程可追溯目录（<app 上级>/ab_factory_macho_maps），
+    # 而不是 /tmp——便于事后审计「这次跑的是哪些映射/哪些开关」；ZT_MACHO_MAP_DIR 可覆盖
+    # （app 若在临时 Payload 下解包，两者都可能是临时路径，属预期）。
+    local map_dir
+    map_dir="${MACHO_MAP_DIR:-$(dirname "$app")/ab_factory_macho_maps}"
+    mkdir -p "$map_dir" 2>/dev/null || map_dir="$(mktemp -d)"
+    local seed_slug
+    seed_slug="$(printf '%s' "$SEED" | tr -c 'A-Za-z0-9._-' '_')"
+    seed_slug="${seed_slug:0:64}"
+    local map_out="$map_dir/${seed_slug:-macho}_$(date +%Y%m%d_%H%M%S).json"
+    local raw_map_out
+    raw_map_out="$(mktemp -t macho_map_raw).json"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] scan-app $app"
-        python3 "$MACHO_TOOL" scan-app "$app" "${args_common[@]}" --map-out "$map_out" 2>&1 | sed 's/^/    /' || true
+        python3 "$MACHO_TOOL" scan-app "$app" "${args_common[@]}" --map-out "$raw_map_out" 2>&1 | sed 's/^/    /' || true
     else
-        python3 "$MACHO_TOOL" apply-app "$app" "${args_common[@]}" --map-out "$map_out" 2>&1 | sed 's/^/    /' \
+        python3 "$MACHO_TOOL" apply-app "$app" "${args_common[@]}" --map-out "$raw_map_out" 2>&1 | sed 's/^/    /' \
             || warn "  apply-app 失败"
-        log "映射已写: $map_out"
     fi
+
+    # 补写开关快照 + 策略路径，再落盘到可追溯目录（原始映射内容不变）
+    if [[ -f "$raw_map_out" ]]; then
+        if python3 - "$raw_map_out" "$map_out" "$MACHO_STRATEGY" \
+            "$MACHO_SYNC_CSTRING" "$MACHO_SCRUB_CSTRING" "$MACHO_SDK_METHODS" \
+            "$MACHO_SDK_CLASSES_ONLY" "$MACHO_SYMBOL_ALIASES" "$MACHO_PATCH_METHTYPE" \
+            "$MACHO_SCRUB_SWIFT" <<'PYEOF'
+import json
+import sys
+
+(raw_path, out_path, strategy_path, sync_cstring, scrub_cstring, sdk_methods,
+ sdk_classes_only, symbol_aliases, patch_methtype, scrub_swift) = sys.argv[1:11]
+
+
+def _flag(v):
+    return v in ("1", "true", "True")
+
+
+with open(raw_path, encoding="utf-8") as f:
+    data = json.load(f)
+data["switches"] = {
+    "sync_cstring": _flag(sync_cstring),
+    "scrub_cstring": _flag(scrub_cstring),
+    "sdk_methods": _flag(sdk_methods),
+    "sdk_classes_only": _flag(sdk_classes_only),
+    "symbol_aliases": _flag(symbol_aliases),
+    "patch_methtype": _flag(patch_methtype),
+    "scrub_swift": _flag(scrub_swift),
+}
+data["strategy_path"] = strategy_path or None
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PYEOF
+        then
+            log "映射已写: $map_out"
+        else
+            warn "  映射元数据补写失败，回退为原始文件: $raw_map_out"
+            map_out="$raw_map_out"
+            raw_map_out=""
+        fi
+    else
+        warn "  未生成映射文件（apply-app/scan-app 可能失败）"
+    fi
+    [[ -n "$raw_map_out" && -f "$raw_map_out" && "$raw_map_out" != "$map_out" ]] && rm -f "$raw_map_out"
     ok "Mach-O 整包处理完成（改写后必须重签名）"
 }
 
