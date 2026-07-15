@@ -173,16 +173,24 @@ class DeviceInfoManager {
     };
   }
 
-  /// 获取 iOS 风格的 User-Agent
-  /// 格式: AppName/Version (iOS Version; Device Model)
+  /// 对齐 XMSport / AFNetworking 默认 User-Agent：
+  /// `AppName/Version (UIDevice.model; iOS systemVersion; Scale/x.xx)`
+  /// 例：`XMSport/3.0.0 (iPhone; iOS 17.0; Scale/3.00)`
   String get userAgent {
-    final appName = _packageInfo?.appName ?? 'App';
     final cleanAppName = _sanitizeHeaderValue(appName);
+    final name = cleanAppName.isEmpty ? 'App' : cleanAppName;
     final cleanAppVersion = _sanitizeHeaderValue(appVersion);
+    // 对齐 UIDevice.model（iPhone / iPad），不用 commercial modelName
+    final cleanModel = _sanitizeHeaderValue(
+      (_iosDeviceInfo?.model.trim().isNotEmpty ?? false)
+          ? _iosDeviceInfo!.model.trim()
+          : 'iPhone',
+    );
     final cleanIosVersion = _sanitizeHeaderValue(iosVersion);
-    final cleanDeviceModel = _sanitizeHeaderValue(deviceModel);
-    
-    return '$cleanAppName/$cleanAppVersion (iOS $cleanIosVersion; $cleanDeviceModel)';
+    final scale = PlatformDispatcher.instance.views.isNotEmpty
+        ? PlatformDispatcher.instance.views.first.devicePixelRatio
+        : 3.0;
+    return '$name/$cleanAppVersion ($cleanModel; iOS $cleanIosVersion; Scale/${scale.toStringAsFixed(2)})';
   }
 
   /// 过滤非 ASCII 字符，确保 HTTP Header 值合法
