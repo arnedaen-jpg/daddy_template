@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../config/env_config.dart';
 import '../../utils/s.dart';
+import 'capture_proxy.dart';
 import 'device_info_manager.dart';
 
 /// 网络客户端
@@ -22,6 +23,7 @@ class HttpClient {
     await DeviceInfoManager().initialize();
 
     _dio = Dio(_createBaseOptions());
+    CaptureProxy.applyToDio(_dio);
 
     // 添加拦截器
     _dio.interceptors.addAll([

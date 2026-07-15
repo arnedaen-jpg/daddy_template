@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get_storage/get_storage.dart';
 import 'app_binding.dart';
 import 'config/app_config.dart';
 import 'config/env_config.dart';
@@ -60,6 +61,10 @@ class _AbRootHostState extends State<AbRootHost> {
   }
 
   Future<void> _bootstrap() async {
+    // 0. 持久化存储（含 B 面抓包代理配置 proxy_config，供 A 面 AB 请求复用）
+    await GetStorage.init();
+    await GetStorage.init('proxy_config');
+
     // 1. 初始化环境配置
     await EnvConfig.initialize();
 
