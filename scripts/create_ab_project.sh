@@ -236,8 +236,31 @@ main() {
     # 更新测试目标的 Bundle ID
     sed -i '' "s/com.example.daddyTemplate.RunnerTests/${bundle_id}.RunnerTests/g" "$new_project_path/ios/Runner.xcodeproj/project.pbxproj"
 
+    # PRODUCT_NAME → 项目名（决定 CFBundleExecutable / kCFBundleExecutableKey，如 User-Agent 前缀）
+    # 模板默认为 hxty；RunnerTests 仍为 "$(TARGET_NAME)"，勿动
+    if grep -q 'PRODUCT_NAME = hxty;' "$new_project_path/ios/Runner.xcodeproj/project.pbxproj"; then
+        sed -i '' "s/PRODUCT_NAME = hxty;/PRODUCT_NAME = ${project_name};/g" \
+            "$new_project_path/ios/Runner.xcodeproj/project.pbxproj"
+        log_info "  PRODUCT_NAME (CFBundleExecutable): hxty → ${project_name}"
+    else
+        # 兼容已改过的模板：把 Runner 目标里非 $(TARGET_NAME) 的 PRODUCT_NAME 统一为项目名
+        python3 - "$new_project_path/ios/Runner.xcodeproj/project.pbxproj" "$project_name" <<'PY'
+import re, sys
+path, name = sys.argv[1], sys.argv[2]
+text = open(path, encoding='utf-8').read()
+new, n = re.subn(
+    r'PRODUCT_NAME = (?!"\$\(TARGET_NAME\)")[^;]+;',
+    f'PRODUCT_NAME = {name};',
+    text,
+)
+if n:
+    open(path, 'w', encoding='utf-8').write(new)
+    print(f'  PRODUCT_NAME 已更新为 {name}（{n} 处）')
+PY
+    fi
+
     # 步骤 6: 更新 iOS Info.plist
-    log_info "[6/8] 更新 iOS 配置 (显示名称、URL Scheme)..."
+    log_info "[6/8] 更新 iOS 配置 (显示名称、URL Scheme、可执行名)..."
     # 更新 CFBundleDisplayName
     sed -i '' "s/<string>Daddy Template<\/string>/<string>$display_name<\/string>/" "$new_project_path/ios/Runner/Info.plist"
     # 更新 CFBundleName
