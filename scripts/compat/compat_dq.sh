@@ -540,13 +540,15 @@ def neutral(token: str) -> str:
 # png/jpg/webp 前缀必须放进 neutralize_dq_sensitive_rasters（base64 生成前），
 # 否则会在 map 生成后改 Dart 引用、却未改 map key，运行时必缺图。
 FILE_TOKENS = [
-    'icon_live_caisedanmu',
+    # icon_live_caisedanmu / icon_chat_ 已改由 neutralize_dq_sensitive_rasters
+    # 一并处理（含 .svg），避免短前缀 icon_live / icon_chat_ 先改 Dart、
+    # 而 SVG 文件未改或使用另一套 salt，导致 Unable to load asset。
     'user_noble_enter',
     'anchor_live',
     'dianjing',
-    # 下列为栅格图前缀，已迁移到 neutralize_dq_sensitive_rasters：
-    # icon_odd_ / icon_predict_ / icon_vote_ / icon_redu /
-    # icon_chat_ / icon_rank_ / bg_live_ / chat_noble_ / chat_giftNumber
+    # 下列为栅格/混用前缀，已迁移到 neutralize_dq_sensitive_rasters：
+    # icon_live_caisedanmu / icon_chat_ / icon_odd_ / icon_predict_ /
+    # icon_vote_ / icon_redu / icon_rank_ / bg_live_ / chat_noble_ / chat_giftNumber
 ]
 FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
 MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
@@ -641,7 +643,7 @@ neutralize_dq_sensitive_rasters() {
     return 0
   fi
 
-  log_step "中和 dq 敏感命名栅格图（png/jpg/webp，base64 前）..."
+  log_step "中和 dq 敏感命名资源（png/jpg/webp/svg/svga，base64 前；同前缀共用映射）..."
 
   _dq_python3 - "$assets_dir" "$secondary_lib_dir" <<'PY'
 import hashlib
@@ -661,6 +663,8 @@ def neutral(token: str) -> str:
 # 必须在 generate_secondary_base64_map 之前执行，保证 map key 与 Dart 引用一致。
 FILE_TOKENS = [
     'ic_main_tab_live',
+    # 长前缀必须在短前缀 icon_live 之前（sorted by len）；含 SVG 彩弹幕序列图
+    'icon_live_caisedanmu',
     'icon_live_danmu', 'ic_live_search', 'ic_live_segment66', 'ic_live_banner',
     'bg_live_search_empty', 'icon_live', 'bg_live', 'ic_live',
     'chat_noble', 'ic_noble_alert', 'bg_noble', 'ic_noble',
@@ -672,19 +676,21 @@ FILE_TOKENS = [
     'icon_anchor_online', 'bg_anchor_online', 'icon_anchor', 'bg_anchor', 'ic_anchor',
     'btn_zhibo',
     'icon_qiupiao', 'icon_qiuzuan',
-    # 原误放在 neutralize_dq_sensitive_assets（svg 步骤）的栅格前缀：
+    # 栅格 + 同名前缀 SVG（icon_chat_biaoqing.svg 等）共用同一套 salt/映射：
     'icon_predict_', 'icon_vote_', 'icon_redu',
     'icon_chat_', 'icon_rank_', 'bg_live_',
 ]
 FILE_TOKENS = sorted(set(FILE_TOKENS), key=len, reverse=True)
 MAPPING = [(t, neutral(t)) for t in FILE_TOKENS]
 
-RASTER_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
+# 栅格图 + 同前缀 SVG/SVGA：必须同一映射改文件名与 Dart，否则
+# SvgPicture.asset('assets/secondary/svgs/ui_xxx.svg') 会 Unable to load asset。
+RENAME_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.svg', '.svga'}
 
-# 1) 物理重命名：仅栅格图；lottie 目录保持原样（其图片由 lottie json 引用）。
+# 1) 物理重命名；lottie 目录保持原样（其图片由 lottie json 引用）。
 renamed = 0
 for path in list(assets_dir.rglob('*')):
-    if not path.is_file() or path.suffix.lower() not in RASTER_EXTS:
+    if not path.is_file() or path.suffix.lower() not in RENAME_EXTS:
         continue
     rel = path.relative_to(assets_dir).as_posix()
     if '/lottie/' in ('/' + rel):
@@ -701,6 +707,7 @@ for path in list(assets_dir.rglob('*')):
         renamed += 1
 
 # 2) 改写 Dart 引用：只在引号字符串字面量内部做前缀子串替换。
+# 注意：svgPic('name') 字面量常不带 .svg，故不能按扩展名跳过。
 str_lit = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""", re.DOTALL)
 
 def rewrite_literal(m):
