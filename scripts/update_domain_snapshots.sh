@@ -1,8 +1,8 @@
 #!/bin/bash
 # update_domain_snapshots.sh - 编译时拉取测试 / 预发 / 正式三套环境域名快照
 #
-# 参考 XMSport（Configs/Formal.xcconfig + UpdateDomain）：
-#   - 正式：CONF_OBS_URL → OBS app_prod.json（base64）→ ScriptGetObsData.json
+# 参考 XMSport Formal.xcconfig UpdateDomain / CONF_OBS_URL：
+#   - 正式：https://bfw-pic-new0111.obs.cn-south-1.myhuaweicloud.com/cdn/app_prod.json
 #   - 测试：unpkg @hd-team/app-dnpkg-test（base64 JSON）
 #   - 预发：unpkg @hd-team/app-dnpkg-beta（base64 JSON）
 #
@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DRY_RUN=0
 
-# 默认域名源（与 XMSport Formal.xcconfig CONF_OBS_URL / CONF_UNPKG_URL 对齐）
+# 默认域名源：正式对齐 XMSport Formal CONF_OBS_URL；测/预发仍用 unpkg
 DEFAULT_TEST_URL="https://unpkg.com/@hd-team/app-dnpkg-test@latest"
 DEFAULT_STAGING_URL="https://unpkg.com/@hd-team/app-dnpkg-beta@latest"
 DEFAULT_PROD_URL="https://bfw-pic-new0111.obs.cn-south-1.myhuaweicloud.com/cdn/app_prod.json"
