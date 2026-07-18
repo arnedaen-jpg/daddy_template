@@ -2888,15 +2888,16 @@ class AppDelegate(NSObject):
             62, by, bw - 162, row_h, "APP_CHANNEL，如 GT001", mono=True)
         self.b_side_channel_field.setStringValue_("GT001")
         self.b_side_channel_field.setToolTip_(
-            "点「读」从目标工程 config.dart 填入；点「写」写回；"
-            "运行/打包/同步不自动改此文件")
+            "仅编辑框内容；必须点「写」才会改工程 config.dart。"
+            "▶ 运行 / 打包只读工程里已写入的渠道并注入壳层 APP_CHANNEL")
         cv2.addSubview_(self.b_side_channel_field)
         read_ch_btn = make_button("读", bw - 90, by, 44, row_h, self, self.readBSideChannel_)
         read_ch_btn.setToolTip_("从目标工程 config.dart 读取 xxChannel 的 APP_CHANNEL defaultValue")
         cv2.addSubview_(read_ch_btn)
         write_ch_btn = make_button("写", bw - 44, by, 44, row_h, self, self.writeBSideChannel_)
         write_ch_btn.setToolTip_(
-            "将上方渠道写入目标工程 B 面 config.dart 的 xxChannel defaultValue")
+            "唯一写入入口：把上方渠道写入工程 B 面 config.dart；"
+            "未点「写」则工程与运行/打包渠道都不会变")
         cv2.addSubview_(write_ch_btn)
 
         by -= sp + 2
@@ -4455,6 +4456,9 @@ class AppDelegate(NSObject):
         ok, msg = self._patch_b_side_config_channel(target, ch)
         if ok:
             self._log(f"✅ {msg}")
+            self._log(
+                f"  工程已更新；之后 ▶ 运行 / 打包会注入 --dart-define=APP_CHANNEL={ch} "
+                f"对齐壳层 AB 头（仅输入框未点「写」不会生效）")
         else:
             self._log(f"❌ {msg}")
 
@@ -4465,6 +4469,33 @@ class AppDelegate(NSObject):
             if idx == i:
                 return name
         return "test"
+
+    @objc.python_method
+    def _resolve_app_channel(self, project_root=None):
+        """解析要注入的 APP_CHANNEL：只读工程里已写入的 config.dart。
+
+        输入框仅供编辑；必须点「写」才会改项目。运行/打包不得用未写入的输入框值，
+        否则会出现「框里是 GT005、工程仍是旧渠道」却被 dart-define 覆盖的错觉。
+        壳层 DeviceInfoManager 与 B 面 xxChannel 共用此 dart-define。
+        """
+        roots = []
+        if project_root and os.path.isdir(project_root):
+            roots.append(project_root)
+        for attr in ("target_field", "run_project_field", "ipa_project_field"):
+            try:
+                fld = getattr(self, attr, None)
+                if fld is None:
+                    continue
+                p = str(fld.stringValue()).strip()
+            except Exception:
+                continue
+            if p and os.path.isdir(p) and p not in roots:
+                roots.append(p)
+        for root in roots:
+            val, _err = _read_b_side_config_channel(root)
+            if val:
+                return val
+        return ""
 
     @objc.python_method
     def _current_agent_model_id(self):
@@ -5224,13 +5255,40 @@ class AppDelegate(NSObject):
             return
 
         row = self._selected_run_device_row()
-        if not row:
-            self._log("❌ 请先在运行区下拉框选择 iOS 模拟器")
-            return
-        device_label, udid, _state_str, run_kind = row
-        if udid == "macos" or run_kind != "ios_sim":
-            self._log("❌ 商店截图仅支持 iOS 模拟器，请在运行区选择 iPhone/iPad 模拟器")
-            return
+        device_label = udid = _state_str = run_kind = None
+        if row:
+            device_label, udid, _state_str, run_kind = row
+
+        # 运行区默认常选中真机（排序真机在前）；已开模拟器时自动改用 Booted 模拟器
+        if not row or udid == "macos" or run_kind != "ios_sim":
+            fallback = None
+            for it in (_state.get("devices") or []):
+                lab, did, st, kind = _unpack_device_row(it)
+                if did == "macos" or kind != "ios_sim":
+                    continue
+                if st == "Booted":
+                    fallback = (lab, did, st, kind)
+                    break
+                if fallback is None:
+                    fallback = (lab, did, st, kind)
+            if fallback is None:
+                try:
+                    for name, sim_udid, st in list_simulators():
+                        if st == "Booted":
+                            fallback = (f"{name} [已启动]", sim_udid, st, "ios_sim")
+                            break
+                except Exception:
+                    pass
+            if fallback is None:
+                cur = (device_label or "未选择")[:40]
+                self._log(
+                    "❌ 商店截图仅支持 iOS 模拟器。"
+                    f"当前运行区选中: {cur}（可能是真机）。"
+                    "请在上方「运行」设备下拉框选 iPhone/iPad 模拟器，或先启动模拟器后点刷新设备。"
+                )
+                return
+            device_label, udid, _state_str, run_kind = fallback
+            self._log(f"ℹ 运行区当前非模拟器，已改用已启动/可用模拟器: {device_label[:48]}")
 
         (tw, th), kind, tag = _app_store_target_for_simulator(device_label)
 
@@ -6820,13 +6878,18 @@ class AppDelegate(NSObject):
                 run_cmd.append("--release")
             env_run = self._selected_app_environment()
             run_cmd.append(f"--dart-define=ENVIRONMENT={env_run}")
+            # 壳 DeviceInfoManager 与 B 面 xxChannel 共用 APP_CHANNEL（勿只靠 B 面 defaultValue）
+            channel_run = self._resolve_app_channel(project)
+            if channel_run:
+                run_cmd.append(f"--dart-define=APP_CHANNEL={channel_run}")
             dev_float_def = self._show_dev_float_dart_define()
             run_cmd.append(dev_float_def)
             dev_float_on = dev_float_def.endswith("=true")
+            ch_log = channel_run if channel_run else "未设置（壳将回退 S.defaultChannel=GT001）"
             self._log(
                 f"{cmd_prefix_log} run -d {device_id} [{mode_label}] "
-                f"(ENVIRONMENT={env_run}；AB_SHOW_DEV_FLOAT={'true' if dev_float_on else 'false'}；"
-                f"APP_CHANNEL 使用工程 config.dart defaultValue，不读输入框)")
+                f"(ENVIRONMENT={env_run}；APP_CHANNEL={ch_log}；"
+                f"AB_SHOW_DEV_FLOAT={'true' if dev_float_on else 'false'})")
             self._set_status(self.step3_status, "编译…")
 
             def _preexec_run():
@@ -7788,11 +7851,15 @@ class AppDelegate(NSObject):
             self._log(f"  版本: 保持 pubspec 现有值（版本号输入框留空）")
         self._log(f"  静默期: {silent_str} 天")
         self._log("  B面 dart-define: ENVIRONMENT=release（打包固定，与 dq 模板一致）")
-        self._log("  APP_CHANNEL: 使用工程 config.dart defaultValue（不读输入框）")
+        channel_ipa = self._resolve_app_channel(project)
+        if channel_ipa:
+            self._log(f"  APP_CHANNEL={channel_ipa}（壳+B 面同时注入，对齐 AB 头）")
+        else:
+            self._log("  ⚠ 工程 config.dart 无 APP_CHANNEL：请先点「写」；壳将回退 GT001")
         self._log("  打包过程可能需要 10-20 分钟，请耐心等待…")
 
         threading.Thread(target=self._run_build_ipa,
-            args=(cmd, project, workdir, "IPA 打包"),
+            args=(cmd, project, workdir, "IPA 打包", channel_ipa),
             daemon=True).start()
 
     def buildTestIpa_(self, sender):
@@ -7901,21 +7968,32 @@ class AppDelegate(NSObject):
         # 测试包默认静默期 0，避免影响真机验证；ENVIRONMENT 跟随顶部 B 面下拉
         env_name = self._selected_app_environment()
         cmd = [script, test_workdir, "--silent=0", f"--environment={env_name}"]
+        channel_test = self._resolve_app_channel(project)
         self._log(f"▶ {' '.join(cmd)}")
         self._log(f"  Flutter 工程: {project}")
         self._log(f"  测试工作目录: {test_workdir}")
         self._log("  静默期: 0 天（测试包固定）")
         self._log(f"  B面 dart-define: ENVIRONMENT={env_name}（取自顶部下拉，与 ▶ 运行一致）")
+        if channel_test:
+            self._log(f"  APP_CHANNEL={channel_test}（壳+B 面同时注入，对齐 AB 头）")
+        else:
+            self._log("  ⚠ 工程 config.dart 无 APP_CHANNEL：请先点「写」；壳将回退 GT001")
         self._log("  打包过程可能需要 10-20 分钟，请耐心等待…")
 
         threading.Thread(target=self._run_build_ipa,
-            args=(cmd, project, test_workdir, "测试包打包"),
+            args=(cmd, project, test_workdir, "测试包打包", channel_test),
             daemon=True).start()
 
     @objc.python_method
-    def _run_build_ipa(self, cmd, cwd, workdir=None, notify_title="IPA 打包"):
+    def _run_build_ipa(self, cmd, cwd, workdir=None, notify_title="IPA 打包",
+                       app_channel=""):
         try:
             env = get_env()
+            # build_flutter_ipa.sh 读 AB_BUILD_APP_CHANNEL → --dart-define=APP_CHANNEL
+            ch = (app_channel or "").strip()
+            if ch:
+                env = dict(env)
+                env["AB_BUILD_APP_CHANNEL"] = ch
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding='utf-8', errors='replace', cwd=cwd, env=env, preexec_fn=os.setsid)
             _state["build_proc"] = proc
