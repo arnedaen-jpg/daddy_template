@@ -84,7 +84,7 @@ class EnvConfig {
   // ============================================================
   // 各环境域名快照（编译时由 scripts/update_domain_snapshots.sh 写入）
   // 参考 XMSport：
-  //   正式 → OBS app_eight.json（UpdateDomain / ScriptGetObsData）
+  //   正式 → OBS app_prod.json（UpdateDomain / ScriptGetObsData）
   //   测试 → unpkg @hd-team/app-dnpkg-test
   //   预发 → unpkg @hd-team/app-dnpkg-beta
   // 运行时解码后覆盖下方硬编码兜底；快照为空 / 解析失败则回退硬编码。

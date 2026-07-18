@@ -1,8 +1,8 @@
 #!/bin/bash
 # update_domain_snapshots.sh - 编译时拉取测试 / 预发 / 正式三套环境域名快照
 #
-# 参考 XMSport：
-#   - 正式：Xcode UpdateDomain → OBS app_eight.json → ScriptGetObsData.json（仅正式环境读）
+# 参考 XMSport（Configs/Formal.xcconfig + UpdateDomain）：
+#   - 正式：CONF_OBS_URL → OBS app_prod.json（base64）→ ScriptGetObsData.json
 #   - 测试：unpkg @hd-team/app-dnpkg-test（base64 JSON）
 #   - 预发：unpkg @hd-team/app-dnpkg-beta（base64 JSON）
 #
@@ -25,10 +25,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DRY_RUN=0
 
-# 默认域名源（与 XMSport / dq 线上一致）
+# 默认域名源（与 XMSport Formal.xcconfig CONF_OBS_URL / CONF_UNPKG_URL 对齐）
 DEFAULT_TEST_URL="https://unpkg.com/@hd-team/app-dnpkg-test@latest"
 DEFAULT_STAGING_URL="https://unpkg.com/@hd-team/app-dnpkg-beta@latest"
-DEFAULT_PROD_URL="https://pic001-prod-new.obs.ap-southeast-1.myhuaweicloud.com/cdn/app_eight.json"
+DEFAULT_PROD_URL="https://bfw-pic-new0111.obs.cn-south-1.myhuaweicloud.com/cdn/app_prod.json"
 
 TEST_URL="${AB_TEST_OBS_URL:-$DEFAULT_TEST_URL}"
 STAGING_URL="${AB_STAGING_OBS_URL:-$DEFAULT_STAGING_URL}"
@@ -143,6 +143,33 @@ try:
 except Exception:
     print("")' 2>/dev/null || true)"
   log "[$label] 解析到域名: ${preview:-<none>}"
+
+  # 拒绝明显被篡改的快照（如 OBS 被写成 PWNED / 内网 POC）
+  if printf '%s' "$EXTRACTED_JSON" | python3 -c 'import sys,json,re
+try:
+  d=json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+msg=str(d.get("msg") or "")
+if "PWNED" in msg.upper():
+  sys.exit(2)
+arr=d.get("data") or []
+if not arr:
+  sys.exit(3)
+bad=0
+for x in arr:
+  dom=str((x or {}).get("domain") or "")
+  if re.search(r"https?://(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)", dom):
+    bad += 1
+if bad and bad >= len(arr):
+  sys.exit(4)
+sys.exit(0)' 2>/dev/null; then
+    :
+  else
+    local rc=$?
+    log "[$label] ⚠️  快照疑似被篡改/无效 (check=$rc)，保留旧快照"
+    return 0
+  fi
 
   if [[ "$DRY_RUN" == "1" ]]; then
     log "[$label] dry-run：将写入 ${#EXTRACTED_B64} 字节（已跳过）"
