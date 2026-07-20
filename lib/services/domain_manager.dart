@@ -1,15 +1,37 @@
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:archive/archive.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../config/app_config.dart';
 import '../config/env_config.dart';
+import '../utils/cdn_sign_utils.dart';
 import '../utils/s.dart';
+import 'domain/domain_entity.dart';
 import 'network/device_info_manager.dart';
 
+enum _DowngradeType { service, obs, npm }
+
+class _DowngradeModel {
+  final int rank;
+  final String url;
+  final _DowngradeType type;
+
+  const _DowngradeModel({
+    required this.rank,
+    required this.url,
+    required this.type,
+  });
+}
+
 /// 域名管理服务
-/// 负责备用域名的管理、CDN 文章隐写解码、探测和缓存
-/// 当默认域名不可用时，从 CDN 下载文章提取备用域名并逐个探测
+///
+/// 对齐 XMSport `XMDomainProvider` / dqiu `XXDomainManager`：
+/// 本地/缓存 → ping → 降级拉源 Service → Huawei OBS → unpkg → 多 npm 镜像；
+/// 请求侧权重轮询 + CDN Type A/B 加签（受 openFlag 控制）。
 class DomainManager {
   static final DomainManager _instance = DomainManager._internal();
   factory DomainManager() => _instance;
@@ -19,38 +41,28 @@ class DomainManager {
   Dio? _probeDio;
   bool _isInitialized = false;
 
+  List<DomainEntity> _domainList = [];
+  int _domainIdx = 0;
+  bool _isMoreRequesting = false;
+
   // ============================================================
   // SharedPreferences Keys
   // ============================================================
-  /// 工作域名缓存 key 按环境隔离（如 dm_working_domain_staging）。
-  /// 否则切换环境后（test→staging）会复用上一个环境仍可用的缓存域名，
-  /// Step 1 直接命中、根本不轮询当前环境候选域名 → 表现为「切了 beta 还在打 test」。
   static String get _workingDomainKey =>
       '${S.workingDomainKey}_${EnvConfig.current.name}';
-  static String get _cachedDomainsKey => S.cachedDomainsKey;
-  static String get _cacheTimestampKey => S.cacheTimestampKey;
+  static String get _cachedDomainsKey =>
+      '${S.cachedDomainsKey}_${EnvConfig.current.name}';
+  static String get _cacheTimestampKey =>
+      '${S.cacheTimestampKey}_${EnvConfig.current.name}';
   static String get _debugForceFailDefaultKey => S.debugForceFailDefaultKey;
   static String get _debugForceFailAllKey => S.debugForceFailAllKey;
 
-  /// CDN 域名列表缓存有效期（小时）
   static const int _cacheTtlHours = 24;
-
-  /// 域名探测超时
   static const Duration _probeTimeout = Duration(seconds: 5);
-
-  /// CDN 下载超时
   static const Duration _cdnTimeout = Duration(seconds: 10);
 
-  // ============================================================
-  // 零宽字符隐写常量
-  // U+200B = bit 0, U+200C = bit 1
-  // ============================================================
-  static const int _zwBit0 = 0x200B; // zero-width space
-  static const int _zwBit1 = 0x200C; // zero-width non-joiner
-
-  // ============================================================
-  // 调试状态
-  // ============================================================
+  static const int _zwBit0 = 0x200B;
+  static const int _zwBit1 = 0x200C;
 
   bool _debugForceFailDefault = false;
   bool get debugForceFailDefault => _debugForceFailDefault;
@@ -68,30 +80,30 @@ class DomainManager {
     _prefs?.setBool(_debugForceFailAllKey, value);
   }
 
-  /// Fallback 日志（仅调试模式）
   final List<String> _fallbackLog = [];
   List<String> get fallbackLog => List.unmodifiable(_fallbackLog);
-
   void clearLog() => _fallbackLog.clear();
 
-  /// 当前工作域名
-  String? get cachedWorkingDomain => _prefs?.getString(_workingDomainKey);
+  String? get cachedWorkingDomain {
+    final raw = _prefs?.getString(_workingDomainKey);
+    if (raw == null || raw.isEmpty) return null;
+    return DomainEntity.decodeMappedUrl(raw);
+  }
   String get defaultDomain => EnvConfig.apiBaseUrl;
-  String get currentWorkingDomain => cachedWorkingDomain ?? defaultDomain;
+  String get currentWorkingDomain =>
+      currentDomain()?.domain ?? cachedWorkingDomain ?? defaultDomain;
+
+  List<DomainEntity> get domains => List.unmodifiable(_domainList);
 
   // ============================================================
-  // 初始化
+  // 初始化 / 环境切换
   // ============================================================
 
-  /// 清除指向旧基建（supabase / cloudflare worker / zeus·daddy 配置 Worker）的工作域名缓存。
-  /// AB 接口已迁移到 dqiu 后端（qiutx-support），旧缓存域名必须失效，避免一直打死链。
   Future<void> _migrateStaleWorkingDomainIfNeeded() async {
-    // 清掉旧版「不区分环境」的全局工作域名 key（dm_working_domain）。
-    // 它会让切换环境后仍串用上一个环境的缓存域名，迁移到按环境隔离的 key 后必须删除。
     final legacyGlobalKey = S.workingDomainKey;
     if (_prefs?.getString(legacyGlobalKey) != null) {
       await _prefs?.remove(legacyGlobalKey);
-      _log('removed legacy global working domain key (now per-env scoped)');
+      _log('removed legacy global working domain key');
     }
 
     final c = cachedWorkingDomain;
@@ -104,7 +116,7 @@ class DomainManager {
     ];
     if (staleMarkers.any(c.contains)) {
       await _prefs?.remove(_workingDomainKey);
-      _log('cleared stale working domain (legacy infra → dqiu backend)');
+      _log('cleared stale working domain');
     }
   }
 
@@ -125,124 +137,515 @@ class DomainManager {
     ));
 
     if (kDebugMode) {
-      _debugForceFailDefault = _prefs?.getBool(_debugForceFailDefaultKey) ?? false;
+      _debugForceFailDefault =
+          _prefs?.getBool(_debugForceFailDefaultKey) ?? false;
       _debugForceFailAll = _prefs?.getBool(_debugForceFailAllKey) ?? false;
     }
 
     _isInitialized = true;
-    _log('initialized, cached domain: ${cachedWorkingDomain ?? "none"}');
+
+    // 先装载本地/缓存种子，后台再 ping + 降级拉源（不阻塞启动）
+    // 验证 OBS 时跳过本地缓存与硬编码，直接走运行时 OBS 拉源
+    List<DomainEntity> list;
+    if (!AppConfig.useHardcodedDomainFallback) {
+      list = EnvConfig.apiDomainEntities; // 仅编译期 OBS 快照；空则靠 runtime pull
+      _log('hardcoded fallback OFF: seed=${list.length} (OBS snapshot only)');
+    } else {
+      list = _loadCachedDomainEntities();
+      if (list.isEmpty) {
+        list = EnvConfig.apiDomainEntities;
+      }
+    }
+    _domainList = list;
+    unawaited(_checkDomainList(List<DomainEntity>.from(list)));
+
+    _log('initialized, domains=${_domainList.length}, '
+        'cached=${cachedWorkingDomain ?? "none"}');
+  }
+
+  /// 环境切换后重置并重新拉源（等待完成，便于随后刷新 AB）
+  Future<void> onEnvironmentChanged() async {
+    _domainIdx = 0;
+    _isMoreRequesting = false;
+    _domainList = [];
+    await requestDomain();
   }
 
   // ============================================================
-  // 核心方法：带备用域名的配置获取
+  // 域名池：选域 / 移除 / 缓存
   // ============================================================
 
-  /// 带 fallback 的配置获取
-  /// 返回 API 响应数据，全部失败返回 null
+  DomainEntity? currentDomain() {
+    if (_domainList.isEmpty) return null;
+    if (_domainIdx >= _domainList.length) _domainIdx = 0;
+
+    final domain = _domainList[_domainIdx];
+    if (domain.weightCnt < domain.weight) {
+      domain.weightCnt++;
+    }
+    if (domain.weight == 0 || domain.weightCnt == domain.weight) {
+      _domainIdx++;
+    }
+    return domain;
+  }
+
+  DomainEntity? getDomain(String domainOrHost) {
+    if (domainOrHost.isEmpty) return null;
+    for (final model in _domainList) {
+      if (model.domain == domainOrHost || model.host == domainOrHost) {
+        return model;
+      }
+    }
+    return null;
+  }
+
+  void removeDomain(String domain) {
+    if (domain.isEmpty) return;
+    final next = _domainList.where((m) => m.domain != domain).toList();
+    _domainList = next;
+    _cacheDomainArr(_domainList);
+    if (_domainList.isEmpty) {
+      forceRequestMoreDomains();
+    }
+  }
+
+  Future<void> requestDomain() async {
+    List<DomainEntity> list;
+    if (!AppConfig.useHardcodedDomainFallback) {
+      // 验证 OBS：不用本地域名缓存，避免旧硬编码污染
+      list = EnvConfig.apiDomainEntities;
+    } else {
+      list = _loadCachedDomainEntities();
+      if (list.isEmpty) {
+        list = EnvConfig.apiDomainEntities;
+      }
+    }
+    _domainList = list;
+    await _checkDomainList(list);
+  }
+
+  Future<void> _checkDomainList(List<DomainEntity> domainList) async {
+    if (domainList.isEmpty) {
+      await requestMoreDomains();
+      return;
+    }
+
+    final alive = <DomainEntity>[];
+    final futures = <Future>[];
+    for (final model in domainList) {
+      futures.add(_ping(model).then((ok) {
+        if (ok) alive.add(model);
+      }));
+    }
+    await Future.wait(futures);
+
+    _domainList = alive.isNotEmpty ? alive : domainList;
+    if (alive.isNotEmpty) {
+      _cacheDomainArr(_domainList);
+      _log('ping alive=${alive.length}/${domainList.length}');
+    } else {
+      _log('ping all failed, keep seeds and pull more');
+    }
+
+    await requestMoreDomains();
+  }
+
+  Future<bool> _ping(DomainEntity model) async {
+    try {
+      var url = '${model.domain}/ping';
+      url = CdnSignUtils.maybeSignUrl(
+        url,
+        domainType: model.domainType,
+        openFlag: model.openFlag,
+        token: model.token,
+        signType: model.signType,
+      );
+      final response = await _probeDio!.get(url);
+      return response.statusCode != null &&
+          response.statusCode! >= 200 &&
+          response.statusCode! < 300;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ============================================================
+  // 降级拉源链（对齐 XMSport / dqiu）
+  // ============================================================
+
+  String _envSuffix() => EnvConfig.domainPullEnvSuffix;
+
+  String _huaweiObsUrl() {
+    final env = _envSuffix();
+    final tpl = env == 'prod' ? S.obsProdUrlTpl : S.obsBtdUrlTpl;
+    return tpl.replaceAll('#', env);
+  }
+
+  List<_DowngradeModel> _buildDowngradeModels() {
+    final env = _envSuffix();
+    return [
+      _DowngradeModel(
+        rank: 0,
+        url: S.domainPullPath,
+        type: _DowngradeType.service,
+      ),
+      _DowngradeModel(
+        rank: 100,
+        url: _huaweiObsUrl(),
+        type: _DowngradeType.obs,
+      ),
+      _DowngradeModel(
+        rank: 200,
+        url: S.unpkgUrlTpl.replaceAll('#', env),
+        type: _DowngradeType.obs,
+      ),
+      _DowngradeModel(
+        rank: 1000,
+        url: S.cnpmUrlTpl.replaceAll('#', env),
+        type: _DowngradeType.npm,
+      ),
+      _DowngradeModel(
+        rank: 2000,
+        url: S.npmUrlTpl.replaceAll('#', env),
+        type: _DowngradeType.npm,
+      ),
+      _DowngradeModel(
+        rank: 3000,
+        url: S.tencentNpmUrlTpl.replaceAll('#', env),
+        type: _DowngradeType.npm,
+      ),
+      _DowngradeModel(
+        rank: 4000,
+        url: S.yarnNpmUrlTpl.replaceAll('#', env),
+        type: _DowngradeType.npm,
+      ),
+    ];
+  }
+
+  Future<void> requestMoreDomains() async {
+    if (_isMoreRequesting) return;
+    _isMoreRequesting = true;
+    await _requestMoreDomainsWithIndex(0);
+  }
+
+  Future<void> forceRequestMoreDomains() async {
+    if (_isMoreRequesting) return;
+    _isMoreRequesting = true;
+    await _requestMoreDomainsWithIndex(0);
+  }
+
+  Future<void> _requestMoreDomainsWithIndex(int index) async {
+    final models = _buildDowngradeModels();
+    if (index >= models.length) {
+      _isMoreRequesting = false;
+      // 可选：旧文章隐写兜底
+      if (AppConfig.useConfigDomainFallback && _domainList.isEmpty) {
+        await _loadArticleFallbackDomains();
+      }
+      _log('downgrade chain finished, domains=${_domainList.length}');
+      return;
+    }
+
+    final model = models[index];
+    _log('downgrade[$index] ${model.type.name} ${model.url}');
+    var ok = false;
+    switch (model.type) {
+      case _DowngradeType.service:
+        ok = await _pullFromService(model.url);
+        break;
+      case _DowngradeType.obs:
+        ok = await _pullFromObs(model.url);
+        break;
+      case _DowngradeType.npm:
+        ok = await _pullFromNpm(model.url);
+        break;
+    }
+
+    if (ok) {
+      _isMoreRequesting = false;
+      return;
+    }
+    await _requestMoreDomainsWithIndex(index + 1);
+  }
+
+  Future<bool> _pullFromService(String apiPath) async {
+    if (_domainList.isEmpty) return false;
+    final base = _domainList.first;
+    try {
+      var url = '${base.domain}$apiPath';
+      url = CdnSignUtils.maybeSignUrl(
+        url,
+        domainType: base.domainType,
+        openFlag: base.openFlag,
+        token: base.token,
+        signType: base.signType,
+      );
+      final response = await _probeDio!.get(url);
+      if (response.statusCode == 200 && response.data is Map) {
+        final data = response.data['data'];
+        if (data is List && data.isNotEmpty) {
+          final entities = data
+              .whereType<Map>()
+              .map((e) => DomainEntity.fromJson(Map<String, dynamic>.from(e)))
+              .where((e) => e.domain.startsWith('http'))
+              .toList();
+          if (entities.isNotEmpty) {
+            addDomains(entities);
+            _log('service pull ok: ${entities.length}');
+            return true;
+          }
+        }
+      }
+    } catch (e) {
+      _log('service pull fail: ${e.runtimeType}');
+    }
+    return false;
+  }
+
+  Future<bool> _pullFromObs(String urlStr) async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: _cdnTimeout,
+        receiveTimeout: _cdnTimeout,
+        responseType: ResponseType.plain,
+      ));
+      final response = await dio.get<String>(urlStr);
+      final body = response.data;
+      if (body == null || body.isEmpty) return false;
+      final entities = _parseBase64DomainResponse(body);
+      if (entities.isNotEmpty) {
+        addDomains(entities);
+        _log('obs/unpkg pull ok: ${entities.length}');
+        return true;
+      }
+    } catch (e) {
+      _log('obs pull fail: ${e.runtimeType}');
+    }
+    return false;
+  }
+
+  Future<bool> _pullFromNpm(String urlStr) async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: _cdnTimeout,
+        receiveTimeout: _cdnTimeout,
+      ));
+      final meta = await dio.get(urlStr);
+      final data = meta.data;
+      if (data is! Map) return false;
+      final distTags = data['dist-tags'];
+      if (distTags is! Map) return false;
+      final latest = distTags['latest']?.toString() ?? '';
+      final versions = data['versions'];
+      if (latest.isEmpty || versions is! Map) return false;
+      final versionDict = versions[latest];
+      if (versionDict is! Map) return false;
+      final dist = versionDict['dist'];
+      final tarball = dist is Map ? dist['tarball']?.toString() ?? '' : '';
+      if (tarball.isEmpty) return false;
+
+      final tarResp = await dio.get<List<int>>(
+        tarball,
+        options: Options(responseType: ResponseType.bytes),
+      );
+      final bytes = tarResp.data;
+      if (bytes == null || bytes.isEmpty) return false;
+
+      final indexContent = _extractNpmIndexJs(bytes);
+      if (indexContent == null) return false;
+      final entities = _parseBase64DomainResponse(indexContent);
+      if (entities.isNotEmpty) {
+        addDomains(entities);
+        _log('npm pull ok: ${entities.length}');
+        return true;
+      }
+    } catch (e) {
+      _log('npm pull fail: ${e.runtimeType}');
+    }
+    return false;
+  }
+
+  String? _extractNpmIndexJs(List<int> data) {
+    try {
+      List<int> tarBytes;
+      try {
+        tarBytes = GZipDecoder().decodeBytes(data);
+      } catch (_) {
+        tarBytes = data;
+      }
+      final archive = TarDecoder().decodeBytes(tarBytes);
+      for (final file in archive) {
+        if (!file.isFile) continue;
+        final name = file.name.replaceAll('\\', '/');
+        if (name == 'index.js' || name.endsWith('/index.js')) {
+          return utf8.decode(file.content as List<int>);
+        }
+      }
+      try {
+        final zip = ZipDecoder().decodeBytes(data);
+        for (final file in zip) {
+          if (!file.isFile) continue;
+          final name = file.name.replaceAll('\\', '/');
+          if (name == 'index.js' || name.endsWith('/index.js')) {
+            return utf8.decode(file.content as List<int>);
+          }
+        }
+      } catch (_) {}
+    } catch (_) {}
+    return null;
+  }
+
+  List<DomainEntity> _parseBase64DomainResponse(String responseString) {
+    try {
+      final trimmed = responseString.trim();
+      String jsonStr;
+      try {
+        jsonStr = utf8.decode(base64.decode(trimmed));
+      } catch (_) {
+        // unpkg 可能包一层 JS；尝试抽取最长 base64
+        final extracted = _extractEmbeddedB64(trimmed);
+        if (extracted != null) {
+          jsonStr = utf8.decode(base64.decode(extracted));
+        } else {
+          jsonStr = trimmed;
+        }
+      }
+      return EnvConfig.parseDomainJson(jsonStr);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  String? _extractEmbeddedB64(String raw) {
+    final re = RegExp(r'[A-Za-z0-9+/]{80,}={0,2}');
+    String? best;
+    for (final m in re.allMatches(raw)) {
+      final s = m.group(0)!;
+      if (best == null || s.length > best.length) best = s;
+    }
+    return best;
+  }
+
+  void addDomains(List<DomainEntity> domains) {
+    if (domains.isEmpty) return;
+    _domainList = _mergeDomains(domains);
+    _cacheDomainArr(_domainList);
+  }
+
+  List<DomainEntity> _mergeDomains(List<DomainEntity> incoming) {
+    if (_domainList.isEmpty) return List.from(incoming);
+    if (incoming.isEmpty) return _domainList;
+    final result = List<DomainEntity>.from(incoming);
+    final seen = result.map((e) => e.domain).toSet();
+    for (final local in _domainList) {
+      if (!seen.contains(local.domain)) {
+        result.add(local);
+      }
+    }
+    return result;
+  }
+
+  // ============================================================
+  // AB 配置拉取（对外主入口，供 ConfigService）
+  // ============================================================
+
   Future<Map<String, dynamic>?> fetchConfigWithFallback({
     required String configPath,
     required Map<String, dynamic> queryParameters,
   }) async {
     _fallbackLog.clear();
-    final triedDomains = <String>{};
+    final tried = <String>{};
 
-    // Step 1: 尝试缓存的工作域名
+    if (!_isInitialized) {
+      await initialize();
+    }
+
+    // 确保至少跑过一轮种子；拉源异步进行中也可先用现有池
+    if (_domainList.isEmpty) {
+      await requestDomain();
+    }
+
+    // Step 1: 缓存工作域名
     final cached = cachedWorkingDomain;
     if (cached != null && !_shouldForceFailDefault) {
       _log('Step 1: trying cached domain: $cached');
-      final result = await _tryFetchConfig(cached, configPath, queryParameters);
-      triedDomains.add(cached);
+      final entity = getDomain(cached) ?? DomainEntity.urlOnly(cached);
+      final result =
+          await _tryFetchConfig(entity, configPath, queryParameters);
+      tried.add(cached);
       if (result != null) {
-        _log('Step 1: success with cached domain');
+        _log('Step 1: success');
         return result;
       }
-      _log('Step 1: cached domain failed');
-    } else if (cached == null) {
-      _log('Step 1: no cached domain, skip');
-    } else {
-      _log('Step 1: debug force fail enabled, skip');
     }
 
-    // Step 2: 轮询当前环境的候选域名（测试/预发/正式各一组）
-    // 逐个尝试，命中即缓存为工作域名；这是「域名轮询」的核心。
-    if (!_shouldForceFailDefault) {
-      final envDomains = EnvConfig.apiDomains;
-      _log('Step 2: polling ${envDomains.length} env domains (${EnvConfig.current.name})');
-      for (final domain in envDomains) {
-        if (triedDomains.contains(domain)) continue;
-        _log('Step 2: trying env domain: $domain');
-        final result = await _tryFetchConfig(domain, configPath, queryParameters);
-        triedDomains.add(domain);
+    // Step 2: 轮询当前域名池（优先权重序）
+    if (!_shouldForceFailDefault && !_shouldForceFailAll) {
+      final pool = List<DomainEntity>.from(
+        _domainList.isNotEmpty ? _domainList : EnvConfig.apiDomainEntities,
+      );
+      pool.sort((a, b) => b.weight.compareTo(a.weight));
+      _log('Step 2: polling ${pool.length} domains');
+      for (final entity in pool) {
+        if (tried.contains(entity.domain)) continue;
+        _log('Step 2: trying ${entity.domain}');
+        final result =
+            await _tryFetchConfig(entity, configPath, queryParameters);
+        tried.add(entity.domain);
         if (result != null) {
-          await _saveWorkingDomain(domain);
-          _log('Step 2: success with env domain $domain');
+          await _saveWorkingDomain(entity.domain);
+          _log('Step 2: success ${entity.domain}');
           return result;
         }
-        _log('Step 2: env domain $domain failed');
       }
-    } else {
-      _log('Step 2: skip (debug force fail default)');
     }
 
-    if (!AppConfig.useConfigDomainFallback) {
-      _log('Step 3: skipped (AppConfig.useConfigDomainFallback = false)');
-      return null;
-    }
-
-    // Step 3: 加载域名列表
-    _log('Step 3: loading domain list...');
-    final domains = await _loadDomainList();
-    if (domains == null || domains.isEmpty) {
-      _log('Step 3: no domains available, giving up');
-      return null;
-    }
-    _log('Step 3: got ${domains.length} domains');
-
-    // Step 4: 逐个探测
+    // Step 3: 强制走降级拉源后再试一轮
+    _log('Step 3: force downgrade pull...');
+    await forceRequestMoreDomains();
     if (_shouldForceFailAll) {
-      _log('Step 4: debug force fail all enabled, skip probing');
+      _log('Step 3: debug force fail all');
       return null;
     }
 
-    for (final domain in domains) {
-      if (triedDomains.contains(domain)) continue;
-      _log('Step 4: trying domain: $domain');
-      final result = await _tryFetchConfig(domain, configPath, queryParameters);
-      triedDomains.add(domain);
+    for (final entity in List<DomainEntity>.from(_domainList)) {
+      if (tried.contains(entity.domain)) continue;
+      _log('Step 3: trying ${entity.domain}');
+      final result =
+          await _tryFetchConfig(entity, configPath, queryParameters);
+      tried.add(entity.domain);
       if (result != null) {
-        await _saveWorkingDomain(domain);
-        _log('Step 4: success with $domain');
+        await _saveWorkingDomain(entity.domain);
+        _log('Step 3: success ${entity.domain}');
         return result;
       }
-      _log('Step 4: $domain failed');
     }
 
-    _log('Step 4: all domains failed');
+    _log('all domains failed');
     return null;
   }
 
-  // ============================================================
-  // 域名探测
-  // ============================================================
-
-  /// 尝试用指定域名请求 config API
   Future<Map<String, dynamic>?> _tryFetchConfig(
-    String baseUrl,
+    DomainEntity entity,
     String configPath,
     Map<String, dynamic> queryParameters,
   ) async {
     try {
-      final url = '$baseUrl$configPath';
-      final headers = <String, dynamic>{};
+      var url = '${entity.domain}$configPath';
+      url = CdnSignUtils.maybeSignUrl(
+        url,
+        domainType: entity.domainType,
+        openFlag: entity.openFlag,
+        token: entity.token,
+        signType: entity.signType,
+      );
 
-      // 添加设备信息头（确保已拉取 iOS 机型，避免仅依赖 HttpClient 初始化顺序）
+      final headers = <String, dynamic>{};
       try {
         final deviceInfo = DeviceInfoManager();
         await deviceInfo.initialize();
         headers.addAll(deviceInfo.getRequestHeaders());
         headers['User-Agent'] = deviceInfo.userAgent;
-        // 与 dqiu 客户端对齐的 header（client-type / version / channel / deviceId /
-        // Authorization / x-user-header 等）+ 文档要求的 bundleid / language / phoneType
         headers.addAll(deviceInfo.getAbQueryHeaders());
       } catch (_) {}
       headers[S.xEnvHeader] = EnvConfig.current.name;
@@ -263,110 +666,61 @@ class DomainManager {
       stopwatch.stop();
 
       if (response.statusCode == 200 && response.data != null) {
-        _log('  → $baseUrl OK (${stopwatch.elapsedMilliseconds}ms)');
+        final code = response.data!['code'];
+        // 业务层异常码：对齐 dqiu 踢域名区间
+        if (code is int && code > 380 && code < 520) {
+          _log('  → ${entity.domain} biz code $code, drop');
+          return null;
+        }
+        _log('  → ${entity.domain} OK (${stopwatch.elapsedMilliseconds}ms)');
         return response.data;
       }
-      _log('  → $baseUrl status: ${response.statusCode} (${stopwatch.elapsedMilliseconds}ms)');
+      _log('  → ${entity.domain} status=${response.statusCode}');
     } catch (e) {
-      _log('  → $baseUrl error: ${e.runtimeType}');
+      _log('  → ${entity.domain} error: ${e.runtimeType}');
     }
     return null;
   }
 
   // ============================================================
-  // 域名列表加载（缓存 → CDN → 硬编码兜底）
+  // 可选：文章隐写兜底（旧逻辑，受 useConfigDomainFallback 控制）
   // ============================================================
 
-  Future<List<String>?> _loadDomainList() async {
-    // 优先使用缓存（未过期）
-    final cached = _loadCachedDomains();
-    if (cached != null) {
-      _log('  domain list from cache (${cached.length} items)');
-      return cached;
-    }
-
-    // 缓存过期或不存在，从 CDN 下载
-    _log('  cache expired or missing, trying CDN...');
+  Future<void> _loadArticleFallbackDomains() async {
     final cdnDomains = await _downloadFromCdn();
     if (cdnDomains != null && cdnDomains.isNotEmpty) {
-      await _cacheDomains(cdnDomains);
-      _log('  domain list from CDN (${cdnDomains.length} items)');
-      return cdnDomains;
+      addDomains(cdnDomains.map(DomainEntity.urlOnly).toList());
+      return;
     }
-
-    // CDN 失败，使用硬编码的兜底域名
-    _log('  CDN failed, using hardcoded fallback domains...');
-    final hardcoded = _loadHardcodedDomains();
+    final hardcoded =
+        S.fallbackDomains.map(DomainEntity.urlOnly).toList();
     if (hardcoded.isNotEmpty) {
-      _log('  hardcoded fallback domains (${hardcoded.length} items)');
-    } else {
-      _log('  no hardcoded fallback domains');
-    }
-    return hardcoded;
-  }
-
-  /// 读取缓存的域名列表（检查 TTL）
-  List<String>? _loadCachedDomains() {
-    final json = _prefs?.getString(_cachedDomainsKey);
-    final timestamp = _prefs?.getInt(_cacheTimestampKey);
-    if (json == null || timestamp == null) return null;
-
-    final age = DateTime.now().millisecondsSinceEpoch - timestamp;
-    final ttlMs = _cacheTtlHours * 60 * 60 * 1000;
-    if (age > ttlMs) return null;
-
-    try {
-      final list = jsonDecode(json) as List<dynamic>;
-      return list.cast<String>();
-    } catch (_) {
-      return null;
+      addDomains(hardcoded);
     }
   }
 
-  /// 缓存域名列表到 SharedPreferences
-  Future<void> _cacheDomains(List<String> domains) async {
-    await _prefs?.setString(_cachedDomainsKey, jsonEncode(domains));
-    await _prefs?.setInt(_cacheTimestampKey, DateTime.now().millisecondsSinceEpoch);
-  }
-
-  /// 从多个 CDN 源下载文章并提取隐写域名
   Future<List<String>?> _downloadFromCdn() async {
     final cdnDio = Dio(BaseOptions(
       connectTimeout: _cdnTimeout,
       receiveTimeout: _cdnTimeout,
     ));
 
-    for (int i = 0; i < S.cdnArticleUrlBytes.length; i++) {
+    for (var i = 0; i < S.cdnArticleUrlBytes.length; i++) {
       final url = utf8.decode(S.cdnArticleUrlBytes[i]);
       try {
-        _log('  CDN[$i]: $url');
+        _log('  CDN article[$i]: $url');
         final response = await cdnDio.get<String>(url);
         if (response.statusCode == 200 && response.data != null) {
           final domains = _extractDomainsFromArticle(response.data!);
-          if (domains != null && domains.isNotEmpty) {
-            return domains;
-          }
-          _log('  CDN[$i]: no hidden data found');
+          if (domains != null && domains.isNotEmpty) return domains;
         }
       } catch (e) {
-        _log('  CDN[$i] failed: ${e.runtimeType}');
+        _log('  CDN article[$i] fail: ${e.runtimeType}');
       }
     }
     return null;
   }
 
-  /// 从硬编码字节数组加载兜底域名列表
-  List<String> _loadHardcodedDomains() {
-    return S.fallbackDomainBytes
-        .map((bytes) => utf8.decode(bytes))
-        .toList();
-  }
-
-  // ============================================================
-  // 零宽字符隐写解码
-  // ============================================================
-
-  /// 从文章文本中提取零宽字符并解码为域名列表
   List<String>? _extractDomainsFromArticle(String articleText) {
     try {
       final bits = StringBuffer();
@@ -377,25 +731,18 @@ class DomainManager {
           bits.write('1');
         }
       }
-
       if (bits.isEmpty) return null;
-
       final bitStr = bits.toString();
       final byteCount = bitStr.length ~/ 8;
       if (byteCount == 0) return null;
-
       final bytes = List<int>.generate(
         byteCount,
         (i) => int.parse(bitStr.substring(i * 8, i * 8 + 8), radix: 2),
       );
-
       final payload = utf8.decode(bytes);
       final domains = payload.split('\n').where((d) => d.isNotEmpty).toList();
-
-      _log('  extracted ${domains.length} domains from article');
       return domains.isNotEmpty ? domains : null;
-    } catch (e) {
-      _log('  article decode error: $e');
+    } catch (_) {
       return null;
     }
   }
@@ -404,25 +751,60 @@ class DomainManager {
   // 持久化
   // ============================================================
 
-  Future<void> _saveWorkingDomain(String domain) async {
-    await _prefs?.setString(_workingDomainKey, domain);
-    _log('  saved working domain: $domain');
+  List<DomainEntity> _loadCachedDomainEntities() {
+    final json = _prefs?.getString(_cachedDomainsKey);
+    final timestamp = _prefs?.getInt(_cacheTimestampKey);
+    if (json == null || timestamp == null) return [];
+
+    final age = DateTime.now().millisecondsSinceEpoch - timestamp;
+    final ttlMs = _cacheTtlHours * 60 * 60 * 1000;
+    if (age > ttlMs) return [];
+
+    try {
+      final list = jsonDecode(json) as List<dynamic>;
+      // 兼容旧版纯 URL / base64 字符串缓存
+      if (list.isNotEmpty && list.first is String) {
+        return list
+            .cast<String>()
+            .map(DomainEntity.urlOnly)
+            .where((e) => e.domain.startsWith('http'))
+            .toList();
+      }
+      return list
+          .whereType<Map>()
+          .map((e) => DomainEntity.fromJson(Map<String, dynamic>.from(e)))
+          .where((e) => e.domain.startsWith('http'))
+          .toList();
+    } catch (_) {
+      return [];
+    }
   }
 
-  /// 清除缓存的工作域名
+  void _cacheDomainArr(List<DomainEntity> modelArr) {
+    // toJson 内 domain 已 base64 映射，与硬编码同级处理
+    final mapList = modelArr.map((e) => e.toJson()).toList();
+    _prefs?.setString(_cachedDomainsKey, jsonEncode(mapList));
+    _prefs?.setInt(
+        _cacheTimestampKey, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  Future<void> _saveWorkingDomain(String domain) async {
+    final mapped = DomainEntity.encodeMappedUrl(domain);
+    await _prefs?.setString(_workingDomainKey, mapped);
+    _log('  saved working domain: ${DomainEntity.decodeMappedUrl(mapped)}');
+  }
+
   Future<void> clearCachedDomain() async {
     await _prefs?.remove(_workingDomainKey);
     _log('cleared cached working domain');
   }
 
-  /// 清除域名列表缓存（强制下次从 CDN 重新加载）
   Future<void> clearDomainListCache() async {
     await _prefs?.remove(_cachedDomainsKey);
     await _prefs?.remove(_cacheTimestampKey);
     _log('cleared domain list cache');
   }
 
-  /// 重置所有状态（调试用）
   Future<void> debugResetAll() async {
     if (!kDebugMode) return;
     await clearCachedDomain();
@@ -432,33 +814,30 @@ class DomainManager {
     await _prefs?.remove(_debugForceFailDefaultKey);
     await _prefs?.remove(_debugForceFailAllKey);
     _fallbackLog.clear();
+    _domainList = [];
+    await requestDomain();
     _log('all state reset');
   }
 
-  // ============================================================
-  // 辅助方法
-  // ============================================================
+  bool get _shouldForceFailDefault => kDebugMode && _debugForceFailDefault;
+  bool get _shouldForceFailAll => kDebugMode && _debugForceFailAll;
 
-  bool get _shouldForceFailDefault =>
-      kDebugMode && _debugForceFailDefault;
-
-  bool get _shouldForceFailAll =>
-      kDebugMode && _debugForceFailAll;
-
-  /// 域名列表缓存剩余时间描述（调试用）
   String get cacheStatusDescription {
     final timestamp = _prefs?.getInt(_cacheTimestampKey);
-    if (timestamp == null) return '无缓存';
+    if (timestamp == null) {
+      return '无缓存 / 域名池 ${_domainList.length}';
+    }
     final age = DateTime.now().millisecondsSinceEpoch - timestamp;
     final ttlMs = _cacheTtlHours * 60 * 60 * 1000;
-    if (age > ttlMs) return '已过期';
+    if (age > ttlMs) return '已过期 / 域名池 ${_domainList.length}';
     final remainHours = ((ttlMs - age) / (60 * 60 * 1000)).toStringAsFixed(1);
-    return '有效 (${remainHours}h 后过期)';
+    return '有效 (${remainHours}h) / 池 ${_domainList.length}';
   }
 
   void _log(String message) {
     if (kDebugMode) {
       final time = DateTime.now().toString().substring(11, 19);
+      // ignore: avoid_print
       print('DomainManager: $message');
       _fallbackLog.add('[$time] $message');
     }

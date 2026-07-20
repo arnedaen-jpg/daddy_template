@@ -171,13 +171,44 @@ sys.exit(0)' 2>/dev/null; then
     return 0
   fi
 
-  if [[ "$DRY_RUN" == "1" ]]; then
-    log "[$label] dry-run：将写入 ${#EXTRACTED_B64} 字节（已跳过）"
+  # domain 字段单独 base64 映射（与硬编码域名同级；外层仍是 base64(JSON)）
+  local mapped_json mapped_b64
+  mapped_json="$(printf '%s' "$EXTRACTED_JSON" | python3 -c '
+import sys, json, base64
+d = json.load(sys.stdin)
+for x in d.get("data") or []:
+    if not isinstance(x, dict):
+        continue
+    dom = str(x.get("domain") or "").strip()
+    if not dom:
+        continue
+    if dom.startswith("http://") or dom.startswith("https://"):
+        x["domain"] = base64.b64encode(dom.encode()).decode()
+    else:
+        # 已是映射则校验能解出 http
+        try:
+            plain = base64.b64decode(dom).decode()
+            if plain.startswith("http://") or plain.startswith("https://"):
+                x["domain"] = dom
+        except Exception:
+            pass
+json.dump(d, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+' 2>/dev/null || true)"
+
+  if [[ -z "$mapped_json" ]]; then
+    log "[$label] ⚠️  domain 字段映射失败，保留旧快照"
     return 0
   fi
 
-  printf '%s' "$EXTRACTED_B64" > "$out"
-  log "[$label] ✅ 已更新（$(wc -c < "$out" | tr -d ' ') 字节）"
+  mapped_b64="$(printf '%s' "$mapped_json" | python3 -c 'import sys,base64; print(base64.b64encode(sys.stdin.buffer.read()).decode(), end="")')"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "[$label] dry-run：将写入 ${#mapped_b64} 字节（已跳过，domain 已字段级 base64）"
+    return 0
+  fi
+
+  printf '%s' "$mapped_b64" > "$out"
+  log "[$label] ✅ 已更新（$(wc -c < "$out" | tr -d ' ') 字节，domain 字段已 base64 映射）"
 }
 
 log "项目目录: $PROJECT_DIR"

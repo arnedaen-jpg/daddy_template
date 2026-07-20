@@ -5,6 +5,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../config/env_config.dart';
 import '../services/config_service.dart';
 import '../services/domain_manager.dart';
+import '../services/network/http_client.dart';
 
 /// 壳工程 Debug 下是否显示开发者选项悬浮按钮（AB 包工厂可通过 `--dart-define` 关闭）
 const bool _kShowDevFloatButton = bool.fromEnvironment(
@@ -204,6 +205,9 @@ class _DevOptionsSheetState extends State<_DevOptionsSheet> {
   Future<void> _switchEnvironment(Future<void> Function() switchFn) async {
     await switchFn();
     await _domainManager.clearCachedDomain();
+    // 对齐 XMSport/dqiu：切环境后重跑 ping + Service/OBS/npm 降级链
+    await _domainManager.onEnvironmentChanged();
+    HttpClient().updateBaseUrl();
     await _configService.refresh(force: true);
     if (mounted) {
       setState(() {});

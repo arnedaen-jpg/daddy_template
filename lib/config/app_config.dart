@@ -21,9 +21,13 @@ class AppConfig {
   /// 格式: DateTime.now().millisecondsSinceEpoch
   static const int buildTimestamp = 1737100800000; // 2025-01-17 12:00:00 UTC
 
-  /// AB 状态查询在「环境候选域名轮询」全部失败后，是否继续尝试 CDN 文章与硬编码备用域名。
-  /// AB 接口已迁移到 dqiu 后端（每个环境自带多个候选域名做轮询），通常无需再走 CDN 兜底。
+  /// 域名降级链（Service→OBS→unpkg→npm）全部失败且域名池仍空时，
+  /// 是否再尝试旧版「CDN 文章隐写 + 硬编码」兜底。默认关闭；主路径已对齐 XMSport/dqiu。
   static const bool useConfigDomainFallback = false;
+
+  /// 是否启用 EnvConfig 内硬编码候选域名（`_test/_staging/_productionDomainBytes`）。
+  /// 临时关掉以便单独验证 OBS/unpkg 快照与运行时 OBS 拉源；验证完再改回 true。
+  static const bool useHardcodedDomainFallback = true;
 
   /// 是否在 AB 状态查询请求中附带 `X-Config-Token`。
   /// 旧 supabase / Worker 接口需要；现接口（qiutx-support/app/client/queryAbStatus）

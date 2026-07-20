@@ -28,6 +28,9 @@ dependencies:
 
   # AES 加解密（域名列表解密）
   encrypt: ^5.0.3
+  # CDN 加签 / npm 拉源解压
+  crypto: ^3.0.7
+  archive: ^4.0.9
 
 dev_dependencies:
   flutter_test:

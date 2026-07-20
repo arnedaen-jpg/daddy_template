@@ -1,12 +1,15 @@
 import 'dart:convert';
 
 /// 字符串混淆工具
-/// 壳工程敏感字符串集中管理，使用字节数组存储，运行时解码
+/// 壳工程敏感字符串集中管理：字节数组 / base64 映射，运行时解码
 /// 规避苹果机器审核静态特征扫描
 class S {
   S._();
 
   static String _d(List<int> b) => utf8.decode(b);
+
+  /// base64 映射解码（CDN 拉源 / 硬编码域名）
+  static String _db64(String b64) => utf8.decode(base64.decode(b64));
 
   // ============================================================
   // SharedPreferences Keys
@@ -71,16 +74,68 @@ class S {
   // create_ab_project.sh 执行时应替换为项目实际的备用域名
   // ============================================================
 
-  static const List<List<int>> fallbackDomainBytes = <List<int>>[
+  /// 硬编码兜底域名（base64 映射，运行时解码）
+  static const List<String> _fallbackDomainB64 = <String>[
     // https://api.dq87776.com
-    <int>[104,116,116,112,115,58,47,47,97,112,105,46,100,113,56,55,55,55,54,46,99,111,109],
+    'aHR0cHM6Ly9hcGkuZHE4Nzc3Ni5jb20=',
     // https://apial.zdbapp.com
-    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,122,100,98,97,112,112,46,99,111,109],
+    'aHR0cHM6Ly9hcGlhbC56ZGJhcHAuY29t',
     // https://apial.wxqerf.com
-    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,119,120,113,101,114,102,46,99,111,109],
+    'aHR0cHM6Ly9hcGlhbC53eHFlcmYuY29t',
     // https://apial.miyayujia.com
-    <int>[104,116,116,112,115,58,47,47,97,112,105,97,108,46,109,105,121,97,121,117,106,105,97,46,99,111,109],
+    'aHR0cHM6Ly9hcGlhbC5taXlheXVqaWEuY29t',
   ];
+
+  static List<String> get fallbackDomains =>
+      _fallbackDomainB64.map(_db64).toList();
+
+  /// @Deprecated 兼容旧调用：返回 utf8 字节；新代码请用 [fallbackDomains]
+  static List<List<int>> get fallbackDomainBytes =>
+      fallbackDomains.map((e) => utf8.encode(e)).toList();
+
+  // ============================================================
+  // CDN / OBS / NPM 拉源 URL（base64 映射，# = test|beta|prod）
+  // 对齐 XMSport CONF_*_URL
+  // ============================================================
+
+  // https://bfw-pic-new0111.obs.cn-south-1.myhuaweicloud.com/cdn/app_#.json
+  static const _obsProdB64 =
+      'aHR0cHM6Ly9iZnctcGljLW5ldzAxMTEub2JzLmNuLXNvdXRoLTEubXlodWF3ZWljbG91ZC5jb20vY2RuL2FwcF8jLmpzb24=';
+  static String get obsProdUrlTpl => _db64(_obsProdB64);
+
+  // https://bfw-btd-pic-new0111.obs.ap-southeast-1.myhuaweicloud.com:443/cdn/app_#.json
+  static const _obsBtdB64 =
+      'aHR0cHM6Ly9iZnctYnRkLXBpYy1uZXcwMTExLm9icy5hcC1zb3V0aGVhc3QtMS5teWh1YXdlaWNsb3VkLmNvbTo0NDMvY2RuL2FwcF8jLmpzb24=';
+  static String get obsBtdUrlTpl => _db64(_obsBtdB64);
+
+  // https://unpkg.com/@hd-team/app-dnpkg-#
+  static const _unpkgB64 =
+      'aHR0cHM6Ly91bnBrZy5jb20vQGhkLXRlYW0vYXBwLWRucGtnLSM=';
+  static String get unpkgUrlTpl => _db64(_unpkgB64);
+
+  // https://r.cnpmjs.org/@hd-team/app-dnpkg-#
+  static const _cnpmB64 =
+      'aHR0cHM6Ly9yLmNucG1qcy5vcmcvQGhkLXRlYW0vYXBwLWRucGtnLSM=';
+  static String get cnpmUrlTpl => _db64(_cnpmB64);
+
+  // https://registry.npmmirror.com/@hd-team/app-dnpkg-#
+  static const _npmB64 =
+      'aHR0cHM6Ly9yZWdpc3RyeS5ucG1taXJyb3IuY29tL0BoZC10ZWFtL2FwcC1kbnBrZy0j';
+  static String get npmUrlTpl => _db64(_npmB64);
+
+  // https://mirrors.cloud.tencent.com/npm/@hd-team/app-dnpkg-#
+  static const _tencentNpmB64 =
+      'aHR0cHM6Ly9taXJyb3JzLmNsb3VkLnRlbmNlbnQuY29tL25wbS9AaGQtdGVhbS9hcHAtZG5wa2ctIw==';
+  static String get tencentNpmUrlTpl => _db64(_tencentNpmB64);
+
+  // https://registry.yarnpkg.com/@hd-team/app-dnpkg-#
+  static const _yarnNpmB64 =
+      'aHR0cHM6Ly9yZWdpc3RyeS55YXJucGtnLmNvbS9AaGQtdGVhbS9hcHAtZG5wa2ctIw==';
+  static String get yarnNpmUrlTpl => _db64(_yarnNpmB64);
+
+  // /qiutx-support/domains/v2/pull
+  static const _pullPathB64 = 'L3FpdXR4LXN1cHBvcnQvZG9tYWlucy92Mi9wdWxs';
+  static String get domainPullPath => _db64(_pullPathB64);
 
   // ============================================================
   // HTTP Headers

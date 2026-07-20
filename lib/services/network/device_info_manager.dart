@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../../utils/s.dart';
+import '../../utils/user_agent_utils.dart';
 
 /// 设备信息管理器
 /// 用于获取设备和应用相关信息，用于 HTTP 请求头
@@ -15,6 +16,9 @@ class DeviceInfoManager {
   IosDeviceInfo? _iosDeviceInfo;
   bool _isInitialized = false;
 
+  /// UA 前缀 App 名（对齐 XMSport CFBundleExecutable / CFBundleName）
+  String _uaAppToken = 'App';
+
   /// 初始化
   Future<void> initialize() async {
     if (_isInitialized) return;
@@ -25,6 +29,11 @@ class DeviceInfoManager {
       final deviceInfoPlugin = DeviceInfoPlugin();
       _iosDeviceInfo = await deviceInfoPlugin.iosInfo;
     }
+
+    _uaAppToken = await UserAgentUtils.resolveAppToken(
+      fallbackAppName: appName,
+      fallbackPackageName: bundleId,
+    );
 
     _isInitialized = true;
   }
@@ -174,29 +183,23 @@ class DeviceInfoManager {
   }
 
   /// 对齐 XMSport / AFNetworking 默认 User-Agent：
-  /// `AppName/Version (UIDevice.model; iOS systemVersion; Scale/x.xx)`
+  /// `Executable/Version (UIDevice.model; iOS systemVersion; Scale/x.xx)`
   /// 例：`XMSport/3.0.0 (iPhone; iOS 17.0; Scale/3.00)`
   String get userAgent {
-    final cleanAppName = _sanitizeHeaderValue(appName);
-    final name = cleanAppName.isEmpty ? 'App' : cleanAppName;
-    final cleanAppVersion = _sanitizeHeaderValue(appVersion);
-    // 对齐 UIDevice.model（iPhone / iPad），不用 commercial modelName
-    final cleanModel = _sanitizeHeaderValue(
-      (_iosDeviceInfo?.model.trim().isNotEmpty ?? false)
-          ? _iosDeviceInfo!.model.trim()
-          : 'iPhone',
+    final model = (_iosDeviceInfo?.model.trim().isNotEmpty ?? false)
+        ? _iosDeviceInfo!.model.trim()
+        : 'iPhone';
+    return UserAgentUtils.build(
+      appToken: _uaAppToken,
+      version: appVersion,
+      model: model,
+      iosVersion: iosVersion,
     );
-    final cleanIosVersion = _sanitizeHeaderValue(iosVersion);
-    final scale = PlatformDispatcher.instance.views.isNotEmpty
-        ? PlatformDispatcher.instance.views.first.devicePixelRatio
-        : 3.0;
-    return '$name/$cleanAppVersion ($cleanModel; iOS $cleanIosVersion; Scale/${scale.toStringAsFixed(2)})';
   }
 
   /// 过滤非 ASCII 字符，确保 HTTP Header 值合法
   String _sanitizeHeaderValue(String value) {
     if (value.isEmpty) return value;
-    // 只保留可见的 ASCII 字符 (0x20-0x7E)
     return value.replaceAll(RegExp(r'[^\x20-\x7E]'), '').trim();
   }
 }

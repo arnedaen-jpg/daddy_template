@@ -1,11 +1,13 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../config/env_config.dart';
+import '../../utils/cdn_sign_utils.dart';
 import '../../utils/s.dart';
+import '../domain_manager.dart';
 import 'device_info_manager.dart';
 
 /// 网络客户端
-/// 基于 Dio 封装，支持环境切换、自动添加设备信息头
+/// 基于 Dio 封装：环境切换、设备头、CDN URL 加签（对齐 XMSport / dqiu）
 class HttpClient {
   static final HttpClient _instance = HttpClient._internal();
   factory HttpClient() => _instance;
@@ -14,17 +16,14 @@ class HttpClient {
   late Dio _dio;
   bool _isInitialized = false;
 
-  /// 初始化
   Future<void> initialize() async {
     if (_isInitialized) return;
 
-    // 初始化设备信息
     await DeviceInfoManager().initialize();
 
     _dio = Dio(_createBaseOptions());
-
-    // 添加拦截器
     _dio.interceptors.addAll([
+      _CdnSignInterceptor(),
       _HeaderInterceptor(),
       _LogInterceptor(),
     ]);
@@ -32,7 +31,6 @@ class HttpClient {
     _isInitialized = true;
   }
 
-  /// 创建基础配置
   BaseOptions _createBaseOptions() {
     return BaseOptions(
       baseUrl: EnvConfig.apiBaseUrl,
@@ -46,12 +44,13 @@ class HttpClient {
     );
   }
 
-  /// 切换环境后更新 baseUrl
+  /// 切换环境或域名池更新后刷新 baseUrl
   void updateBaseUrl() {
-    _dio.options.baseUrl = EnvConfig.apiBaseUrl;
+    if (!_isInitialized) return;
+    final domain = DomainManager().currentDomain()?.domain ?? EnvConfig.apiBaseUrl;
+    _dio.options.baseUrl = domain;
   }
 
-  /// GET 请求
   Future<Response<T>> get<T>(
     String path, {
     Map<String, dynamic>? queryParameters,
@@ -66,7 +65,6 @@ class HttpClient {
     );
   }
 
-  /// POST 请求
   Future<Response<T>> post<T>(
     String path, {
     dynamic data,
@@ -83,7 +81,6 @@ class HttpClient {
     );
   }
 
-  /// PUT 请求
   Future<Response<T>> put<T>(
     String path, {
     dynamic data,
@@ -100,7 +97,6 @@ class HttpClient {
     );
   }
 
-  /// DELETE 请求
   Future<Response<T>> delete<T>(
     String path, {
     dynamic data,
@@ -117,31 +113,52 @@ class HttpClient {
     );
   }
 
-  /// 获取 Dio 实例（用于特殊场景）
   Dio get dio => _dio;
 }
 
-/// 请求头拦截器
-/// 自动添加设备信息到请求头
-class _HeaderInterceptor extends Interceptor {
+/// CDN 加签拦截器（对齐 dqiu HttpManager / XMSport）
+class _CdnSignInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    final deviceInfo = DeviceInfoManager();
+    try {
+      final uri = options.uri;
+      final host = '${uri.scheme}://${uri.host}';
+      final entity = DomainManager().getDomain(host) ??
+          DomainManager().getDomain(options.baseUrl);
 
-    // 添加设备信息头
-    final deviceHeaders = deviceInfo.getRequestHeaders();
-    options.headers.addAll(deviceHeaders);
-
-    // 添加自定义 User-Agent
-    options.headers['User-Agent'] = deviceInfo.userAgent;
-
-    options.headers[S.xEnvHeader] = EnvConfig.current.name;
-
+      if (entity != null && entity.domainType > 0 && entity.openFlag) {
+        var urlStr = uri.toString();
+        urlStr = CdnSignUtils.maybeSignUrl(
+          urlStr,
+          domainType: entity.domainType,
+          openFlag: entity.openFlag,
+          token: entity.token,
+          signType: entity.signType,
+        );
+        final signed = Uri.parse(urlStr);
+        options.path = signed.hasQuery
+            ? '${signed.path}?${signed.query}'
+            : signed.path;
+        if (options.method.toUpperCase() == 'GET') {
+          options.queryParameters = {};
+        }
+      }
+    } catch (_) {}
     handler.next(options);
   }
 }
 
-/// 日志拦截器
+class _HeaderInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    final deviceInfo = DeviceInfoManager();
+    options.headers.addAll(deviceInfo.getRequestHeaders());
+    options.headers['User-Agent'] = deviceInfo.userAgent;
+    options.headers[S.xEnvHeader] = EnvConfig.current.name;
+    handler.next(options);
+  }
+}
+
 class _LogInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {

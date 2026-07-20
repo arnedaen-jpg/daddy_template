@@ -66,11 +66,12 @@ class _AbRootHostState extends State<AbRootHost> {
     // 2. 初始化网络权限服务（触发 iOS 网络权限弹窗）
     await NetworkPermissionService().initialize();
 
-    // 3. 初始化网络客户端
-    await HttpClient().initialize();
-
-    // 4. 初始化域名管理服务
+    // 3. 初始化域名管理（本地/快照 → ping → Service/OBS/npm 降级链）
     await DomainManager().initialize();
+
+    // 4. 初始化网络客户端（依赖域名池做 CDN 加签）
+    await HttpClient().initialize();
+    HttpClient().updateBaseUrl();
 
     // 5. 初始化配置服务
     await _configService.initialize();
