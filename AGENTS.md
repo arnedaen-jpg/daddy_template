@@ -274,3 +274,28 @@ fvm flutter build ios --release
 - `scripts/compat/compat_dq.sh` / `scripts/compat/compat_lgt.sh`：各自专项兼容与入口生成
 - `scripts/obfuscate_frameworks.sh`：Framework / Pod / dep-strings 主入口
 - `scripts/obfuscate_code.sh`：Dart AST 混淆主入口
+
+## Cursor Cloud specific instructions
+
+面向在 Cursor Cloud（Linux VM）中工作的后续代理。工具（FVM + Flutter `3.38.3`、Node、Deno、wrangler）已由更新脚本/快照装好；`fvm` 与 `deno` 已软链到 `/usr/local/bin`，可直接调用。更新脚本只做依赖刷新（`fvm flutter pub get` + `cloudflare-ab-config` 的 `npm install`）。
+
+### 平台边界（重要）
+- **本仓库主产物是 iOS-only Flutter 壳工程，无法在 Linux 上构建或运行**：`fvm flutter run` / `build ios` 需 macOS + Xcode + 模拟器；`ios/Podfile`（CocoaPods）与整条打包/签名/混淆/上传流水线（`build_flutter_ipa.sh`、`obfuscate_frameworks.sh`、`upload_ipa.sh` 等）及 `packaging/ab_factory_app`（PyObjC GUI）都是 macOS 专用。在 Linux 上不要尝试这些。
+- Linux 上可用的是：Flutter 的 `pub get` / `analyze` / `test`（Dart VM，无需模拟器），以及后端服务 `cloudflare-ab-config`（Node + wrangler 本地模式）。
+
+### Flutter 壳工程（lint/test）
+- 全部命令用 `fvm flutter ...`（见「常用命令」）。
+- `fvm flutter analyze` 会报数百个 pre-existing 问题，**并非环境问题**：主要来自 `scripts/templates/*.dart`（同步模板，引用未装依赖）与 `lib/modules/secondary/generate/*`、`lib/utils/secondary_image_base64_ext.dart`（B 面同步后才生成的文件，模板态缺失）。想看壳层代码本身用 `fvm flutter analyze lib`。
+- `fvm flutter test` 目前唯一用例 `test/widget_test.dart` 引用了已不存在的 `MyApp`，会编译失败——这是已知的过期模板测试（本文件上方已说明），测试框架本身正常，不要当作回归依据、也不要为通过它而改代码。
+
+### cloudflare-ab-config 后端（可在 Linux 端到端运行/演示）
+这是 A/B 远程配置后端（App 的 `ConfigService`/`DomainManager` 请求 `GET /client/api/config`）。本地开发用 wrangler 本地模式，**无需 Cloudflare 账号**（本地 miniflare 模拟 KV + D1）。
+- 首次需初始化本地 D1（`.wrangler/state` 已被 gitignore，快照可能不保留，缺表时会报错）：`cd cloudflare-ab-config && npx wrangler d1 migrations apply daddy-ab-logs --local`
+- 启动：`cd cloudflare-ab-config && npx wrangler dev --port 8787 --local`（就绪后监听 `http://localhost:8787`）。
+- `wrangler.toml` 默认 `ADMIN_OPEN="true"`、`DEMO_MOCK_APPLE="true"`，因此 `/admin` 无需 Token、且可用请求头 `X-Mock-Apple-ASN: 1` 模拟苹果出口（判定返回 A，仅本地/演示用）。
+- 写本地 KV（dev server 运行时可另起进程写，状态共享）：`npx wrangler kv key put --binding=CONFIG_KV "ab_config_<BundleId>" "B" --local`；键规则见 `cloudflare-ab-config/README.md`。
+- 冒烟验证：`curl "http://localhost:8787/client/api/config" -H "X-Bundle-Id: com.demo.app"` → `{"code":0,"data":{"config":"A"|"B"}}`；管理页浏览器打开 `http://localhost:8787/admin`。
+- 该子项目无 lint/test 脚本；`npx tsc` 仅类型检查（`tsconfig.json` `noEmit`）。
+
+### supabase（可选备用后端）
+`supabase/functions/daddy-ab-config` 是与 Worker 等价的另一实现（Deno + Postgres），需 Supabase CLI + Docker，较重且非必需；Worker 已覆盖同一契约。静态管理页构建器 `deno task export-static-admin` 只需 Deno。
