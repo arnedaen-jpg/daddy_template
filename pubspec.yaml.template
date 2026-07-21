@@ -30,7 +30,8 @@ dependencies:
   encrypt: ^5.0.3
   # CDN 加签 / npm 拉源解压
   crypto: ^3.0.7
-  archive: ^4.0.9
+  # 与常见 B 面依赖（如 svgaplayer_flutter）的 archive ^3.x 对齐
+  archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:
